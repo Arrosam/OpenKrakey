@@ -6,4 +6,4 @@ Per-Agent plugin lifecycle: copy independents, load private(override)+public, se
 - Implements: `loader` · Depends on: `plugin`, `event-system`, `context`, `orchestrator`
 - Status: **pending**
 
-Source under `src/`. Import only `../../contracts/*` and `../../shared/*`. Never edit contracts/ or shared/.
+Source under `src/`. Import only `../../../contracts/*` and `../../../shared/*`. Never edit contracts/ or shared/.

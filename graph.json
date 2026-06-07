@@ -19,7 +19,7 @@
       "description": "Per-Agent dumb timer: countdown + activate; rhythm controllable.",
       "depends_on_contracts": [],
       "implements_contracts": ["clock"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/clock.md"
     },
     "event-system": {
@@ -28,7 +28,7 @@
       "description": "Per-Agent independent central bus: eventbus + actionbus; clock/loader/orchestrator/plugins all connect.",
       "depends_on_contracts": [],
       "implements_contracts": ["event-system"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/event-system.md"
     },
     "orchestrator": {
@@ -73,7 +73,7 @@
       "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links.",
       "depends_on_contracts": ["agent"],
       "implements_contracts": [],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/cli.md"
     },
     "llm-gateway": {
@@ -82,7 +82,7 @@
       "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Industry-standard infra, solidified into core.",
       "depends_on_contracts": ["llm"],
       "implements_contracts": ["llm"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/llm-gateway.md"
     }
   },

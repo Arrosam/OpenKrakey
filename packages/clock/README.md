@@ -6,4 +6,4 @@ Per-Agent dumb timer: countdown + activate; rhythm controllable.
 - Implements: `clock` · Depends on: —
 - Status: **pending**
 
-Source under `src/`. Import only `../../contracts/*` and `../../shared/*`. Never edit contracts/ or shared/.
+Source under `src/`. Import only `../../../contracts/*` and `../../../shared/*`. Never edit contracts/ or shared/.

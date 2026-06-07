@@ -8,4 +8,4 @@ parse internally; API keys stay in the closure and are never exposed to plugins.
 - Implements: `llm` (Communicator/CommunicatorLibrary) · Depends on: `llm` (envelope), shared `config`
 - Status: **pending**
 
-Source under `src/`. Import only `../../contracts/*` and `../../shared/*`. Never edit contracts/ or shared/.
+Source under `src/`. Import only `../../../contracts/*` and `../../../shared/*`. Never edit contracts/ or shared/.
