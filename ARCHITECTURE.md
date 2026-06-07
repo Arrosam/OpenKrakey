@@ -7,7 +7,7 @@
 
 ## 0. 一句话定位
 
-> **内核是一个领域无关的「时间驱动 + 非阻塞 + 插件化」运行时。"Agent" 是一个独立实例，由一组插件跑在心跳上涌现出行为。** 内核不知道什么是 LLM、prompt、记忆——这些都在插件里。
+> **内核是一个领域无关的「时间驱动 + 非阻塞 + 插件化」运行时。"Agent" 是一个独立实例，由一组插件跑在心跳上涌现出行为。** 内核不含 LLM/prompt/记忆的**行为**（怎么建 prompt、调哪个模型、怎么记忆）——这些都在插件里；但它认得 LLM I/O 的通用**数据形状**，并自带一个 **LLM 通信网关**（业界通用、已固化的基础设施；密钥仅限核心）。
 
 ---
 
@@ -50,8 +50,9 @@
 
 | 范围 | 模块 | 一句话 |
 |------|------|--------|
-| 全局 | **boot** | 启动器 |
+| 全局 | **boot** | 启动器（顺带建全局 llm library） |
 | 全局 | **cli** | 配置文件管理 UI（独立工具） |
+| 全局 | **llm-gateway** | LLM 通信网关：从 `config/llm.json` 生成无 key 的 communicator library |
 | 每 Agent | **agent_instance** | 包裹一个 Agent（门面/容器） |
 | 每 Agent | **orchestrator** | 指挥（内含 context-buffer） |
 | 每 Agent | **event-system** | 独立中枢总线（事件 + 动作） |
@@ -66,7 +67,9 @@
 
 **boot** —— **只负责启动**。读取每个 Agent 个人文件夹下的配置文件（`agents/<id>/config.json`），为每个配置创建并启动一个 `agent_instance`。仅此而已（不做运行期管理）。
 
-**cli** —— **独立的配置文件管理工具**（一种 User Interface）。方便用户按正确格式增/改/删 Agent 的配置文件、维护 **Default Plugin Setting**；新建 Agent 时以 Default 为模板复制。它**与运行时解耦**——用户完全可以手改文件代替它。启动显示 Krakey ASCII logo，持续交互。
+**cli** —— **独立的配置文件管理工具**（一种 User Interface）。一个 `@inquirer/prompts` 的**方向键交互界面**：landing page → Agents / Default / **Providers(LLM 目录)** 各页,按正确格式增/改/删 Agent 配置、维护 **Default Plugin Setting** 与 `config/llm.json` 的 communicator 定义；新建 Agent 时以 Default 为模板复制。`krakey` 进 landing、`krakey agent`/`krakey default` 深链直达。它**与运行时解耦**——用户完全可以手改文件代替它。启动显示 Krakey ASCII logo。
+
+**llm-gateway** —— **LLM 通信网关**（全局基础设施）。读 `config/llm.json`(含 API key)→ 为每个 communicator 选 provider adapter(anthropic / openai-compatible,原生 `fetch`)→ 生成一个**无 key 的 `CommunicatorLibrary`**:每个 `Communicator` 内部完成"建请求 + 发送 + 解析响应/工具调用",返回规范化的 `LLMResponse`。**key 闭包内持有,绝不暴露给插件**;插件只按名字调 communicator,从而既防泄露、又能灵活切换 LLM。boot 建一份全局 library,经 agent_instance→loader 注入每个 `PluginContext.llm`。这是把"业界通用、无拓展空间"的 LLM 请求/解析**固化进核心**(R1 允许:基础设施而非策略)。
 
 ### 每个 Agent 实例内
 
@@ -116,7 +119,7 @@
 
 - **public 插件**：代码在 `public_plugin/<id>/`，所有声明它的 Agent 都从这里加载 → 它们的 `dataDir` 都指向**同一个** `public_plugin/<id>/data/` → 图书馆例子：A 存的知识 B 能读到（共享数据、各自独立实例）。
 - **independent（私有）插件**：Agent 构建时把该插件代码**复制**进 `agents/<id>/plugins/<id>/` → `dataDir` 指向本 Agent 自己的 `data/` → 数据只此 Agent 可见，且**覆盖**同名 public。
-- **PluginContext** 提供 `dataDir`（= 该插件代码目录下的 `data/`），插件读写文件/DB 都用它。
+- **PluginContext** 提供 `dataDir`（= 该插件代码目录下的 `data/`），插件读写文件/DB 都用它；还提供 **`llm`**（无 key 的 `CommunicatorLibrary`）——插件按名字取 communicator 发 LLM 请求，看不到 key/具体请求。
 - 一个插件提供任意组合：**context 块**（带 `priority`，按 id 寻址）、**actions**（注册到 actionbus）、**listeners**（订阅 eventbus）。
 - **context 块按 id 共享寻址**：块由注册它的插件维护，但任何插件都能按 id **请求增/改/删别的插件的块**（如 A 改 B 的 `BBB` 块）。
 - **优先级 = 排序 + 缓存策略**：每块声明 `priority`（数字），orchestrator 按 **大→小** 渲染并排列（高的在最上）。约定：**固定/稳定**块（身份、系统提示）给**高优先级（10000+）置顶**——既好改、又让稳定前缀提升 prompt 缓存命中；**多变**块（history、工具结果）给**低优先级（0–10000）放下面**。
@@ -161,13 +164,13 @@ OpenKrakey/
 
 ## 8. 契约（L1，纯类型）
 
-`clock`、`event-system`(EventBus+ActionBus)、`context`(ContextBlock`{id,priority,render}` / ComposedContext)、`plugin`(Plugin/PluginManifest/PluginContext——含 `dataDir` + 按 id 的 context 块 增/改/删/查)、`orchestrator`、`agent`(AgentDefinition 含 `privatePlugins?`、AgentHandle)、`loader`，外加知名 action/event 名常量。
+`clock`(含 default/current 双 interval、本拍即时 `setInterval`/`setDefaultInterval`)、`event-system`(EventBus+ActionBus)、`context`(ContextBlock`{id,priority,render}` / ComposedContext)、`plugin`(Plugin/PluginManifest/PluginContext——含 `dataDir`、无 key 的 `llm` library + 按 id 的 context 块 增/改/删/查)、`orchestrator`、`agent`(AgentDefinition 含 `privatePlugins?`、AgentHandle)、`loader`、`llm`(provider 无关的 LLM I/O envelope + 无 key 的 `Communicator`/`CommunicatorLibrary`——基础设施)，外加知名 event/action 名常量与 `Notify/Request/Reply` 事件基类。
 
 ---
 
 ## 9. 不变量（抗屎山 · 测试强制）
 
-- **R1** 核心不含领域知识（不出现 LLM/prompt/memory 概念）。
+- **R1** 核心不含领域**策略/内容**：不构造 prompt、不做 memory、不含"选哪个模型/何时调"的逻辑、不含 agent 行为或工具实现。核心**可**含稳定、业界通用的**基础设施**——数据形状（`llm` envelope、context block）与 **LLM 通信执行**（发送+解析，见 `llm-gateway`）。**API key 仅限核心**，绝不交给插件（插件只拿无 key 的 `Communicator`）。
 - **R2** 插件只经本 Agent 的 event-system + L1 契约沟通；不互相 import、不碰核心内部、不跨 Agent。
 - **R3** 一个零插件的 Agent 能跑完一拍不报错。
 - **R4** 职责单一：每个模块只做 §3 写的事（如 loader 不跑 beat、agent_instance 不 setup 插件）。
