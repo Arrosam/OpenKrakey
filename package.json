@@ -5,11 +5,18 @@
   "type": "module",
   "license": "MIT",
   "author": "Samuel",
+  "bin": {
+    "krakey": "packages/cli/src/bin.ts"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
-    "start": "tsx packages/boot/src/index.ts"
+    "start": "tsx packages/boot/src/index.ts",
+    "cli": "tsx packages/cli/src/bin.ts"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
