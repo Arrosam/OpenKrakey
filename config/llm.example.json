@@ -1,0 +1,16 @@
+{
+  "communicators": {
+    "claude": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-8",
+      "apiKey": "${ANTHROPIC_API_KEY}"
+    },
+    "gpt": {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "apiKey": "${OPENAI_API_KEY}",
+      "baseURL": "https://api.openai.com/v1"
+    }
+  },
+  "default": "claude"
+}

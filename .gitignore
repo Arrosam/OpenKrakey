@@ -135,6 +135,9 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
+# LLM communicator catalogue — holds API keys, never committed (use config/llm.example.json)
+config/llm.json
+
 # modular-dev (transient, per-session — never committed)
 .mdwt/
 .claude/modular-dev-state/
