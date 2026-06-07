@@ -223,6 +223,10 @@ export async function runInteractiveLoop(
       }
 
       if (field === "plugins") {
+        if (availablePlugins.length === 0) {
+          out("No public plugins found in public_plugin/ — nothing to choose.");
+          continue;
+        }
         draft.plugins = await ask(() =>
           checkbox({
             message: "public plugins to load",
@@ -238,6 +242,10 @@ export async function runInteractiveLoop(
       }
 
       if (field === "privatePlugins") {
+        if (availablePlugins.length === 0) {
+          out("No public plugins found in public_plugin/ — nothing to choose.");
+          continue;
+        }
         const picked = await ask(() =>
           checkbox({
             message: "private plugins (independent copies)",
