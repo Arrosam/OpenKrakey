@@ -7,8 +7,8 @@
   },
   "zones": {
     "core": {
-      "description": "The whole framework — per-Agent runtime modules + their L1 contracts + shared modules + the two global modules (boot, cli).",
-      "nodes": ["clock", "event-system", "orchestrator", "loader", "agent_instance", "boot", "cli"],
+      "description": "The whole framework — per-Agent runtime modules + their L1 contracts + shared modules + the two global modules (boot, cli) + the LLM communication gateway.",
+      "nodes": ["clock", "event-system", "orchestrator", "loader", "agent_instance", "boot", "cli", "llm-gateway"],
       "overview": "overviews/zones/core.md"
     }
   },
@@ -34,8 +34,8 @@
     "orchestrator": {
       "zone": "core",
       "path": "packages/orchestrator",
-      "description": "Per-Agent conductor; CONTAINS the context-buffer. Compose by priority, expose buses, dispatch async, coordinate clock.",
-      "depends_on_contracts": ["event-system", "clock", "context"],
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather→compose→llm.request; dispatch tool calls from llm.return.",
+      "depends_on_contracts": ["event-system", "clock", "context", "llm"],
       "implements_contracts": ["orchestrator"],
       "status": "pending",
       "overview": "overviews/nodes/orchestrator.md"
@@ -43,8 +43,8 @@
     "loader": {
       "zone": "core",
       "path": "packages/loader",
-      "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, register (setup) into event-system, teardown.",
-      "depends_on_contracts": ["plugin", "event-system", "context", "orchestrator"],
+      "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, inject llm library, register (setup) into event-system, teardown.",
+      "depends_on_contracts": ["plugin", "event-system", "context", "orchestrator", "llm"],
       "implements_contracts": ["loader"],
       "status": "pending",
       "overview": "overviews/nodes/loader.md"
@@ -52,8 +52,8 @@
     "agent_instance": {
       "zone": "core",
       "path": "packages/agent_instance",
-      "description": "Wraps ONE Agent: holds+wires clock+event-system+orchestrator+loader; start()->loader loads->orchestrator conducts; stop().",
-      "depends_on_contracts": ["clock", "event-system", "orchestrator", "loader", "agent"],
+      "description": "Wraps ONE Agent: holds+wires clock+event-system+orchestrator+loader; receives the global llm library; start()->loader loads->orchestrator conducts; stop().",
+      "depends_on_contracts": ["clock", "event-system", "orchestrator", "loader", "agent", "llm"],
       "implements_contracts": ["agent"],
       "status": "pending",
       "overview": "overviews/nodes/agent_instance.md"
@@ -61,8 +61,8 @@
     "boot": {
       "zone": "core",
       "path": "packages/boot",
-      "description": "Global startup ONLY: read each agent's config file, build + launch each agent_instance. Composition root.",
-      "depends_on_contracts": ["agent"],
+      "description": "Global startup ONLY: read each agent's config + config/llm.json, build the global llm library, build + launch each agent_instance. Composition root.",
+      "depends_on_contracts": ["agent", "llm"],
       "implements_contracts": [],
       "status": "pending",
       "overview": "overviews/nodes/boot.md"
@@ -70,11 +70,20 @@
     "cli": {
       "zone": "core",
       "path": "packages/cli",
-      "description": "Global standalone config-file management tool (UI): create/edit agent configs from a Default Plugin Setting; Krakey logo.",
+      "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links.",
       "depends_on_contracts": ["agent"],
       "implements_contracts": [],
       "status": "pending",
       "overview": "overviews/nodes/cli.md"
+    },
+    "llm-gateway": {
+      "zone": "core",
+      "path": "packages/llm-gateway",
+      "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Industry-standard infra, solidified into core.",
+      "depends_on_contracts": ["llm"],
+      "implements_contracts": ["llm"],
+      "status": "pending",
+      "overview": "overviews/nodes/llm-gateway.md"
     }
   },
   "contracts": {
@@ -126,12 +135,19 @@
       "test": "tests/loader.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/loader.md"
+    },
+    "llm": {
+      "path": "contracts/llm",
+      "connects": ["llm-gateway", "orchestrator", "loader", "agent_instance", "boot"],
+      "test": "tests/llm.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/llm.md"
     }
   },
   "shared": {
     "actions": { "path": "shared/actions", "description": "Well-known action/event name constants.", "status": "done" },
     "errors": { "path": "shared/errors", "description": "Common error types.", "status": "done" },
     "logging": { "path": "shared/logging", "description": "Minimal logger interface + console impl.", "status": "done" },
-    "config": { "path": "shared/config", "description": "OpenKrakeyConfig / DefaultAgentSetting types + path constants.", "status": "pending" }
+    "config": { "path": "shared/config", "description": "OpenKrakeyConfig / DefaultAgentSetting / LLMConfig types + path constants.", "status": "done" }
   }
 }

@@ -9,7 +9,9 @@ loader (loads + builds PluginContext), orchestrator (owns the block store) ↔ p
 
 ## Interface definition
 - `PluginManifest` = `{ id, version, requires?, provides?, configSchema? }`.
-- `PluginContext` = `{ agentId, events, actions, config, dataDir, setBlock, getBlock, removeBlock, listBlocks, log }`.
+- `PluginContext` = `{ agentId, events, actions, config, dataDir, llm, setBlock, getBlock, removeBlock, listBlocks, log }`.
+  `llm` is a key-less `CommunicatorLibrary` (from `contracts/llm`) — a plugin picks a communicator by
+  name to make LLM requests; it never sees API keys or the request wire-format.
 - `Plugin` = `{ manifest, setup(ctx)→void|Promise, teardown?()→void|Promise }`.
 
 ## Behavioral constraints
