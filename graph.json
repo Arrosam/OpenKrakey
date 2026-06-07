@@ -37,7 +37,7 @@
       "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather→compose→llm.request; dispatch tool calls from llm.return.",
       "depends_on_contracts": ["event-system", "clock", "context", "llm"],
       "implements_contracts": ["orchestrator"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/orchestrator.md"
     },
     "loader": {
@@ -46,7 +46,7 @@
       "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, inject llm library, register (setup) into event-system, teardown.",
       "depends_on_contracts": ["plugin", "event-system", "context", "orchestrator", "llm"],
       "implements_contracts": ["loader"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/loader.md"
     },
     "agent_instance": {
@@ -55,7 +55,7 @@
       "description": "Wraps ONE Agent: holds+wires clock+event-system+orchestrator+loader; receives the global llm library; start()->loader loads->orchestrator conducts; stop().",
       "depends_on_contracts": ["clock", "event-system", "orchestrator", "loader", "agent", "llm"],
       "implements_contracts": ["agent"],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/agent_instance.md"
     },
     "boot": {
@@ -64,7 +64,7 @@
       "description": "Global startup ONLY: read each agent's config + config/llm.json, build the global llm library, build + launch each agent_instance. Composition root.",
       "depends_on_contracts": ["agent", "llm"],
       "implements_contracts": [],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/boot.md"
     },
     "cli": {
