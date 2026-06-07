@@ -6,4 +6,4 @@ Wraps ONE Agent: holds + wires clock + event-system + orchestrator + loader; sta
 - Implements: `agent` · Depends on: `clock`, `event-system`, `orchestrator`, `loader`
 - Status: **pending**
 
-Source under `src/`. Import only `../../contracts/*` and `../../shared/*`. Never edit contracts/ or shared/.
+Source under `src/`. Import only `../../../contracts/*` and `../../../shared/*`. Never edit contracts/ or shared/.

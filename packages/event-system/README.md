@@ -6,4 +6,4 @@ Per-Agent independent central bus: eventbus + actionbus.
 - Implements: `event-system` · Depends on: —
 - Status: **pending**
 
-Source under `src/`. Import only `../../contracts/*` and `../../shared/*`. Never edit contracts/ or shared/.
+Source under `src/`. Import only `../../../contracts/*` and `../../../shared/*`. Never edit contracts/ or shared/.
