@@ -12,14 +12,18 @@ import type {
 } from "../../../contracts/event-system";
 
 function createEventBus(): EventBus {
-  const listeners = new Map<string, Set<(payload: unknown) => void>>();
+  // Array (not Set) so each on() is an INDEPENDENT subscription: the same
+  // handler may be registered twice, and each registration has its own Unsub
+  // that removes exactly one occurrence (so one plugin's unsub can never remove
+  // another's subscription of the same shared function).
+  const listeners = new Map<string, Array<(payload: unknown) => void>>();
 
   return {
     emit(event: string, payload?: unknown): void {
-      const set = listeners.get(event);
-      if (set === undefined || set.size === 0) return;
-      // Snapshot so unsubscribes during emit don't corrupt iteration.
-      for (const handler of [...set]) {
+      const arr = listeners.get(event);
+      if (arr === undefined || arr.length === 0) return;
+      // Snapshot so (un)subscribes during emit don't corrupt iteration.
+      for (const handler of [...arr]) {
         try {
           handler(payload);
         } catch {
@@ -29,14 +33,20 @@ function createEventBus(): EventBus {
     },
 
     on(event: string, handler: (payload: unknown) => void): Unsub {
-      let set = listeners.get(event);
-      if (set === undefined) {
-        set = new Set();
-        listeners.set(event, set);
+      let arr = listeners.get(event);
+      if (arr === undefined) {
+        arr = [];
+        listeners.set(event, arr);
       }
-      set.add(handler);
+      arr.push(handler);
+      let active = true;
       return () => {
-        set.delete(handler);
+        if (!active) return; // stale-safe: each Unsub removes at most one occurrence
+        active = false;
+        const current = listeners.get(event);
+        if (current === undefined) return;
+        const i = current.indexOf(handler);
+        if (i !== -1) current.splice(i, 1);
       };
     },
   };
@@ -55,7 +65,11 @@ function createActionBus(): ActionBus {
       }
       handlers.set(action, handler);
       return () => {
-        handlers.delete(action);
+        // Identity-safe: a stale Unsub must NOT remove a re-registered action
+        // of the same name (only delete if THIS handler is still the live one).
+        if (handlers.get(action) === handler) {
+          handlers.delete(action);
+        }
       };
     },
 
