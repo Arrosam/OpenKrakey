@@ -134,3 +134,12 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# modular-dev (transient, per-session — never committed)
+.mdwt/
+.claude/modular-dev-state/
+.claude/modular-dev-queue-*.json
+.claude/agents/_*.md
+
+# build output
+.dist/

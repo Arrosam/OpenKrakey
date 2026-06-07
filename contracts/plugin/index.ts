@@ -1,0 +1,53 @@
+/**
+ * Contract: plugin  ·  connects: loader (loads + builds PluginContext), orchestrator (block store)
+ *
+ * The only extensibility surface. A plugin contributes any combination of context
+ * blocks, actions, and event listeners — all via the per-Agent EventSystem it is
+ * handed at `setup`. It NEVER imports another plugin or core internals.
+ *
+ * Context blocks are addressed BY ID and are NOT owner-locked: any plugin may
+ * add / modify / remove / read ANY block by id (e.g. plugin A edits plugin B's
+ * block). The block store lives in the orchestrator; these ops delegate to it.
+ */
+import type { EventBus, ActionBus, Unsub } from "../event-system";
+import type { ContextBlock } from "../context";
+
+export interface PluginManifest {
+  id: string;
+  version: string;
+  /** Plugin ids / action names this plugin needs; the loader verifies at load. */
+  requires?: string[];
+  provides?: string[];
+  configSchema?: unknown;
+}
+
+/** Everything a plugin is handed at setup. Scoped to exactly one Agent. */
+export interface PluginContext {
+  readonly agentId: string;
+  readonly events: EventBus;
+  readonly actions: ActionBus;
+  /** This plugin's config slice (from AgentDefinition.config[pluginId]). */
+  readonly config: unknown;
+  /**
+   * This plugin's data directory — where it persists files/DB. Follows the
+   * plugin's code location: a PUBLIC plugin's dataDir is shared across agents
+   * (shared knowledge); a PRIVATE/independent plugin's dataDir is agent-isolated.
+   */
+  readonly dataDir: string;
+
+  // ---- context block ops (BY ID; may touch any plugin's block) ----
+  /** Add or replace (by id) a context block. */
+  setBlock(block: ContextBlock): void;
+  getBlock(id: string): ContextBlock | undefined;
+  removeBlock(id: string): boolean;
+  listBlocks(): Array<{ id: string; priority: number }>;
+
+  log(msg: string): void;
+}
+
+export interface Plugin {
+  manifest: PluginManifest;
+  /** Register actions/listeners/context blocks. Called once by the loader. */
+  setup(ctx: PluginContext): void | Promise<void>;
+  teardown?(): void | Promise<void>;
+}

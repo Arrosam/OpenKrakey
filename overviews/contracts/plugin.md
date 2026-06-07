@@ -1,0 +1,24 @@
+# Contract: plugin
+
+## Purpose
+What a plugin IS and what it's handed at setup. The sole extensibility surface — kept small enough for
+an LLM to author plugins (self-growth).
+
+## Connects
+loader (loads + builds PluginContext), orchestrator (owns the block store) ↔ plugins (implementors)
+
+## Interface definition
+- `PluginManifest` = `{ id, version, requires?, provides?, configSchema? }`.
+- `PluginContext` = `{ agentId, events, actions, config, dataDir, setBlock, getBlock, removeBlock, listBlocks, log }`.
+- `Plugin` = `{ manifest, setup(ctx)→void|Promise, teardown?()→void|Promise }`.
+
+## Behavioral constraints
+- `setup` called once per Agent (by the loader); `teardown` once on stop.
+- A plugin registers everything in `setup`; never imports another plugin or core internals.
+- `dataDir` = this plugin's persistent storage; PUBLIC plugins share it (shared knowledge), PRIVATE
+  ones are isolated.
+- Context blocks are addressed BY ID and are NOT owner-locked: any plugin may set/get/remove/list ANY
+  block (e.g. A edits B's `BBB`). These ops delegate to the orchestrator's block store.
+
+## Status
+locked

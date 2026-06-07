@@ -1,0 +1,19 @@
+{
+  "name": "openkrakey",
+  "version": "0.0.0",
+  "description": "Minimalist microkernel autonomous-agent framework — time-driven, non-blocking, plugin-everything.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Samuel",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
+    "start": "tsx packages/boot/src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

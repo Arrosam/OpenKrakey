@@ -1,0 +1,2 @@
+# Edge tests (one file per contract: tests/<contract-id>.test.ts) are written here by the
+# modular-dev test-writer phase, BEFORE node development. Run via: npm test (tsx).

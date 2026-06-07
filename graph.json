@@ -1,0 +1,137 @@
+{
+  "project": {
+    "name": "OpenKrakey",
+    "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
+    "created_at": "2026-06-07T00:00:00Z",
+    "updated_at": "2026-06-07T00:00:00Z"
+  },
+  "zones": {
+    "core": {
+      "description": "The whole framework — per-Agent runtime modules + their L1 contracts + shared modules + the two global modules (boot, cli).",
+      "nodes": ["clock", "event-system", "orchestrator", "loader", "agent_instance", "boot", "cli"],
+      "overview": "overviews/zones/core.md"
+    }
+  },
+  "nodes": {
+    "clock": {
+      "zone": "core",
+      "path": "packages/clock",
+      "description": "Per-Agent dumb timer: countdown + activate; rhythm controllable.",
+      "depends_on_contracts": [],
+      "implements_contracts": ["clock"],
+      "status": "pending",
+      "overview": "overviews/nodes/clock.md"
+    },
+    "event-system": {
+      "zone": "core",
+      "path": "packages/event-system",
+      "description": "Per-Agent independent central bus: eventbus + actionbus; clock/loader/orchestrator/plugins all connect.",
+      "depends_on_contracts": [],
+      "implements_contracts": ["event-system"],
+      "status": "pending",
+      "overview": "overviews/nodes/event-system.md"
+    },
+    "orchestrator": {
+      "zone": "core",
+      "path": "packages/orchestrator",
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Compose by priority, expose buses, dispatch async, coordinate clock.",
+      "depends_on_contracts": ["event-system", "clock", "context"],
+      "implements_contracts": ["orchestrator"],
+      "status": "pending",
+      "overview": "overviews/nodes/orchestrator.md"
+    },
+    "loader": {
+      "zone": "core",
+      "path": "packages/loader",
+      "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, register (setup) into event-system, teardown.",
+      "depends_on_contracts": ["plugin", "event-system", "context", "orchestrator"],
+      "implements_contracts": ["loader"],
+      "status": "pending",
+      "overview": "overviews/nodes/loader.md"
+    },
+    "agent_instance": {
+      "zone": "core",
+      "path": "packages/agent_instance",
+      "description": "Wraps ONE Agent: holds+wires clock+event-system+orchestrator+loader; start()->loader loads->orchestrator conducts; stop().",
+      "depends_on_contracts": ["clock", "event-system", "orchestrator", "loader", "agent"],
+      "implements_contracts": ["agent"],
+      "status": "pending",
+      "overview": "overviews/nodes/agent_instance.md"
+    },
+    "boot": {
+      "zone": "core",
+      "path": "packages/boot",
+      "description": "Global startup ONLY: read each agent's config file, build + launch each agent_instance. Composition root.",
+      "depends_on_contracts": ["agent"],
+      "implements_contracts": [],
+      "status": "pending",
+      "overview": "overviews/nodes/boot.md"
+    },
+    "cli": {
+      "zone": "core",
+      "path": "packages/cli",
+      "description": "Global standalone config-file management tool (UI): create/edit agent configs from a Default Plugin Setting; Krakey logo.",
+      "depends_on_contracts": ["agent"],
+      "implements_contracts": [],
+      "status": "pending",
+      "overview": "overviews/nodes/cli.md"
+    }
+  },
+  "contracts": {
+    "clock": {
+      "path": "contracts/clock",
+      "connects": ["clock", "orchestrator", "agent_instance"],
+      "test": "tests/clock.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/clock.md"
+    },
+    "event-system": {
+      "path": "contracts/event-system",
+      "connects": ["event-system", "orchestrator", "loader", "agent_instance"],
+      "test": "tests/event-system.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/event-system.md"
+    },
+    "context": {
+      "path": "contracts/context",
+      "connects": ["orchestrator", "loader"],
+      "test": "tests/context.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/context.md"
+    },
+    "plugin": {
+      "path": "contracts/plugin",
+      "connects": ["loader", "orchestrator"],
+      "test": "tests/plugin.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/plugin.md"
+    },
+    "orchestrator": {
+      "path": "contracts/orchestrator",
+      "connects": ["orchestrator", "agent_instance", "loader"],
+      "test": "tests/orchestrator.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/orchestrator.md"
+    },
+    "agent": {
+      "path": "contracts/agent",
+      "connects": ["agent_instance", "boot", "cli"],
+      "test": "tests/agent.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/agent.md"
+    },
+    "loader": {
+      "path": "contracts/loader",
+      "connects": ["loader", "agent_instance"],
+      "test": "tests/loader.test.ts",
+      "status": "locked",
+      "overview": "overviews/contracts/loader.md"
+    }
+  },
+  "shared": {
+    "actions": { "path": "shared/actions", "description": "Well-known action/event name constants.", "status": "done" },
+    "errors": { "path": "shared/errors", "description": "Common error types.", "status": "done" },
+    "logging": { "path": "shared/logging", "description": "Minimal logger interface + console impl.", "status": "done" },
+    "config": { "path": "shared/config", "description": "OpenKrakeyConfig / DefaultAgentSetting types + path constants.", "status": "pending" }
+  }
+}
