@@ -1,0 +1,762 @@
+/**
+ * Black-box edge tests for the `loader` contract (`createLoader`).
+ *
+ * Scope: ONLY the public surface of a Loader built by
+ *   createLoader({ agentId, def, events, orchestrator, library,
+ *                  publicPluginDir, agentDir, log? }) : Loader
+ * with `load(): Promise<void>` / `teardown(): Promise<void>` (contracts/loader),
+ * driven against:
+ *   - a REAL event-system (createEventSystem) so plugin wiring is genuine,
+ *   - a STUB Orchestrator whose block-store is a plain Map (so we can observe the
+ *     PluginContext block-op delegation),
+ *   - a SENTINEL CommunicatorLibrary (so we can prove the key-less `llm` library
+ *     is injected by identity into every PluginContext),
+ *   - real plugin modules written to a per-test OS temp dir and dynamically
+ *     imported by the loader.
+ *
+ * Plugins are made OBSERVABLE: each writes an `index.ts` that exports a `calls`
+ * array and pushes the exact PluginContext it received in `setup`. Because ESM
+ * caches modules by resolved file URL, the test re-imports the SAME file the
+ * loader imported (`pathToFileURL(<dir>/<id>/index.ts)`) and inspects
+ * `mod.calls[0]` — i.e. the very context object the loader passed. Every test
+ * gets a FRESH temp dir, so each plugin file has a unique URL and there is no
+ * cross-test ESM cache bleed.
+ *
+ * Nothing here reads node/contract source or assumes implementation internals;
+ * behavior is taken from contracts/loader, contracts/plugin and the loader
+ * overviews (overviews/contracts/loader.md, overviews/nodes/loader.md).
+ */
+import { test, beforeEach, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createLoader } from "../packages/loader/src";
+import { createEventSystem } from "../packages/event-system/src";
+import { DependencyError, PluginLoadError } from "../shared/errors";
+import type { Orchestrator } from "../contracts/orchestrator";
+import type { CommunicatorLibrary } from "../contracts/llm";
+import type { ContextBlock } from "../contracts/context";
+import type { AgentDefinition } from "../contracts/agent";
+
+// ---------------------------------------------------------------------------
+// per-test sandbox (all ABSOLUTE paths) + teardown
+// ---------------------------------------------------------------------------
+
+let tmp: string;
+/** public_plugin/ — shared/public plugin source location. */
+let publicPluginDir: string;
+/** agents/<id>/ — this Agent's home (its private plugins live in plugins/). */
+let agentDir: string;
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-loader-"));
+  publicPluginDir = path.join(tmp, "public_plugin");
+  agentDir = path.join(tmp, "agents", "ag1");
+  fs.mkdirSync(publicPluginDir, { recursive: true });
+  fs.mkdirSync(agentDir, { recursive: true });
+});
+
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// SENTINEL library — proves the exact (key-less) library object is injected.
+// `list()` returns a recognizable marker so we can also deep-equal through ctx.
+// ---------------------------------------------------------------------------
+
+const library: CommunicatorLibrary = {
+  get: () => undefined,
+  has: () => false,
+  list: () => ["SENTINEL"],
+};
+
+// ---------------------------------------------------------------------------
+// STUB orchestrator — implements Orchestrator; block-store is a plain Map so we
+// can verify the loader wires PluginContext's block ops THROUGH to it.
+// ---------------------------------------------------------------------------
+
+function stubOrchestrator(): Orchestrator & { blocks: Map<string, ContextBlock> } {
+  const blocks = new Map<string, ContextBlock>();
+  return {
+    blocks,
+    start() {},
+    stop() {},
+    setBlock(b: ContextBlock) {
+      blocks.set(b.id, b);
+    },
+    getBlock(id: string) {
+      return blocks.get(id);
+    },
+    removeBlock(id: string) {
+      return blocks.delete(id);
+    },
+    listBlocks() {
+      return [...blocks.values()].map((b) => ({ id: b.id, priority: b.priority }));
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// plugin writers — emit real `index.ts` modules into <dir>/<id>/.
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a minimal, OBSERVABLE plugin. `body` is the object literal passed to
+ * `export default` — it must include at least { manifest, setup }. The module
+ * also exports a `calls` array; the supplied body's setup is expected to push
+ * the ctx into it (the default body below does so).
+ */
+function writePlugin(dir: string, id: string, body: string): string {
+  const pdir = path.join(dir, id);
+  fs.mkdirSync(pdir, { recursive: true });
+  const file = path.join(pdir, "index.ts");
+  fs.writeFileSync(file, body, "utf8");
+  return file;
+}
+
+/**
+ * The canonical observable plugin source: records every setup ctx in `calls`,
+ * and (optionally) records teardown invocations in `teardowns`. `version` and
+ * `marker` distinguish two same-id copies (public vs private). `requires` is
+ * baked into the manifest verbatim. `setupBody` lets a test add extra behavior
+ * inside setup (e.g. ctx.setBlock(...)). `orderFile`/`orderTag`, when given,
+ * make teardown append a tag to a shared on-disk JSON array (for cross-module
+ * ordering assertions). `throwOnTeardown` makes teardown throw.
+ *
+ * The module also exports an `obs` object; `setupBody` may write observations
+ * into it (e.g. obs.x = ctx.getBlock(...)) WITHOUT mutating the (possibly frozen)
+ * ctx, so read-through assertions stay implementation-agnostic.
+ */
+function observablePlugin(opts: {
+  id: string;
+  version?: string;
+  marker?: string;
+  requires?: string[];
+  setupBody?: string;
+  orderFile?: string;
+  orderTag?: string;
+  throwOnTeardown?: boolean;
+}): string {
+  const {
+    id,
+    version = "1",
+    marker = id,
+    requires,
+    setupBody = "",
+    orderFile,
+    orderTag = id,
+    throwOnTeardown = false,
+  } = opts;
+
+  const requiresLiteral = requires ? `, requires: ${JSON.stringify(requires)}` : "";
+
+  // teardown appends to a shared order file (if given), optionally then throws.
+  const appendOrder = orderFile
+    ? `
+    const fs = await import("node:fs");
+    const f = ${JSON.stringify(orderFile)};
+    let arr = [];
+    try { arr = JSON.parse(fs.readFileSync(f, "utf8")); } catch {}
+    arr.push(${JSON.stringify(orderTag)});
+    fs.writeFileSync(f, JSON.stringify(arr), "utf8");`
+    : "";
+  const throwStmt = throwOnTeardown ? `\n    throw new Error("teardown of ${id} blew up");` : "";
+
+  return `
+export const calls = [];
+export const teardowns = [];
+export const obs = {};
+export const MARKER = ${JSON.stringify(marker)};
+export default {
+  manifest: { id: ${JSON.stringify(id)}, version: ${JSON.stringify(version)}${requiresLiteral} },
+  async setup(ctx) {
+    calls.push(ctx);
+    ${setupBody}
+  },
+  async teardown() {
+    teardowns.push(${JSON.stringify(orderTag)});${appendOrder}${throwStmt}
+  },
+};
+`;
+}
+
+/**
+ * Re-import the SAME module file the loader imported. ESM caches by URL, so this
+ * returns the identical instance — including its live `calls`/`teardowns`.
+ */
+async function importPlugin(dir: string, id: string): Promise<any> {
+  const file = path.join(dir, id, "index.ts");
+  return import(pathToFileURL(file).href);
+}
+
+/** Build a loader for a given AgentDefinition wired to this test's sandbox. */
+function makeLoader(def: AgentDefinition, orchestrator = stubOrchestrator()) {
+  const sys = createEventSystem();
+  const loader = createLoader({
+    agentId: def.id,
+    def,
+    events: sys,
+    orchestrator,
+    library,
+    publicPluginDir,
+    agentDir,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  return { loader, sys, orchestrator };
+}
+
+/** A representative AgentDefinition (override fields as needed). */
+function def(over: Partial<AgentDefinition> = {}): AgentDefinition {
+  return { id: "ag1", intervalMs: 1000, plugins: [], ...over };
+}
+
+// ===========================================================================
+// Factory / shape
+// ===========================================================================
+
+test("createLoader returns an object exposing load() and teardown()", () => {
+  const { loader } = makeLoader(def());
+  assert.ok(loader, "factory should return a value");
+  assert.equal(typeof loader, "object");
+  assert.equal(typeof loader.load, "function");
+  assert.equal(typeof loader.teardown, "function");
+});
+
+test("createLoader works without the optional `log` dep", async () => {
+  const sys = createEventSystem();
+  const loader = createLoader({
+    agentId: "ag1",
+    def: def(),
+    events: sys,
+    orchestrator: stubOrchestrator(),
+    library,
+    publicPluginDir,
+    agentDir,
+    // no log
+  });
+  await assert.doesNotReject(loader.load(), "empty load must resolve without a logger");
+});
+
+// ===========================================================================
+// Behavior 1 — empty plugins/privatePlugins => load()/teardown() are no-ops
+// ===========================================================================
+
+test("empty def: load() resolves and nothing is loaded; teardown() also resolves", async () => {
+  const { loader, orchestrator } = makeLoader(def({ plugins: [], privatePlugins: [] }));
+  await assert.doesNotReject(loader.load(), "a bare agent's load() must resolve");
+  assert.deepEqual(orchestrator.listBlocks(), [], "no plugin => no blocks registered");
+  await assert.doesNotReject(loader.teardown(), "teardown with nothing loaded must resolve");
+});
+
+test("empty def: plugins/privatePlugins omitted entirely still resolves cleanly", async () => {
+  // Only the required AgentDefinition fields; plugins:[] is required by the type
+  // but privatePlugins is omitted.
+  const { loader } = makeLoader(def({ plugins: [] }));
+  await assert.doesNotReject(loader.load());
+});
+
+test("empty def: teardown() before load() does not reject", async () => {
+  const { loader } = makeLoader(def({ plugins: [] }));
+  await assert.doesNotReject(loader.teardown(), "teardown() with no prior load must be safe");
+});
+
+// ===========================================================================
+// Behavior 2 — load a declared PUBLIC plugin; verify the built PluginContext
+// ===========================================================================
+
+test("public load: a declared public plugin's setup runs exactly once", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const mod = await importPlugin(publicPluginDir, "p1");
+  assert.equal(mod.calls.length, 1, "setup must be called exactly once");
+});
+
+test("public load: PluginContext carries agentId === def.id and the real buses", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader, sys } = makeLoader(def({ id: "ag1", plugins: ["p1"] }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.ok(ctx, "a ctx must have been captured");
+  assert.equal(ctx.agentId, "ag1", "ctx.agentId must equal def.id");
+  assert.equal(ctx.events, sys.events, "ctx.events must be the Agent's eventbus (identity)");
+  assert.equal(ctx.actions, sys.actions, "ctx.actions must be the Agent's actionbus (identity)");
+});
+
+test("public load: ctx.dataDir === <publicPluginDir>/p1/data (public => shared location)", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.equal(
+    ctx.dataDir,
+    path.join(publicPluginDir, "p1", "data"),
+    "a public plugin's dataDir must follow its public code location",
+  );
+});
+
+test("public load: ctx.llm === the injected library (identity) and is key-less", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  // Identity: the very CommunicatorLibrary handed to createLoader is injected.
+  assert.equal(ctx.llm, library, "ctx.llm must be the exact key-less library object");
+  assert.deepEqual(ctx.llm.list(), ["SENTINEL"], "ctx.llm.list() proves it is OUR sentinel library");
+  // The key-less surface exposes only get/has/list — no secrets/wire-format.
+  assert.equal(typeof ctx.llm.get, "function");
+  assert.equal(typeof ctx.llm.has, "function");
+  assert.equal(typeof ctx.llm.list, "function");
+});
+
+test("public load: ctx.config is def.config[pluginId] when present", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const cfg = { city: "Oslo", units: "metric" };
+  const { loader } = makeLoader(def({ plugins: ["p1"], config: { p1: cfg } }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.deepEqual(ctx.config, cfg, "ctx.config must be the plugin's slice of def.config");
+});
+
+test("public load: ctx.config defaults to {} when def.config has no slice for the plugin", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  // def.config present but without a p1 key.
+  const { loader } = makeLoader(def({ plugins: ["p1"], config: { other: { a: 1 } } }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.deepEqual(ctx.config, {}, "missing config slice must default to an empty object");
+});
+
+test("public load: ctx.config defaults to {} when def.config is entirely absent", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] })); // no config at all
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.deepEqual(ctx.config, {}, "absent def.config must still yield {} for the slice");
+});
+
+test("public load: ctx exposes the full PluginContext block-op + log surface", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
+  assert.equal(typeof ctx.setBlock, "function");
+  assert.equal(typeof ctx.getBlock, "function");
+  assert.equal(typeof ctx.removeBlock, "function");
+  assert.equal(typeof ctx.listBlocks, "function");
+  assert.equal(typeof ctx.log, "function");
+});
+
+test("public load: two declared public plugins both load, each with its own ctx", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2" }));
+  const { loader } = makeLoader(def({ plugins: ["p1", "p2"] }));
+  await loader.load();
+
+  const m1 = await importPlugin(publicPluginDir, "p1");
+  const m2 = await importPlugin(publicPluginDir, "p2");
+  assert.equal(m1.calls.length, 1, "p1.setup ran once");
+  assert.equal(m2.calls.length, 1, "p2.setup ran once");
+  assert.equal(m1.calls[0].dataDir, path.join(publicPluginDir, "p1", "data"));
+  assert.equal(m2.calls[0].dataDir, path.join(publicPluginDir, "p2", "data"));
+});
+
+// ===========================================================================
+// Behavior 3 — PluginContext block ops delegate to the orchestrator's store
+// ===========================================================================
+
+test("block delegation: ctx.setBlock in setup lands in the orchestrator's store", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({
+      id: "p1",
+      setupBody: `ctx.setBlock({ id: "b", priority: 1, render: () => "x" });`,
+    }),
+  );
+  const { loader, orchestrator } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const got = orchestrator.getBlock("b");
+  assert.ok(got, "the block set via ctx must be recorded in the orchestrator store");
+  assert.equal(got!.id, "b");
+  assert.equal(got!.priority, 1);
+  assert.equal(got!.render(), "x", "render must be preserved through the delegation");
+});
+
+test("block delegation: ctx.getBlock/listBlocks read THROUGH the orchestrator store", async () => {
+  // Pre-seed a block in the shared orchestrator, then have the plugin read it.
+  const orchestrator = stubOrchestrator();
+  orchestrator.setBlock({ id: "pre", priority: 7, render: () => "PRE" });
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({
+      id: "p1",
+      // Record what the plugin observed via ctx into the module-level `obs`
+      // (never mutate ctx itself — it may be frozen).
+      setupBody: `
+        obs.sawPre = ctx.getBlock("pre");
+        obs.list = ctx.listBlocks();`,
+    }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), orchestrator);
+  await loader.load();
+
+  const obs = (await importPlugin(publicPluginDir, "p1")).obs;
+  assert.ok(obs.sawPre, "ctx.getBlock must return the orchestrator's pre-existing block");
+  assert.equal(obs.sawPre.priority, 7);
+  assert.deepEqual(obs.list, [{ id: "pre", priority: 7 }], "ctx.listBlocks reflects the store");
+});
+
+test("block delegation: ctx.removeBlock deletes from the orchestrator store", async () => {
+  const orchestrator = stubOrchestrator();
+  orchestrator.setBlock({ id: "gone", priority: 1, render: () => "G" });
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({
+      id: "p1",
+      setupBody: `obs.removed = ctx.removeBlock("gone");`,
+    }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), orchestrator);
+  await loader.load();
+
+  const obs = (await importPlugin(publicPluginDir, "p1")).obs;
+  assert.equal(obs.removed, true, "removeBlock should report it removed an existing block");
+  assert.equal(orchestrator.getBlock("gone"), undefined, "the block must be gone from the store");
+});
+
+// ===========================================================================
+// Behavior 4 — private folder OVERRIDES same-id public
+// ===========================================================================
+
+test("override: a private same-id plugin is loaded INSTEAD of the public one", async () => {
+  // Same id "p1" in both public and the agent's private plugins folder, with
+  // distinct markers/versions so we can tell which one ran.
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", version: "PUB", marker: "PUBLIC" }));
+  const privDir = path.join(agentDir, "plugins");
+  writePlugin(privDir, "p1", observablePlugin({ id: "p1", version: "PRIV", marker: "PRIVATE" }));
+
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const pub = await importPlugin(publicPluginDir, "p1");
+  const priv = await importPlugin(privDir, "p1");
+
+  assert.equal(priv.calls.length, 1, "the PRIVATE copy must be the one that ran");
+  assert.equal(pub.calls.length, 0, "the PUBLIC copy must NOT run when a private overrides it");
+  assert.equal(priv.MARKER, "PRIVATE", "sanity: we imported the private module");
+});
+
+test("override: the overriding private plugin's dataDir follows the PRIVATE location", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", marker: "PUBLIC" }));
+  const privDir = path.join(agentDir, "plugins");
+  writePlugin(privDir, "p1", observablePlugin({ id: "p1", marker: "PRIVATE" }));
+
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await loader.load();
+
+  const ctx = (await importPlugin(privDir, "p1")).calls[0];
+  assert.equal(
+    ctx.dataDir,
+    path.join(privDir, "p1", "data"),
+    "an overriding private plugin's dataDir must be agent-isolated (under agents/<id>/plugins/)",
+  );
+});
+
+// ===========================================================================
+// Behavior 5 — privatePlugins are COPIED into the agent, then loaded
+// ===========================================================================
+
+test("privatePlugins copy: a declared independent is copied to agents/<id>/plugins/<id> and loaded", async () => {
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
+  const dest = path.join(agentDir, "plugins", "p2");
+  assert.equal(fs.existsSync(dest), false, "precondition: no private copy yet");
+
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
+  await loader.load();
+
+  assert.equal(fs.existsSync(dest), true, "load() must COPY the independent into the agent");
+  assert.equal(
+    fs.existsSync(path.join(dest, "index.ts")),
+    true,
+    "the copied plugin's module must be present at the destination",
+  );
+
+  // And it must have been LOADED (from the copied/private location).
+  const copied = await importPlugin(path.join(agentDir, "plugins"), "p2");
+  assert.equal(copied.calls.length, 1, "the copied independent must be loaded (setup ran)");
+  assert.equal(
+    copied.calls[0].dataDir,
+    path.join(agentDir, "plugins", "p2", "data"),
+    "an independent's dataDir is agent-isolated",
+  );
+});
+
+test("privatePlugins copy: pre-existing destination is NOT overwritten (skip if present)", async () => {
+  // Public source has marker SRC; pre-create the private copy with a different
+  // body + a sentinel file that must survive (proving the copy was SKIPPED).
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
+  const privDir = path.join(agentDir, "plugins");
+  writePlugin(privDir, "p2", observablePlugin({ id: "p2", marker: "PREEXISTING" }));
+  const sentinel = path.join(privDir, "p2", "SENTINEL.txt");
+  fs.writeFileSync(sentinel, "keep-me", "utf8");
+
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
+  await loader.load();
+
+  assert.equal(fs.existsSync(sentinel), true, "an existing private copy must be left intact (skip copy)");
+  // The PRE-EXISTING module is the one that loads (not the public source).
+  const priv = await importPlugin(privDir, "p2");
+  assert.equal(priv.MARKER, "PREEXISTING", "the already-present private copy must be the one loaded");
+  assert.equal(priv.calls.length, 1, "the pre-existing private copy is loaded");
+});
+
+test("privatePlugins copy: missing public source => load() rejects with PluginLoadError", async () => {
+  // Declare an independent whose public source does NOT exist.
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("privatePlugins copy: missing source leaves no partial copy behind", async () => {
+  const dest = path.join(agentDir, "plugins", "ghost");
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+  assert.equal(fs.existsSync(dest), false, "a failed copy must not leave a destination dir");
+});
+
+// ===========================================================================
+// Behavior 6 — manifest.requires verification
+// ===========================================================================
+
+test("requires: an unmet requirement => load() rejects with DependencyError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", requires: ["nope.missing"] }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await assert.rejects(loader.load(), DependencyError);
+});
+
+test("requires: a dotted action name present on the actionbus => loads OK", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", requires: ["svc.ready"] }),
+  );
+  const { loader, sys } = makeLoader(def({ plugins: ["p1"] }));
+  // Register the required action on the bus BEFORE load so `has` is true.
+  sys.actions.register("svc.ready", async () => "ok");
+
+  await assert.doesNotReject(loader.load(), "a satisfied action requirement must load");
+  const mod = await importPlugin(publicPluginDir, "p1");
+  assert.equal(mod.calls.length, 1, "the plugin must have been set up");
+});
+
+test("requires: a dotted action name absent from the bus => DependencyError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", requires: ["svc.absent"] }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  // Nothing registered on the bus.
+  await assert.rejects(loader.load(), DependencyError);
+});
+
+test("requires: an already-loaded plugin id (earlier in def.plugins) is satisfied", async () => {
+  writePlugin(publicPluginDir, "dep", observablePlugin({ id: "dep" }));
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", requires: ["dep"] }));
+  // dep is listed FIRST so it is loaded before p1's requirement check.
+  const { loader } = makeLoader(def({ plugins: ["dep", "p1"] }));
+
+  await assert.doesNotReject(loader.load(), "a plugin-id requirement met by an earlier load must pass");
+  const p1 = await importPlugin(publicPluginDir, "p1");
+  assert.equal(p1.calls.length, 1, "p1 must be set up once its dep is present");
+});
+
+test("requires: a plugin-id requirement NOT among loaded plugins => DependencyError", async () => {
+  // p1 requires "dep" but "dep" is never declared/loaded.
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", requires: ["dep"] }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await assert.rejects(loader.load(), DependencyError);
+});
+
+test("requires: an empty requires array imposes no constraint (loads OK)", async () => {
+  writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", requires: [] }));
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await assert.doesNotReject(loader.load(), "requires:[] must never block loading");
+});
+
+// ===========================================================================
+// Behavior 7 — invalid / unloadable modules => PluginLoadError
+// ===========================================================================
+
+test("invalid module: no default export => load() rejects with PluginLoadError", async () => {
+  // A module that exports `calls` but NO default Plugin.
+  writePlugin(publicPluginDir, "bad", `export const calls = [];`);
+  const { loader } = makeLoader(def({ plugins: ["bad"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("invalid module: default missing `manifest` => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "bad",
+    `export default { async setup(_ctx) {} };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["bad"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("invalid module: default missing `setup` => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "bad",
+    `export default { manifest: { id: "bad", version: "1" } };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["bad"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("invalid module: declared public plugin directory does not exist => PluginLoadError", async () => {
+  // "missing" is declared but no public_plugin/missing/ exists at all.
+  const { loader } = makeLoader(def({ plugins: ["missing"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("invalid module: a module whose evaluation throws => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "boom",
+    `throw new Error("module side-effect explosion");\nexport default {};`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["boom"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+// ===========================================================================
+// Behavior 8 — teardown() runs each teardown? in REVERSE load order, isolated
+// ===========================================================================
+
+test("teardown: plugins are torn down in REVERSE load order", async () => {
+  const orderFile = path.join(tmp, "teardown-order.json");
+  writePlugin(
+    publicPluginDir,
+    "first",
+    observablePlugin({ id: "first", orderFile, orderTag: "first" }),
+  );
+  writePlugin(
+    publicPluginDir,
+    "second",
+    observablePlugin({ id: "second", orderFile, orderTag: "second" }),
+  );
+
+  // Load order: first, then second.
+  const { loader } = makeLoader(def({ plugins: ["first", "second"] }));
+  await loader.load();
+  await loader.teardown();
+
+  const order = JSON.parse(fs.readFileSync(orderFile, "utf8"));
+  assert.deepEqual(
+    order,
+    ["second", "first"],
+    "teardown must run in REVERSE of load order (last loaded torn down first)",
+  );
+});
+
+test("teardown: one plugin's throwing teardown does NOT prevent the other's teardown", async () => {
+  const orderFile = path.join(tmp, "teardown-order.json");
+  // First-loaded throws on teardown; second-loaded must still tear down.
+  writePlugin(
+    publicPluginDir,
+    "first",
+    observablePlugin({ id: "first", orderFile, orderTag: "first", throwOnTeardown: true }),
+  );
+  writePlugin(
+    publicPluginDir,
+    "second",
+    observablePlugin({ id: "second", orderFile, orderTag: "second" }),
+  );
+
+  const { loader } = makeLoader(def({ plugins: ["first", "second"] }));
+  await loader.load();
+
+  // teardown() itself must not reject even though one plugin throws.
+  await assert.doesNotReject(loader.teardown(), "a single failing teardown must not reject teardown()");
+
+  const order = JSON.parse(fs.readFileSync(orderFile, "utf8"));
+  // "second" tears down first (reverse order) and writes its tag; "first" throws
+  // AFTER appending its tag — both must appear, proving isolation didn't skip one.
+  assert.ok(order.includes("second"), "the non-throwing plugin must still tear down");
+  assert.ok(order.includes("first"), "the throwing plugin's teardown was still invoked");
+  assert.deepEqual(order, ["second", "first"], "reverse order is preserved despite the throw");
+});
+
+test("teardown: a plugin WITHOUT a teardown? is skipped without error", async () => {
+  // Plugin with no teardown method at all.
+  writePlugin(
+    publicPluginDir,
+    "noteardown",
+    `
+export const calls = [];
+export default {
+  manifest: { id: "noteardown", version: "1" },
+  async setup(ctx) { calls.push(ctx); },
+};
+`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["noteardown"] }));
+  await loader.load();
+  await assert.doesNotReject(loader.teardown(), "missing teardown? must be safely skipped");
+});
+
+test("teardown: each loaded plugin's teardown is invoked exactly once", async () => {
+  writePlugin(publicPluginDir, "a", observablePlugin({ id: "a" }));
+  writePlugin(publicPluginDir, "b", observablePlugin({ id: "b" }));
+  const { loader } = makeLoader(def({ plugins: ["a", "b"] }));
+  await loader.load();
+  await loader.teardown();
+
+  const ma = await importPlugin(publicPluginDir, "a");
+  const mb = await importPlugin(publicPluginDir, "b");
+  assert.deepEqual(ma.teardowns, ["a"], "a.teardown invoked once");
+  assert.deepEqual(mb.teardowns, ["b"], "b.teardown invoked once");
+});
+
+// ===========================================================================
+// Cross-cutting — isolation between separate loaders/orchestrators
+// ===========================================================================
+
+test("isolation: a plugin's blocks land only in ITS loader's orchestrator", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({
+      id: "p1",
+      setupBody: `ctx.setBlock({ id: "owned", priority: 3, render: () => "O" });`,
+    }),
+  );
+
+  const orcA = stubOrchestrator();
+  const orcB = stubOrchestrator();
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), orcA);
+  await loader.load();
+
+  assert.ok(orcA.getBlock("owned"), "the loading orchestrator must hold the block");
+  assert.equal(orcB.getBlock("owned"), undefined, "an unrelated orchestrator must not see it");
+});
