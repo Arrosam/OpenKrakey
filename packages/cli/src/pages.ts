@@ -393,6 +393,7 @@ export async function runInteractiveLoop(
   async function communicatorEditor(
     cfg: LLMConfig,
     name: string,
+    isNew: boolean,
   ): Promise<boolean> {
     const existing = cfg.communicators[name];
     const draft: CommunicatorDef = {
@@ -407,21 +408,22 @@ export async function runInteractiveLoop(
         draft.apiKey === undefined || draft.apiKey === "" ? "(unset)" : "***";
       const field = await ask(() =>
         select({
-          message: `Provider "${name}"`,
+          message: isNew ? `New provider "${name}"` : `Provider "${name}"`,
           choices: [
             { name: `provider: ${draft.provider}`, value: "provider" },
             { name: `model: ${draft.model}`, value: "model" },
             { name: `baseURL: ${draft.baseURL ?? "(none)"}`, value: "baseURL" },
             { name: `apiKey: ${maskedKey}`, value: "apiKey" },
             { name: "Save", value: "save" },
-            { name: "Delete", value: "delete" },
-            { name: DONE, value: "done" },
+            // Delete only applies to an EXISTING communicator, not a new one.
+            ...(isNew ? [] : [{ name: "Delete", value: "delete" }]),
+            { name: "Cancel", value: "cancel" },
           ],
           loop: false,
         }),
       );
 
-      if (field === "done") return false;
+      if (field === "cancel") return false;
 
       if (field === "save") {
         cfg.communicators[name] = {
@@ -488,8 +490,9 @@ export async function runInteractiveLoop(
 
     if (choice === "\0back") return "landing";
 
+    const isNew = choice === "\0add";
     let name: string;
-    if (choice === "\0add") {
+    if (isNew) {
       name = (
         await ask(() =>
           input({
@@ -507,7 +510,7 @@ export async function runInteractiveLoop(
       name = choice;
     }
 
-    const changed = await communicatorEditor(cfg, name);
+    const changed = await communicatorEditor(cfg, name, isNew);
     if (changed) {
       await guard(() => cli.writeLLMConfig(cfg), undefined);
       out(`Saved providers.`);
