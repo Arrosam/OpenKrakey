@@ -1,19 +1,32 @@
 /**
- * Shared: actions — well-known action/event name constants (the cross-plugin vocabulary).
+ * Shared: actions — the canonical bus vocabulary: well-known names + payload SHAPES.
+ *
+ * Division of labour (see ARCHITECTURE §3):
+ *  - EventBus carries the small set of GENERIC lifecycle events below — the core
+ *    emits them to ACTIVATE plugins (startup, gather prompt blocks, LLM request/
+ *    return, channel I/O). Each payload specializes one of the reusable base
+ *    envelopes (Notify / Request / Reply).
+ *  - ActionBus carries plugin-registered, invokable operations (tool calls,
+ *    channel ops) and inter-plugin calls. Those names are plugin-specific and are
+ *    registered at setup, so they are NOT enumerated here.
  */
+import type { ComposedContext } from "../../contracts/context";
+import type { LLMResponse } from "../../contracts/llm";
 
-/** Actions invoked on the actionbus. */
+/** Well-known synchronous capability actions invoked on the actionbus. */
 export const Actions = {
-  LLM_CHAT: "llm.chat",
   LLM_EMBED: "llm.embed",
   LLM_OCR: "llm.ocr",
   LLM_RERANK: "llm.rerank",
-  RESPONSE_PARSE: "response.parse",
 } as const;
 
-/** Events emitted on the eventbus. */
+/** Well-known generic events emitted on the eventbus to activate plugins. */
 export const Events = {
+  AGENT_START: "agent.start",
   CLOCK_TICK: "clock.tick",
+  PROMPT_GATHER: "prompt.gather",
+  LLM_REQUEST: "llm.request",
+  LLM_RETURN: "llm.return",
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
   TOOL_RESULT: "tool.result",
@@ -21,3 +34,48 @@ export const Events = {
 
 export type ActionName = (typeof Actions)[keyof typeof Actions];
 export type EventName = (typeof Events)[keyof typeof Events];
+
+// ---- Reusable base event envelopes ----
+/** One-way notification (fire-and-forget). */
+export interface Notify<T = unknown> {
+  at: number;
+  data: T;
+}
+/** Expects a matching Reply with the same `id`. */
+export interface Request<T = unknown> {
+  id: string;
+  at: number;
+  data: T;
+}
+/** The reply to a Request (same `id`). */
+export interface Reply<T = unknown> {
+  id: string;
+  at: number;
+  ok: boolean;
+  data?: T;
+  error?: string;
+}
+
+/**
+ * Concrete well-known event payloads. Each specializes a base envelope. Keys are
+ * the `Events` string values (kept literal so this compiles as an interface).
+ */
+export interface EventPayloads {
+  "agent.start": Notify<{ agentId: string }>;
+  "clock.tick": Notify<{ seq: number }>;
+  "prompt.gather": Notify<{ seq: number }>;
+  "llm.request": Request<{ context: ComposedContext }>;
+  "llm.return": Reply<LLMResponse>;
+  "input.message": Notify<{ text: string; from?: string; channel?: string; meta?: Record<string, unknown> }>;
+  "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
+  "tool.result": Reply<unknown> & { name: string };
+}
+
+// Compile-time guard: every Events value has a payload entry and vice-versa.
+type _EventsMatchPayloads = EventName extends keyof EventPayloads
+  ? keyof EventPayloads extends EventName
+    ? true
+    : never
+  : never;
+const _eventsMatchPayloads: _EventsMatchPayloads = true;
+void _eventsMatchPayloads;
