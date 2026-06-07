@@ -11,6 +11,7 @@
  */
 import type { EventBus, ActionBus, Unsub } from "../event-system";
 import type { ContextBlock } from "../context";
+import type { CommunicatorLibrary } from "../llm";
 
 export interface PluginManifest {
   id: string;
@@ -34,6 +35,13 @@ export interface PluginContext {
    * (shared knowledge); a PRIVATE/independent plugin's dataDir is agent-isolated.
    */
   readonly dataDir: string;
+  /**
+   * KEY-LESS access to the global LLM communicator library. A plugin picks a
+   * communicator by name and calls it; API keys and the request wire-format live
+   * in the gateway and are NEVER exposed here. This is how plugins talk to LLMs
+   * and flexibly switch between them. (See contracts/llm.)
+   */
+  readonly llm: CommunicatorLibrary;
 
   // ---- context block ops (BY ID; may touch any plugin's block) ----
   /** Add or replace (by id) a context block. */
