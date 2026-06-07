@@ -1,9 +1,9 @@
 /**
  * Shared: config — config/setting TYPES + canonical PATH constants.
  *
- * The actual file I/O lives in the nodes that own it (boot reads agent configs;
- * cli writes them) — this module fixes the shapes + locations so both agree on
- * the format.
+ * The actual file I/O lives in the nodes that own it (boot reads agent configs +
+ * the LLM config; cli writes them) — this module fixes the shapes + locations so
+ * everyone agrees on the format.
  */
 import type { AgentDefinition } from "../../contracts/agent";
 
@@ -17,6 +17,33 @@ export interface DefaultAgentSetting {
   config?: Record<string, unknown>;
 }
 
+/**
+ * One configured communicator (a provider connection). Lives in config/llm.json.
+ * The gateway builds a key-less Communicator from each of these.
+ */
+export interface CommunicatorDef {
+  /** Adapter id: "anthropic" | "openai" (openai-compatible) | … */
+  provider: string;
+  model: string;
+  /** API key — a literal, or a "${ENV_VAR}" reference the gateway resolves. */
+  apiKey?: string;
+  /** Base URL override (for openai-compatible endpoints / proxies). */
+  baseURL?: string;
+  /** Optional per-communicator request defaults. */
+  temperature?: number;
+  maxTokens?: number;
+}
+
+/**
+ * config/llm.json — the global LLM communicator catalogue. GITIGNORED: it holds
+ * API keys. Read by boot, turned into a key-less CommunicatorLibrary by the gateway.
+ */
+export interface LLMConfig {
+  communicators: Record<string, CommunicatorDef>;
+  /** Optional default communicator name. */
+  default?: string;
+}
+
 /** Resolved runtime paths (relative to the repo root). */
 export interface OpenKrakeyConfig {
   /** Shared plugin code dir. */
@@ -25,6 +52,8 @@ export interface OpenKrakeyConfig {
   agentsDir: string;
   /** The Default Plugin Setting file. */
   defaultPath: string;
+  /** The global LLM communicator catalogue (gitignored — holds keys). */
+  llmPath: string;
 }
 
 /** Canonical default paths. */
@@ -32,6 +61,7 @@ export const PATHS: OpenKrakeyConfig = {
   publicPluginDir: "public_plugin",
   agentsDir: "agents",
   defaultPath: "config/agent.default.json",
+  llmPath: "config/llm.json",
 };
 
 /** A personal-folder layout helper for one Agent id. */
