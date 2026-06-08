@@ -13,7 +13,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "start": "tsx packages/boot/src/index.ts",
-    "cli": "tsx packages/cli/src/bin.ts"
+    "cli": "tsx packages/cli/src/bin.ts",
+    "arch:graph": "tsx docs/scripts/build-arch-graph.ts",
+    "arch:serve": "tsx docs/scripts/serve-arch-graph.ts"
   },
   "dependencies": {
     "@inquirer/prompts": "^7.2.0"
