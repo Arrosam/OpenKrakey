@@ -93,10 +93,20 @@ async function main(): Promise<void> {
   // empty key-less library rather than throwing out of startup.
   let library: CommunicatorLibrary;
   try {
-    library = createCommunicatorLibrary(llmConfig);
+    // Per-communicator failures are skipped + logged (the library still loads the
+    // good ones); the outer catch only guards a catastrophic build failure.
+    library = createCommunicatorLibrary(llmConfig, {
+      onError: (name, err) =>
+        consoleLogger.warn(`skipping LLM communicator "${name}": ${err}`),
+    });
   } catch (err) {
     consoleLogger.error("LLM library build failed: " + err);
-    library = { get: () => undefined, has: () => false, list: () => [] };
+    library = {
+      get: () => undefined,
+      has: () => false,
+      list: () => [],
+      withCapability: () => [],
+    };
   }
 
   if (defs.length === 0) {
