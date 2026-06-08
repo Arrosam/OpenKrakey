@@ -27,8 +27,10 @@ core
 ## Internal structure
 `buildCommunicator` resolves the key (`${ENV_VAR}` or literal) into a closure-captured `cfg`, picks the
 provider adapter, and wires ONLY the declared+supported capability methods (conditional spread → others
-absent). Provider → capability matrix: `anthropic`→chat · `openai`→chat + embed(`/embeddings`) ·
-`cohere`/`jina`→rerank (Cohere/Jina-compatible `/rerank`, default base URLs). **OCR is generic**: any
+absent). Provider → capability matrix: `anthropic`→chat · `openai`→chat (Chat Completions `/chat/completions`) +
+embed(`/embeddings`) · `openai-responses`→chat (OpenAI **Responses API** `/responses`) + embed ·
+`cohere`/`jina`→rerank (Cohere/Jina-compatible `/rerank`, default base URLs). The two OpenAI chat
+formats (`openai` vs `openai-responses`) are selected by the config `provider` field. **OCR is generic**: any
 chat-capable (vision) provider does it — `ocr()` routes a `{image + "extract text"}` chat call and
 returns the text. Adapters (`adapters/{types,anthropic,openai,rerank}.ts`) map the 5 `ContentPart`
 types (image/document via url|base64; audio→provider form; video→best-effort text placeholder) and
