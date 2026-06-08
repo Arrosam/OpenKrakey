@@ -45,7 +45,8 @@ export function createAgentInstance(
 
   // Empty-library fallback so a bare agent works with no LLM config.
   const library: CommunicatorLibrary =
-    deps?.library ?? { get: () => undefined, has: () => false, list: () => [] };
+    deps?.library ??
+    { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] };
 
   // The per-Agent independent set, constructed once.
   const clock = createClock({ defaultIntervalMs: def.intervalMs });
