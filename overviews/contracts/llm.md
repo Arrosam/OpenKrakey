@@ -1,32 +1,37 @@
 # Contract: llm
 
 ## Purpose
-INFRASTRUCTURE (not domain behavior). Fixes two stable, industry-standard things with no extension
-room left, so they are safely solidified into core: (1) the provider-agnostic LLM I/O **envelope**
-(request/response data shapes), and (2) the **key-less Communicator surface** plugins use to talk to
-an LLM. The actual request wire-format, parsing, and API keys live in the `llm-gateway` module — never
-in this interface.
+INFRASTRUCTURE (not domain behavior). Fixes the stable, industry-standard shapes that are safely
+solidified into core: (1) the provider-agnostic, **multimodal** LLM I/O envelope (chat + embed +
+rerank + ocr, plus the modality vocabulary), and (2) the **key-less Communicator surface** plugins use.
+A communicator declares its `capabilities` + input/output `Modality`s and exposes only the methods it
+was configured for. Keys + wire-format live in the `llm-gateway` module — never in this interface.
 
 ## Connects
-llm-gateway (implements Communicator/CommunicatorLibrary) ↔ orchestrator (uses `LLMResponse`), loader
-(injects the library into `PluginContext.llm`), agent_instance + boot (pass the global library through),
-and plugins (consume communicators by name).
+llm-gateway (implements) ↔ orchestrator (uses `LLMResponse`), loader (injects the library into
+`PluginContext.llm`), agent_instance + boot (pass the global library through), and plugins (consume).
 
 ## Interface definition
-- **Envelope**: `Role`, `ContentPart` (text | image), `Message {role, content, toolCallId?, name?}`,
-  `ToolDef {name, description?, parameters?}`, `ToolCall {id, name, arguments}`,
-  `LLMRequest {messages, system?, tools?, model?, temperature?, maxTokens?, stop?, stream?, metadata?}`,
-  `Usage {inputTokens?, outputTokens?}`,
-  `LLMResponse {content, toolCalls?, stopReason?, usage?, raw?}`, plus `EmbedRequest`/`EmbedResponse`.
-- **Communicator** `{ readonly name, provider, model; chat(req): Promise<LLMResponse>; embed?(req) }`
-  — KEY-LESS; exposes no credentials or wire-format.
-- **CommunicatorLibrary** `{ get(name)→Communicator|undefined; has(name); list() }`.
+- **Vocabulary**: `Modality` = text | image | audio | video | document; `Capability` = chat | embed |
+  rerank | ocr; `MediaRef` = `{ url?, data?(base64), mime? }`.
+- **Multimodal content**: `ContentPart` = text | image | audio | video | document (each carries a
+  `MediaRef` except text). `Message {role, content: string|ContentPart[], toolCallId?, name?}`.
+- **chat**: `LLMRequest {messages, system?, tools?, model?, temperature?, maxTokens?, stop?, stream?,
+  metadata?}` → `LLMResponse {content, toolCalls?, stopReason?, usage?, raw?}`.
+- **embed**: `EmbedRequest {input, model?}` → `EmbedResponse {embeddings: number[][], usage?}`.
+- **rerank**: `RerankRequest {query, documents, topN?, model?}` → `RerankResponse {results:
+  [{index, score, document?}] (desc), usage?}`.
+- **ocr**: `OCRRequest {source: MediaRef, model?}` → `OCRResponse {text, raw?}`.
+- **Communicator** `{ readonly name, provider, model, capabilities, input, output; chat?/embed?/rerank?/ocr? }`
+  — KEY-LESS; only the methods for declared capabilities are present.
+- **CommunicatorLibrary** `{ get, has, list, withCapability(cap)→names }`.
 
 ## Behavioral constraints
-- `ToolCall.arguments` is already JSON-parsed by the communicator; `LLMResponse.content` is the
-  concatenated assistant text; `toolCalls` is the parsed tool-use list (empty/absent if none).
-- A Communicator NEVER exposes its API key or request body. Switching LLM = choosing another name.
-- The library is read-only to consumers (no registration surface here — the gateway builds it).
+- `capabilities`/`input`/`output` are METADATA (plugins pick a suitable model); a method is present iff
+  its capability is declared AND the provider supports it. Defaults: capabilities `["chat"]`, input/
+  output `["text"]`.
+- A Communicator NEVER exposes its API key. `ToolCall.arguments` is pre-parsed; `RerankResponse.results`
+  are sorted by descending score.
 
 ## Status
 locked
