@@ -9,31 +9,55 @@
 import type {
   LLMRequest,
   LLMResponse,
+  EmbedRequest,
+  EmbedResponse,
   Message,
   ContentPart,
   ToolDef,
   ToolCall,
+  Usage,
 } from "../../../../contracts/llm";
+import type { AdapterCfg } from "./types";
 
-export interface AdapterCfg {
-  apiKey: string;
-  model: string;
-  baseURL?: string;
-  temperature?: number;
-  maxTokens?: number;
+/** The subtype of a MIME (e.g. "audio/mpeg" → "mpeg"). */
+function mimeSubtype(mime: string | undefined): string | undefined {
+  if (mime === undefined) return undefined;
+  const slash = mime.indexOf("/");
+  return slash >= 0 ? mime.slice(slash + 1) : mime;
 }
 
 /** Map one ContentPart onto an OpenAI content part. */
 function mapContentPart(part: ContentPart): unknown {
-  if (part.type === "text") {
-    return { type: "text", text: part.text };
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "image": {
+      const img = part.image;
+      const url =
+        img.url ??
+        (img.data ? `data:${img.mime ?? "image/png"};base64,${img.data}` : "");
+      return { type: "image_url", image_url: { url } };
+    }
+    case "audio": {
+      const audio = part.audio;
+      return {
+        type: "input_audio",
+        input_audio: {
+          data: audio.data,
+          format: mimeSubtype(audio.mime) ?? "mp3",
+        },
+      };
+    }
+    case "document": {
+      const doc = part.document;
+      if (doc.url) {
+        return { type: "image_url", image_url: { url: doc.url } };
+      }
+      return { type: "text", text: "[unsupported document content]" };
+    }
+    case "video":
+      return { type: "text", text: "[unsupported video content]" };
   }
-  // image
-  const img = part.image;
-  const url =
-    img.url ??
-    (img.data ? `data:${img.mime ?? "image/png"};base64,${img.data}` : "");
-  return { type: "image_url", image_url: { url } };
 }
 
 /** Map message content (string | ContentPart[]) onto OpenAI content. */
@@ -155,5 +179,53 @@ export async function chat(
   };
   if (toolCalls.length > 0) response.toolCalls = toolCalls;
 
+  return response;
+}
+
+interface OpenAIEmbedResponse {
+  data?: Array<{ embedding: number[]; index?: number }>;
+  usage?: { prompt_tokens?: number; total_tokens?: number };
+}
+
+export async function embed(
+  req: EmbedRequest,
+  cfg: AdapterCfg,
+): Promise<EmbedResponse> {
+  const url = `${cfg.baseURL ?? "https://api.openai.com/v1"}/embeddings`;
+
+  const body: Record<string, unknown> = {
+    model: req.model ?? cfg.model,
+    input: req.input,
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `OpenAI embeddings request failed: ${res.status} ${res.statusText} ${text}`,
+    );
+  }
+
+  const data = (await res.json()) as OpenAIEmbedResponse;
+
+  const rows = [...(data.data ?? [])];
+  // Preserve input order when the provider returns an `index` field.
+  if (rows.every((d) => typeof d.index === "number")) {
+    rows.sort((a, b) => (a.index as number) - (b.index as number));
+  }
+  const embeddings = rows.map((d) => d.embedding);
+
+  const response: EmbedResponse = {
+    embeddings,
+    usage: { inputTokens: data.usage?.prompt_tokens } as Usage,
+  };
   return response;
 }
