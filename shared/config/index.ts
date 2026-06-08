@@ -6,6 +6,7 @@
  * everyone agrees on the format.
  */
 import type { AgentDefinition } from "../../contracts/agent";
+import type { Capability, Modality } from "../../contracts/llm";
 
 export type { AgentDefinition };
 
@@ -22,13 +23,19 @@ export interface DefaultAgentSetting {
  * The gateway builds a key-less Communicator from each of these.
  */
 export interface CommunicatorDef {
-  /** Adapter id: "anthropic" | "openai" (openai-compatible) | … */
+  /** Adapter id: "anthropic" | "openai" (compatible) | "cohere" | "jina" | … */
   provider: string;
   model: string;
   /** API key — a literal, or a "${ENV_VAR}" reference the gateway resolves. */
   apiKey?: string;
-  /** Base URL override (for openai-compatible endpoints / proxies). */
+  /** Base URL override (for openai-compatible / rerank / proxy endpoints). */
   baseURL?: string;
+  /** Operations this model is configured for (default ["chat"]). */
+  capabilities?: Capability[];
+  /** Input modalities the model accepts (default ["text"]). */
+  input?: Modality[];
+  /** Output modalities the model produces (default ["text"]). */
+  output?: Modality[];
   /** Optional per-communicator request defaults. */
   temperature?: number;
   maxTokens?: number;
