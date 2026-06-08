@@ -19,10 +19,14 @@ npm run arch:graph    # write a self-contained docs/arch-graph.html, then open i
 npm run arch:serve    # serve at http://localhost:4178 and auto-rebuild on source changes (PORT= to change)
 ```
 
-In the viewer: **click a file** for its path, import counts (↓ imports / ↑ imported by), doc, and
-declaration list · **drag** to rearrange · **scroll** to zoom · **search** by file name · **externals**
-toggles `node:`/npm modules. Colors: file (blue) · folder (grey) · external (grey) · and in the panel,
-interface (mint) · class (purple) · function (green) · type (amber).
+In the viewer, folders start **collapsed** (the top-level `contracts` / `packages` / `shared` with
+aggregated import edges). **Double-click a folder** to expand/collapse it (or use *collapse all* /
+*expand all*). **Click a node** to focus its dependency neighbourhood — the file plus what it imports
+and what imports it stay lit, everything unrelated fades — and see its path, import counts
+(↓ imports / ↑ imported by), doc, and declaration list in the panel. **Right-drag** to pan, **scroll**
+to zoom, **search** by file name, **externals** toggles `node:`/npm modules. Colors: file (blue) ·
+folder (grey) · external (grey) · and in the panel, interface (mint) · class (purple) · function
+(green) · type (amber).
 
 `build-arch-graph.ts` exports `buildGraph()` / `renderHtml()` (reused by the server). The generated
 `docs/arch-graph.html` is gitignored. No new runtime dependency — Cytoscape.js loads from a CDN in the
