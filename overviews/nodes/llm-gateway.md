@@ -2,11 +2,11 @@
 
 ## Purpose
 The global **LLM communication gateway**. Turns the LLM config (`config/llm.json`, which holds API
-keys) into a **key-less `CommunicatorLibrary`**. Each `Communicator` internally builds the provider
-request, sends it (native `fetch`), and parses the response (incl. tool calls) into the normalized
-`LLMResponse`. API keys are held inside the gateway closure and are **never exposed** — plugins only
-ever get the key-less library. This solidifies the industry-standard, no-extension-room LLM request +
-parse machinery into core (R1: infrastructure, not strategy).
+keys) into a **key-less, capability-aware `CommunicatorLibrary`**. Each `Communicator` exposes only
+the methods (chat/embed/rerank/ocr) it was configured for, carries input/output modality metadata, and
+internally builds the provider request, sends it (native `fetch`), and normalizes the response. API
+keys stay in closures — never exposed. Industry-standard, no-extension-room machinery solidified into
+core (R1: infrastructure, not strategy).
 
 ## Zone
 core
@@ -15,25 +15,28 @@ core
 - `llm` — `Communicator`, `CommunicatorLibrary` (the envelope types are shared shapes it consumes).
 
 ## Depends on contracts
-- `llm` — the I/O envelope (`LLMRequest`/`LLMResponse`/…).
+- `llm` — the I/O envelope + capability/modality vocabulary.
 - (Uses shared `config` for `LLMConfig`/`CommunicatorDef`.)
 
 ## Exposed interface
-- `createCommunicatorLibrary(config: LLMConfig, opts?): CommunicatorLibrary` (pure: config → library;
-  the file is read by boot, not here — keeps the gateway testable without fs/network).
-- Provider adapters: `anthropic` (Messages API) + `openai` (openai-compatible chat/completions),
-  selected per `CommunicatorDef.provider`. Extensible by adding an adapter.
+- `createCommunicatorLibrary(config: LLMConfig, opts?: { onError?(name, err) }): CommunicatorLibrary`
+  (pure: config → library; the file is read by boot). **Resilient**: a communicator that fails to build
+  (unknown provider / missing key / unsupported capability) is SKIPPED and reported via `opts.onError`,
+  so one bad config never sinks the whole library. Library: `get/has/list/withCapability(cap)`.
 
 ## Internal structure
-For each `CommunicatorDef`: resolve `apiKey` (literal or `${ENV_VAR}`), pick the adapter, and build a
-`Communicator` whose `chat()` maps `LLMRequest` → provider wire body → `fetch` (with auth header) →
-provider response → normalized `LLMResponse` (content, `toolCalls` parsed, `usage`, `stopReason`,
-`raw`). The key is captured in the closure; the returned object exposes only `name/provider/model` +
-`chat`/`embed?`. Unknown provider → throw; missing key → throw at build time. `list()/get()/has()` over
-the built map.
+`buildCommunicator` resolves the key (`${ENV_VAR}` or literal) into a closure-captured `cfg`, picks the
+provider adapter, and wires ONLY the declared+supported capability methods (conditional spread → others
+absent). Provider → capability matrix: `anthropic`→chat · `openai`→chat + embed(`/embeddings`) ·
+`cohere`/`jina`→rerank (Cohere/Jina-compatible `/rerank`, default base URLs). **OCR is generic**: any
+chat-capable (vision) provider does it — `ocr()` routes a `{image + "extract text"}` chat call and
+returns the text. Adapters (`adapters/{types,anthropic,openai,rerank}.ts`) map the 5 `ContentPart`
+types (image/document via url|base64; audio→provider form; video→best-effort text placeholder) and
+normalize responses. `apiKey`/`cfg` stay inside the gateway, never on the returned object.
 
 ## Status
-pending
+done
 
 ## Change log
 - 2026-06-07: node created (LLM gateway — global, key-isolated, multi-provider).
+- 2026-06-08: expanded — capabilities (chat/embed/rerank/ocr), input/output modalities, resilient build (skip + onError).
