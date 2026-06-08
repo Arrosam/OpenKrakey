@@ -9,8 +9,9 @@
  * shown in the side panel on click — so the graph stays at the readable file/
  * module altitude instead of exploding to every property.
  *
- * `renderHtml(graph)` wraps it into a self-contained interactive page.
- * `buildGraph()` is reused by the live-reload server (serve-arch-graph.ts).
+ * Folders start collapsed; double-click to expand/collapse; click a node to focus
+ * its neighbourhood; right-drag to pan. `buildGraph()` is reused by the live-
+ * reload server (serve-arch-graph.ts).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -58,7 +59,7 @@ interface FileInfo {
   rel: string;
   doc: string;
   decls: Decl[];
-  imports: string[]; // raw module specifiers
+  imports: string[];
 }
 
 function jsDoc(node: ts.Node): string {
@@ -142,21 +143,17 @@ export function buildGraph(): ArchGraph {
     if (!seenEdge.has(key)) { seenEdge.add(key); edges.push({ data: { id: "e" + edges.length, source, target, kind } }); }
   };
 
-  // folders (compound parents)
   const dirSet = new Set<string>();
   for (const i of infos) { let d = path.posix.dirname(i.rel); while (d && d !== ".") { dirSet.add(d); d = path.posix.dirname(d); } }
   for (const d of [...dirSet].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))) {
     const parent = path.posix.dirname(d);
     addNode({ id: d, label: d.split("/").pop() + "/", kind: "dir", parent: parent && parent !== "." ? parent : undefined, fullPath: d });
   }
-
-  // files (leaf nodes carrying their declarations as data for the side panel)
   for (const i of infos) {
     const dir = path.posix.dirname(i.rel);
     addNode({ id: i.rel, label: i.rel.split("/").pop(), kind: "file", parent: dir !== "." ? dir : undefined, fullPath: i.rel, doc: i.doc, decls: i.decls });
   }
 
-  // import edges (file -> file) + external nodes/edges
   let importEdges = 0;
   let externals = 0;
   for (const i of infos) {
@@ -203,14 +200,15 @@ input{width:100%;background:#0d1117;border:1px solid var(--line);color:var(--tex
 #info .kd{color:var(--mut);font-size:11px}#info .dc{color:var(--mut);margin-top:6px}
 .decl{margin-top:6px;padding:5px 7px;background:#0d1117;border:1px solid var(--line);border-radius:6px}
 .decl b{color:var(--text)}.decl .sg{color:var(--mut);font-size:11px;white-space:pre-wrap;word-break:break-word;margin-top:2px}
-.hint{color:var(--mut);font-size:11px;margin-top:10px}
+.hint{color:var(--mut);font-size:11px;margin-top:10px;line-height:1.6}
 </style></head><body>
 <div id="side">
   <h1>OpenKrakey</h1><div class="sub" id="stats">dependency graph</div>
   <input id="q" placeholder="search file…" autocomplete="off">
-  <div><span class="btn" id="b-fit">fit</span><span class="btn" id="b-relayout">re-layout</span><span class="btn" id="b-ext">externals</span></div>
+  <div><span class="btn" id="b-fit">fit</span><span class="btn" id="b-collapse">collapse all</span><span class="btn" id="b-expand">expand all</span><span class="btn" id="b-ext">externals</span></div>
   <div class="leg" id="legend"></div>
-  <div id="info"><div class="kd">click a file for its declarations · drag to move · scroll to zoom</div></div>
+  <div id="info"><div class="kd">click a node to focus + see its declarations</div></div>
+  <div class="hint">double-click a folder to expand / collapse · right-drag to pan · scroll to zoom</div>
   <div class="hint" id="livehint"></div>
 </div>
 <div id="cy"></div>
@@ -218,50 +216,78 @@ input{width:100%;background:#0d1117;border:1px solid var(--line);color:var(--tex
 <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
 <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
 <script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
+<script src="https://unpkg.com/cytoscape-expand-collapse@4.1.1/cytoscape-expand-collapse.js"></script>
 <script>
 var DATA = __GRAPH__, LIVE = __LIVE__;
 var COLORS = {dir:"#30363d",file:"#3b6ea5",external:"#484f58",extgroup:"#21262d",interface:"#2fd69c",class:"#a371f7",function:"#3fb950",type:"#e3a008"};
-var cy;
+var cy, api;
 function styleArr(){return [
   {selector:"node",style:{"label":"data(label)","color":"#0d1117","font-family":"ui-monospace,monospace","font-size":"11px","font-weight":"bold","text-valign":"center","text-halign":"center","background-color":function(e){return COLORS[e.data("kind")]||"#888"},"border-width":0,"shape":"round-rectangle","width":"label","height":"22px","padding":"7px","text-max-width":"220px"}},
   {selector:'node[kind="file"]',style:{"color":"#dbe6f2"}},
   {selector:":parent",style:{"background-opacity":0.08,"background-color":"#8b949e","border-width":1,"border-color":"#30363d","text-valign":"top","color":"#8b949e","font-weight":"normal","padding":"12px","shape":"round-rectangle"}},
+  {selector:"node.cy-expand-collapse-collapsed-node",style:{"background-opacity":0.22,"background-color":"#6e7681","border-width":1,"border-color":"#6e7681","color":"#dbe6f2","font-weight":"bold","text-valign":"center","shape":"round-rectangle"}},
   {selector:'node[kind="external"]',style:{"color":"#c9d1d9","font-weight":"normal","font-size":"10px"}},
-  {selector:"edge",style:{"width":1.2,"curve-style":"bezier","target-arrow-shape":"triangle","arrow-scale":0.85,"opacity":0.65}},
+  {selector:"edge",style:{"width":1.2,"curve-style":"bezier","target-arrow-shape":"triangle","arrow-scale":0.85,"opacity":0.7}},
   {selector:'edge[kind="import"]',style:{"line-color":"#3b6ea5","target-arrow-color":"#3b6ea5"}},
   {selector:'edge[kind="external"]',style:{"line-color":"#30363d","target-arrow-color":"#30363d","line-style":"dotted","opacity":0.4}},
-  {selector:".dim",style:{"opacity":0.1}},{selector:".hl",style:{"border-width":3,"border-color":"#2fd69c","opacity":1}},
+  {selector:"edge.cy-expand-collapse-meta-edge",style:{"line-color":"#3b6ea5","target-arrow-color":"#3b6ea5","opacity":0.75}},
+  {selector:"node.hl",style:{"border-width":3,"border-color":"#2fd69c"}},
+  {selector:".focusout",style:{"opacity":0.07,"text-opacity":0}},
   {selector:".hidden",style:{"display":"none"}}
 ];}
-function layout(){var l;try{l=cy.layout({name:"fcose",quality:"proof",animate:false,nodeSeparation:110,packComponents:true,nestingFactor:0.6,idealEdgeLength:95,gravity:0.3,gravityCompound:1.4});}catch(e){l=cy.layout({name:"cose",animate:false});}l.run();}
+var LAYOUT={name:"fcose",quality:"proof",animate:false,nodeSeparation:120,packComponents:true,nestingFactor:0.6,idealEdgeLength:100,gravity:0.3,gravityCompound:1.4};
+function layout(){var l;try{l=cy.layout(LAYOUT);}catch(e){l=cy.layout({name:"cose",animate:false});}l.run();}
 function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c];});}
-function build(data){
-  if(cy)cy.destroy();
-  cy=cytoscape({container:document.getElementById("cy"),elements:data.elements,style:styleArr(),minZoom:0.08,maxZoom:3});
-  layout();
-  var s=data.stats;document.getElementById("stats").textContent=s.files+" files · "+s.declarations+" decls · "+s.imports+" imports · "+s.externals+" ext";
-  cy.on("tap","node",function(ev){showInfo(ev.target);});
-  cy.on("tap",function(ev){if(ev.target===cy){cy.elements().removeClass("hl dim");}});
+function applyExt(){cy.nodes('[kind="external"],[kind="extgroup"]').toggleClass("hidden",!showExt);cy.edges('[kind="external"]').toggleClass("hidden",!showExt);}
+function clearFocus(){cy.elements().removeClass("focusout hl");applyExt();}
+function focusOn(n){
+  var keep=n.closedNeighborhood();
+  keep=keep.union(keep.ancestors()).union(n.descendants());
+  cy.elements().addClass("focusout").removeClass("hl");
+  keep.removeClass("focusout");
+  keep.edgesWith(keep).removeClass("focusout");
+  n.removeClass("focusout").addClass("hl");
   applyExt();
 }
 function showInfo(n){
-  var d=n.data(),h='<div class="nm">'+esc(d.fullPath||d.label||d.id)+'</div><div class="kd">'+esc(d.kind)+' · ↓ imports '+n.outgoers('edge[kind="import"]').length+' · ↑ imported by '+n.incomers('edge[kind="import"]').length+'</div>';
+  var d=n.data(),h='<div class="nm">'+esc(d.fullPath||d.label||d.id)+'</div><div class="kd">'+esc(d.kind)+' · ↓ imports '+n.outgoers("edge").length+' · ↑ imported by '+n.incomers("edge").length+'</div>';
   if(d.doc)h+='<div class="dc">'+esc(d.doc)+'</div>';
   var decls=d.decls||[];
-  if(decls.length){h+='<div class="kd" style="margin-top:8px">'+decls.length+' declaration(s):</div>';
-    decls.forEach(function(x){h+='<div class="decl"><b style="color:'+(COLORS[x.kind]||"#fff")+'">'+esc(x.kind)+'</b> <b>'+esc(x.name)+'</b><div class="sg">'+esc(x.signature)+'</div></div>';});}
+  if(decls.length){h+='<div class="kd" style="margin-top:8px">'+decls.length+' declaration(s):</div>';decls.forEach(function(x){h+='<div class="decl"><b style="color:'+(COLORS[x.kind]||"#fff")+'">'+esc(x.kind)+'</b> <b>'+esc(x.name)+'</b><div class="sg">'+esc(x.signature)+'</div></div>';});}
   document.getElementById("info").innerHTML=h;
-  cy.elements().addClass("dim").removeClass("hl");
-  n.closedNeighborhood().union(n.connectedEdges()).removeClass("dim");n.addClass("hl");
 }
 var showExt=false;
-function applyExt(){cy.batch(function(){cy.nodes('[kind="external"],[kind="extgroup"]').toggleClass("hidden",!showExt);cy.edges('[kind="external"]').toggleClass("hidden",!showExt);});}
+function build(data){
+  if(cy)cy.destroy();
+  cy=cytoscape({container:document.getElementById("cy"),elements:data.elements,style:styleArr(),minZoom:0.05,maxZoom:3,boxSelectionEnabled:false});
+  api=cy.expandCollapse({layoutBy:LAYOUT,fisheye:false,animate:false,undoable:false,cueEnabled:true,expandCollapseCueSize:14});
+  api.collapseAll();   // default: all folders collapsed
+  applyExt();
+  cy.fit(undefined,40);
+  var s=data.stats;document.getElementById("stats").textContent=s.files+" files · "+s.declarations+" decls · "+s.imports+" imports · "+s.externals+" ext";
+  var lastTap={id:null,t:0};
+  cy.on("tap","node",function(ev){
+    var n=ev.target,now=Date.now();
+    if(lastTap.id===n.id()&&now-lastTap.t<330){lastTap.t=0;clearFocus();
+      if(api.isExpandable(n)){api.expand(n);}else if(api.isCollapsible(n)){api.collapse(n);}
+      return;}
+    lastTap={id:n.id(),t:now};focusOn(n);showInfo(n);
+  });
+  cy.on("tap",function(ev){if(ev.target===cy)clearFocus();});
+}
 window.addEventListener("DOMContentLoaded",function(){
   var L=document.getElementById("legend");L.innerHTML=[["file","file"],["dir","folder"],["external","external"],["interface","interface"],["class","class"],["function","function"],["type","type"]].map(function(k){return '<div><span class="dot" style="background:'+COLORS[k[0]]+'"></span>'+k[1]+'</div>';}).join("");
   document.getElementById("b-fit").onclick=function(){cy.fit(undefined,40);};
-  document.getElementById("b-relayout").onclick=layout;
+  document.getElementById("b-collapse").onclick=function(){clearFocus();api.collapseAll();cy.fit(undefined,40);};
+  document.getElementById("b-expand").onclick=function(){clearFocus();api.expandAll();layout();};
   var be=document.getElementById("b-ext");be.onclick=function(){showExt=!showExt;be.classList.toggle("on",showExt);applyExt();if(showExt)layout();};
-  var q=document.getElementById("q");q.oninput=function(){var v=q.value.toLowerCase();cy.elements().removeClass("hl dim");if(!v)return;cy.elements().addClass("dim");cy.nodes().forEach(function(n){if((n.data("label")||"").toLowerCase().indexOf(v)>=0){n.removeClass("dim").addClass("hl");n.connectedEdges().removeClass("dim");}});};
+  var q=document.getElementById("q");q.oninput=function(){var v=q.value.toLowerCase();clearFocus();if(!v)return;cy.elements().addClass("focusout");cy.nodes().forEach(function(n){if((n.data("label")||"").toLowerCase().indexOf(v)>=0){n.removeClass("focusout").addClass("hl");n.ancestors().removeClass("focusout");}});};
+  // right-drag to pan
+  var div=document.getElementById("cy"),pan=false,lx=0,ly=0;
+  div.addEventListener("contextmenu",function(e){e.preventDefault();});
+  div.addEventListener("mousedown",function(e){if(e.button===2){pan=true;lx=e.clientX;ly=e.clientY;e.preventDefault();}});
+  window.addEventListener("mousemove",function(e){if(pan){cy.panBy({x:e.clientX-lx,y:e.clientY-ly});lx=e.clientX;ly=e.clientY;}});
+  window.addEventListener("mouseup",function(e){if(e.button===2)pan=false;});
   build(DATA);
   if(LIVE){document.getElementById("livehint").textContent="● live — watching source";var es=new EventSource("/events");es.onmessage=function(){fetch("/graph.json").then(function(r){return r.json();}).then(build);};}
 });
