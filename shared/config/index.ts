@@ -23,7 +23,7 @@ export interface DefaultAgentSetting {
  * The gateway builds a key-less Communicator from each of these.
  */
 export interface CommunicatorDef {
-  /** Adapter id: "anthropic" | "openai" (compatible) | "cohere" | "jina" | … */
+  /** Adapter id: "anthropic" | "openai-completion" | "openai-responses" | "cohere" | "jina" | … */
   provider: string;
   model: string;
   /** API key — a literal, or a "${ENV_VAR}" reference the gateway resolves. */

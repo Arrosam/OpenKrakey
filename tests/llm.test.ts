@@ -148,7 +148,7 @@ const OPENAI = (
     output: any;
   }> = {},
 ) => ({
-  provider: "openai",
+  provider: "openai-completion",
   model: over.model ?? "gpt-4o",
   apiKey: over.apiKey ?? "sk-openai-test-key",
   baseURL: over.baseURL ?? "https://api.openai.com/v1",
@@ -250,7 +250,7 @@ test("library: each configured name resolves to a distinct communicator", () => 
   assert.ok(a && b);
   assert.notEqual(a, b);
   assert.equal(a!.provider, "anthropic");
-  assert.equal(b!.provider, "openai");
+  assert.equal(b!.provider, "openai-completion");
 });
 
 test("withCapability(): returns only the names declaring that capability", () => {
@@ -472,7 +472,7 @@ test("env: ${TEST_KEY} resolves for an openai embed communicator's Bearer header
     const lib = createCommunicatorLibrary(
       cfg({
         e: {
-          provider: "openai",
+          provider: "openai-completion",
           model: "text-embedding-3-small",
           apiKey: "${TEST_KEY}",
           baseURL: "https://api.openai.com/v1",
@@ -588,7 +588,7 @@ test("chat (openai): normalizes content/toolCalls(parsed)/stopReason/usage", asy
   const lib = createCommunicatorLibrary(
     cfg({
       o: {
-        provider: "openai",
+        provider: "openai-completion",
         model: "gpt-4o",
         apiKey: "sk-openai-xyz",
         baseURL: "https://api.openai.com/v1",
@@ -627,7 +627,7 @@ test("chat (openai): request targets /chat/completions with Bearer auth + system
   const lib = createCommunicatorLibrary(
     cfg({
       o: {
-        provider: "openai",
+        provider: "openai-completion",
         model: "gpt-4o",
         apiKey: KEY,
         baseURL: "https://api.openai.com/v1",
@@ -705,7 +705,7 @@ test("embed (openai): request URL ends /embeddings, Bearer auth, body has input 
   const lib = createCommunicatorLibrary(
     cfg({
       e: {
-        provider: "openai",
+        provider: "openai-completion",
         model: "text-embedding-3-small",
         apiKey: KEY,
         baseURL: "https://api.openai.com/v1",
@@ -941,7 +941,7 @@ test("resilience: with onError, an UNSUPPORTED capability for a provider is repo
   const lib = createCommunicatorLibrary(
     cfg({
       good: COHERE(), // valid rerank
-      bad: { provider: "openai", model: "gpt-4o", apiKey: "k", capabilities: ["rerank"] }, // openai can't rerank
+      bad: { provider: "openai-completion", model: "gpt-4o", apiKey: "k", capabilities: ["rerank"] }, // openai can't rerank
     }),
     { onError: (name, err) => errors.push({ name, err }) },
   );
