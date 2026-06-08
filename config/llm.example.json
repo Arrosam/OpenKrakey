@@ -3,13 +3,31 @@
     "claude": {
       "provider": "anthropic",
       "model": "claude-opus-4-8",
-      "apiKey": "${ANTHROPIC_API_KEY}"
+      "apiKey": "${ANTHROPIC_API_KEY}",
+      "capabilities": ["chat", "ocr"],
+      "input": ["text", "image", "document"],
+      "output": ["text"]
     },
     "gpt": {
       "provider": "openai",
       "model": "gpt-4o",
       "apiKey": "${OPENAI_API_KEY}",
-      "baseURL": "https://api.openai.com/v1"
+      "baseURL": "https://api.openai.com/v1",
+      "capabilities": ["chat"],
+      "input": ["text", "image", "audio"],
+      "output": ["text"]
+    },
+    "embeddings": {
+      "provider": "openai",
+      "model": "text-embedding-3-small",
+      "apiKey": "${OPENAI_API_KEY}",
+      "capabilities": ["embed"]
+    },
+    "reranker": {
+      "provider": "jina",
+      "model": "jina-reranker-v2-base-multilingual",
+      "apiKey": "${JINA_API_KEY}",
+      "capabilities": ["rerank"]
     }
   },
   "default": "claude"
