@@ -9,7 +9,7 @@
       "output": ["text"]
     },
     "gpt": {
-      "provider": "openai",
+      "provider": "openai-completion",
       "model": "gpt-4o",
       "apiKey": "${OPENAI_API_KEY}",
       "baseURL": "https://api.openai.com/v1",
@@ -18,7 +18,7 @@
       "output": ["text"]
     },
     "embeddings": {
-      "provider": "openai",
+      "provider": "openai-completion",
       "model": "text-embedding-3-small",
       "apiKey": "${OPENAI_API_KEY}",
       "capabilities": ["embed"]

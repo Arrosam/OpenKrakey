@@ -265,7 +265,7 @@ test("loadLLMConfig: multiple communicators + a full CommunicatorDef survive int
         maxTokens: 1024,
       },
       local: {
-        provider: "openai",
+        provider: "openai-completion",
         model: "llama",
         baseURL: "http://localhost:1234/v1",
       },

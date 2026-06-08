@@ -530,7 +530,7 @@ test("writeLLMConfig -> listCommunicators: multiple communicators returned sorte
   const cli = makeCli();
   await cli.writeLLMConfig({
     communicators: {
-      zeta: { provider: "openai", model: "gpt-4o" },
+      zeta: { provider: "openai-completion", model: "gpt-4o" },
       alpha: { provider: "anthropic", model: "claude-x" },
     },
   });
@@ -559,7 +559,7 @@ test("writeLLMConfig -> readLLMConfig: round-trips a full CommunicatorDef + defa
 test("writeLLMConfig: a second write overwrites the communicator catalogue", async () => {
   const cli = makeCli();
   await cli.writeLLMConfig({ communicators: { a: { provider: "anthropic", model: "m" } } });
-  await cli.writeLLMConfig({ communicators: { b: { provider: "openai", model: "n" } } });
+  await cli.writeLLMConfig({ communicators: { b: { provider: "openai-completion", model: "n" } } });
   assert.deepEqual(await cli.listCommunicators(), ["b"]);
   const got = await cli.readLLMConfig();
   assert.equal("a" in got.communicators, false, "old communicator must be gone after overwrite");

@@ -59,7 +59,7 @@ function pickAdapter(provider: string): Adapter {
   switch (provider) {
     case "anthropic":
       return { chat: anthropic.chat };
-    case "openai":
+    case "openai-completion":
       return { chat: openai.chat, embed: openai.embed };
     case "openai-responses":
       return { chat: openai.responsesChat, embed: openai.embed };
