@@ -149,3 +149,6 @@ agents/
 
 # build output
 .dist/
+
+# generated architecture graph (run `npm run arch:graph`)
+docs/arch-graph.html
