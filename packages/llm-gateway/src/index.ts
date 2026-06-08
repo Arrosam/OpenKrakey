@@ -61,6 +61,8 @@ function pickAdapter(provider: string): Adapter {
       return { chat: anthropic.chat };
     case "openai":
       return { chat: openai.chat, embed: openai.embed };
+    case "openai-responses":
+      return { chat: openai.responsesChat, embed: openai.embed };
     case "cohere":
       return {
         rerank: rerankAdapter.rerank,

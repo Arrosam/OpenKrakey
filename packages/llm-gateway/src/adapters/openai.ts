@@ -182,6 +182,184 @@ export async function chat(
   return response;
 }
 
+/** Map one ContentPart onto a Responses API input content part. */
+function mapResponsesContentPart(part: ContentPart, textType: string): unknown {
+  switch (part.type) {
+    case "text":
+      return { type: textType, text: part.text };
+    case "image": {
+      const img = part.image;
+      const url =
+        img.url ??
+        `data:${img.mime ?? "image/png"};base64,${img.data ?? ""}`;
+      return { type: "input_image", image_url: url };
+    }
+    case "document": {
+      const doc = part.document;
+      if (doc.url) {
+        return { type: "input_file", file_url: doc.url };
+      }
+      const dataURI = `data:${doc.mime ?? "image/png"};base64,${doc.data ?? ""}`;
+      return { type: "input_file", filename: "document", file_data: dataURI };
+    }
+    case "audio":
+    case "video":
+      return { type: textType, text: `[unsupported ${part.type} content]` };
+  }
+}
+
+/** Map message content (string | ContentPart[]) onto Responses input content. */
+function mapResponsesContent(
+  content: string | ContentPart[],
+  role: string,
+): unknown[] {
+  const textType = role === "assistant" ? "output_text" : "input_text";
+  if (typeof content === "string") {
+    return [{ type: textType, text: content }];
+  }
+  return content.map((part) => mapResponsesContentPart(part, textType));
+}
+
+/** Map our messages onto Responses API input items. */
+function mapResponsesInput(messages: Message[]): unknown[] {
+  return messages.map((m) => {
+    if (m.role === "tool") {
+      const output =
+        typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+      return {
+        type: "function_call_output",
+        call_id: m.toolCallId,
+        output,
+      };
+    }
+    return {
+      type: "message",
+      role: m.role,
+      content: mapResponsesContent(m.content, m.role),
+    };
+  });
+}
+
+/** Map our tool defs onto Responses API (flat) function tool defs. */
+function mapResponsesTools(tools: ToolDef[]): unknown[] {
+  return tools.map((t) => ({
+    type: "function",
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters ?? { type: "object" },
+  }));
+}
+
+interface ResponsesMessageItem {
+  type: "message";
+  content?: Array<{ type?: string; text?: string }>;
+}
+
+interface ResponsesFunctionCallItem {
+  type: "function_call";
+  call_id?: string;
+  id?: string;
+  name?: string;
+  arguments?: string;
+}
+
+type ResponsesOutputItem =
+  | ResponsesMessageItem
+  | ResponsesFunctionCallItem
+  | { type?: string };
+
+interface OpenAIResponsesResponse {
+  output?: ResponsesOutputItem[];
+  output_text?: string;
+  usage?: { input_tokens?: number; output_tokens?: number };
+  status?: string;
+}
+
+export async function responsesChat(
+  req: LLMRequest,
+  cfg: AdapterCfg,
+): Promise<LLMResponse> {
+  const url = `${cfg.baseURL ?? "https://api.openai.com/v1"}/responses`;
+
+  const body: Record<string, unknown> = {
+    model: req.model ?? cfg.model,
+    input: mapResponsesInput(req.messages),
+  };
+  if (req.system !== undefined) body.instructions = req.system;
+  if (req.tools !== undefined) body.tools = mapResponsesTools(req.tools);
+  const temperature = req.temperature ?? cfg.temperature;
+  if (temperature !== undefined) body.temperature = temperature;
+  const maxTokens = req.maxTokens ?? cfg.maxTokens;
+  if (maxTokens !== undefined) body.max_output_tokens = maxTokens;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${cfg.apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(
+      `OpenAI Responses request failed: ${res.status} ${res.statusText} ${text}`,
+    );
+  }
+
+  const data = (await res.json()) as OpenAIResponsesResponse;
+
+  let content: string;
+  if (typeof data.output_text === "string" && data.output_text.length > 0) {
+    content = data.output_text;
+  } else {
+    const parts: string[] = [];
+    for (const item of data.output ?? []) {
+      if (item.type === "message") {
+        for (const c of (item as ResponsesMessageItem).content ?? []) {
+          if (c.type === "output_text" && typeof c.text === "string") {
+            parts.push(c.text);
+          }
+        }
+      }
+    }
+    content = parts.join("");
+  }
+
+  const toolCalls: ToolCall[] = [];
+  for (const item of data.output ?? []) {
+    if (item.type === "function_call") {
+      const fc = item as ResponsesFunctionCallItem;
+      const rawArgs = fc.arguments ?? "";
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(rawArgs);
+      } catch {
+        parsed = rawArgs;
+      }
+      toolCalls.push({
+        id: fc.call_id ?? fc.id ?? "",
+        name: fc.name ?? "",
+        arguments: parsed,
+      });
+    }
+  }
+
+  const response: LLMResponse = {
+    content,
+    stopReason: data.status,
+    usage: {
+      inputTokens: data.usage?.input_tokens,
+      outputTokens: data.usage?.output_tokens,
+    },
+    raw: data,
+  };
+  if (toolCalls.length > 0) response.toolCalls = toolCalls;
+
+  return response;
+}
+
 interface OpenAIEmbedResponse {
   data?: Array<{ embedding: number[]; index?: number }>;
   usage?: { prompt_tokens?: number; total_tokens?: number };
