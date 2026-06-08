@@ -19,9 +19,13 @@ npm run arch:graph    # write a self-contained docs/arch-graph.html, then open i
 npm run arch:serve    # serve at http://localhost:4178 and auto-rebuild on source changes (PORT= to change)
 ```
 
-In the viewer, folders start **collapsed** (the top-level `contracts` / `packages` / `shared` with
-aggregated import edges). **Double-click a folder** to expand/collapse it (or use *collapse all* /
-*expand all*). **Click a node** to focus its dependency neighbourhood — the file plus what it imports
+In the viewer, folders start **collapsed** (the top-level `contracts` / `packages` / `shared`). When
+several same-direction imports connect the same two boxes they **merge into a single arrow** that
+**thickens with** — and is **labelled by** — the number of imports it stands for (e.g. one
+`packages → contracts` arrow marked *23*), so collapsing never produces a bundle of overlapping
+curves. **Double-click a folder** to expand/collapse it (or use *collapse all* / *expand all*); the
+merged counts re-compute at every level (expanding `packages` splits its *23* into `loader → contracts`
+*6*, `orchestrator → contracts` *5*, …). **Click a node** to focus its dependency neighbourhood — the file plus what it imports
 and what imports it stay lit, everything unrelated fades — and see its path, import counts
 (↓ imports / ↑ imported by), doc, and declaration list in the panel. **Right-drag** to pan, **scroll**
 to zoom, **search** by file name, **externals** toggles `node:`/npm modules. Colors: file (blue) ·
