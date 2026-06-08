@@ -13,33 +13,45 @@ import type {
   ToolDef,
   ToolCall,
 } from "../../../../contracts/llm";
-
-export interface AdapterCfg {
-  apiKey: string;
-  model: string;
-  baseURL?: string;
-  temperature?: number;
-  maxTokens?: number;
-}
+import type { AdapterCfg } from "./types";
 
 /** Map one ContentPart onto an Anthropic content block. */
 function mapContentPart(part: ContentPart): unknown {
-  if (part.type === "text") {
-    return { type: "text", text: part.text };
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "image": {
+      const img = part.image;
+      return {
+        type: "image",
+        source: img.url
+          ? { type: "url", url: img.url }
+          : {
+              type: "base64",
+              media_type: img.mime ?? "image/png",
+              data: img.data,
+            },
+      };
+    }
+    case "document": {
+      const doc = part.document;
+      return {
+        type: "document",
+        source: doc.url
+          ? { type: "url", url: doc.url }
+          : {
+              type: "base64",
+              media_type: doc.mime ?? "application/pdf",
+              data: doc.data,
+            },
+      };
+    }
+    case "audio":
+    case "video":
+      // Anthropic Messages API doesn't accept these — degrade gracefully so the
+      // call never crashes.
+      return { type: "text", text: "[unsupported " + part.type + " content]" };
   }
-  // image
-  const img = part.image;
-  if (img.url) {
-    return { type: "image", source: { type: "url", url: img.url } };
-  }
-  return {
-    type: "image",
-    source: {
-      type: "base64",
-      media_type: img.mime ?? "image/png",
-      data: img.data,
-    },
-  };
 }
 
 /** Map message content (string | ContentPart[]) onto Anthropic content. */
