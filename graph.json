@@ -10,6 +10,11 @@
       "description": "The whole framework — per-Agent runtime modules + their L1 contracts + shared modules + the two global modules (boot, cli) + the LLM communication gateway.",
       "nodes": ["clock", "event-system", "orchestrator", "loader", "agent_instance", "boot", "cli", "llm-gateway"],
       "overview": "overviews/zones/core.md"
+    },
+    "plugins": {
+      "description": "Phase-1 MVP plugins under public_plugin/ — the essential set that makes a bare agent converse, remember, and use tools, exercising every core function. Each implements the L1 plugin contract and talks ONLY via the per-Agent event-system.",
+      "nodes": ["llm-core", "persona", "history", "console-channel", "notes", "toolbox"],
+      "overview": "overviews/zones/plugins.md"
     }
   },
   "nodes": {
@@ -84,6 +89,60 @@
       "implements_contracts": ["llm"],
       "status": "done",
       "overview": "overviews/nodes/llm-gateway.md"
+    },
+    "llm-core": {
+      "zone": "plugins",
+      "path": "public_plugin/llm-core",
+      "description": "The LLM round-trip plugin: llm.request -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "depends_on_contracts": ["plugin", "event-system", "context", "llm"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/llm-core.md"
+    },
+    "persona": {
+      "zone": "plugins",
+      "path": "public_plugin/persona",
+      "description": "Stable identity context block (priority 10000+, stable-prefix convention) rendered from the agent's config.",
+      "depends_on_contracts": ["plugin", "event-system", "context"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/persona.md"
+    },
+    "history": {
+      "zone": "plugins",
+      "path": "public_plugin/history",
+      "description": "Conversation memory: folds input.message / llm.return / tool.result into a bounded low-priority context block; persists JSONL under dataDir (survives restarts; public=shared, private=isolated).",
+      "depends_on_contracts": ["plugin", "event-system", "context", "llm"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/history.md"
+    },
+    "console-channel": {
+      "zone": "plugins",
+      "path": "public_plugin/console-channel",
+      "description": "Terminal I/O channel: stdin lines -> input.message + clock.fire_now wake; prints output.message; greets on agent.start.",
+      "depends_on_contracts": ["plugin", "event-system"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/console-channel.md"
+    },
+    "notes": {
+      "zone": "plugins",
+      "path": "public_plugin/notes",
+      "description": "Persistent notes store (the roadmap 'library' demo made useful): note.save/note.read/note.list actions over dataDir files, registered as LLM tools; shared when public, agent-isolated when independent.",
+      "depends_on_contracts": ["plugin", "event-system", "llm"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/notes.md"
+    },
+    "toolbox": {
+      "zone": "plugins",
+      "path": "public_plugin/toolbox",
+      "description": "Basic tools: time.now action + ToolDefs exposing the orchestrator's clock.set_interval / clock.set_default_interval rhythm actions so the LLM can self-pace.",
+      "depends_on_contracts": ["plugin", "event-system", "llm"],
+      "implements_contracts": [],
+      "status": "planned",
+      "overview": "overviews/nodes/toolbox.md"
     }
   },
   "contracts": {

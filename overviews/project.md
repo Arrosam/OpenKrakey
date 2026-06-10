@@ -22,6 +22,7 @@ are isolated. Full design in `ARCHITECTURE.md`.
 | Zone | Purpose | Nodes |
 |------|---------|-------|
 | core | The whole framework | clock, event-system, orchestrator, loader, agent_instance, boot, cli, llm-gateway |
+| plugins | Phase-1 MVP plugin set (public_plugin/) — converse, remember, use tools | llm-core, persona, history, console-channel, notes, toolbox |
 
 ## Shared modules
 | Module | Purpose |
