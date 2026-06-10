@@ -35,8 +35,25 @@ export function createLoader(deps: LoaderDeps): Loader {
   const log = tagged(deps.log ?? consoleLogger, "[loader:" + deps.agentId + "]");
   const loaded: Array<{ plugin: Plugin; ctx: PluginContext }> = [];
 
+  /** A simple plugin name: no path separators, no `.`/`..`. */
+  const VALID_ID = /^[A-Za-z0-9._-]+$/;
+  function validateId(id: string): void {
+    if (id === "." || id === ".." || !VALID_ID.test(id)) {
+      throw new PluginLoadError("invalid plugin id: '" + id + "'");
+    }
+  }
+
   async function load(): Promise<void> {
+    // 0. VALIDATE every declared plugin id BEFORE any filesystem copy or import.
+    for (const id of deps.def.privatePlugins ?? []) {
+      validateId(id);
+    }
+    for (const id of deps.def.plugins ?? []) {
+      validateId(id);
+    }
+
     // 1. COPY declared independents into the agent's private plugins folder.
+    //    Code is copied; the source's accumulated top-level data/ is not.
     for (const id of deps.def.privatePlugins ?? []) {
       const src = path.join(deps.publicPluginDir, id);
       const dst = path.join(deps.agentDir, "plugins", id);
@@ -45,22 +62,29 @@ export function createLoader(deps: LoaderDeps): Loader {
         continue;
       }
       if (fs.existsSync(src)) {
-        fs.cpSync(src, dst, { recursive: true });
+        const srcDataDir = path.join(src, "data");
+        fs.cpSync(src, dst, {
+          recursive: true,
+          filter: (s) => s !== srcDataDir,
+        });
       } else {
         throw new PluginLoadError("private plugin source not found: " + id);
       }
     }
 
     // 2. RESOLVE plugin dirs (pluginId -> absolute code dir).
-    //    Private folder is scanned first so it overrides same-id public.
+    //    Private folder is scanned first (sorted by name for determinism) so it
+    //    overrides same-id public; declared public plugins keep their order after.
     const resolved = new Map<string, string>();
 
     const privateDir = path.join(deps.agentDir, "plugins");
     if (fs.existsSync(privateDir)) {
-      for (const entry of fs.readdirSync(privateDir, { withFileTypes: true })) {
-        if (entry.isDirectory()) {
-          resolved.set(entry.name, path.join(privateDir, entry.name));
-        }
+      const entries = fs
+        .readdirSync(privateDir, { withFileTypes: true })
+        .filter((e) => e.isDirectory())
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const entry of entries) {
+        resolved.set(entry.name, path.join(privateDir, entry.name));
       }
     }
 
@@ -70,61 +94,101 @@ export function createLoader(deps: LoaderDeps): Loader {
       }
     }
 
-    // 3. Load each plugin in insertion order.
+    // 3. PASS 1 — resolve + import + validate every plugin's default export,
+    //    collecting the full load set before any setup runs.
+    const loadSet: Array<{ id: string; plugin: Plugin; dir: string }> = [];
     for (const [id, pluginDir] of resolved) {
-      // a. Dynamic-import the module.
-      let mod: Record<string, unknown>;
-      try {
-        mod = await import(pathToFileURL(path.join(pluginDir, "index.ts")).href);
-      } catch (err) {
-        throw new PluginLoadError("failed to import plugin '" + id + "': " + err);
-      }
+      const plugin = await importPlugin(id, pluginDir);
+      loadSet.push({ id, plugin, dir: pluginDir });
+    }
 
-      // b. Validate the default-export shape.
-      const plugin = mod.default as Plugin;
-      if (
-        !plugin ||
-        typeof plugin !== "object" ||
-        typeof plugin.manifest !== "object" ||
-        typeof plugin.setup !== "function"
-      ) {
-        throw new PluginLoadError("plugin '" + id + "' has no valid default export");
+    // The set of ids + provided capabilities, independent of load order.
+    const available = new Set<string>();
+    for (const { id, plugin } of loadSet) {
+      available.add(id);
+      for (const cap of plugin.manifest.provides ?? []) {
+        available.add(cap);
       }
+    }
 
-      // c. Verify declared requirements.
-      for (const req of plugin.manifest.requires ?? []) {
-        const met = req.includes(".")
-          ? deps.events.actions.has(req)
-          : loaded.some((l) => l.plugin.manifest.id === req);
-        if (!met) {
-          throw new DependencyError(
-            "plugin '" + id + "' requires '" + req + "' which is not available",
-          );
+    // 4. PASS 2 — per plugin IN ORDER: check requires, build context, setup.
+    //    All-or-nothing: ANY throw here (requires check, context build, or
+    //    setup) tears down the plugins already set up before rethrowing.
+    //    Pass 1 needs no rollback — nothing is set up yet.
+    try {
+      for (const { id, plugin, dir } of loadSet) {
+        // a. Verify declared requirements. An entry with a dot is an ACTION name
+        //    checked against the actionbus at THIS plugin's setup time (order-
+        //    dependent); any other entry must be a plugin id or provided
+        //    capability somewhere in the load set (order-independent).
+        for (const req of plugin.manifest.requires ?? []) {
+          const met = req.includes(".") ? deps.events.actions.has(req) : available.has(req);
+          if (!met) {
+            throw new DependencyError(
+              "plugin '" + id + "' requires '" + req + "' which is not available",
+            );
+          }
         }
+
+        // b. Build the PluginContext.
+        const ctx: PluginContext = {
+          agentId: deps.agentId,
+          events: deps.events.events,
+          actions: deps.events.actions,
+          config: deps.def.config?.[id] ?? {},
+          dataDir: path.join(dir, "data"),
+          llm: deps.library,
+          setBlock: (b) => deps.orchestrator.setBlock(b),
+          getBlock: (bid) => deps.orchestrator.getBlock(bid),
+          removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
+          listBlocks: () => deps.orchestrator.listBlocks(),
+          log: (msg) => log.info("[" + id + "] " + msg),
+        };
+
+        // c. Register the plugin.
+        await plugin.setup(ctx);
+        loaded.push({ plugin, ctx });
       }
-
-      // d. Build the PluginContext.
-      const ctx: PluginContext = {
-        agentId: deps.agentId,
-        events: deps.events.events,
-        actions: deps.events.actions,
-        config: deps.def.config?.[id] ?? {},
-        dataDir: path.join(pluginDir, "data"),
-        llm: deps.library,
-        setBlock: (b) => deps.orchestrator.setBlock(b),
-        getBlock: (bid) => deps.orchestrator.getBlock(bid),
-        removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
-        listBlocks: () => deps.orchestrator.listBlocks(),
-        log: (msg) => log.info("[" + id + "] " + msg),
-      };
-
-      // e. Register the plugin.
-      await plugin.setup(ctx);
-      loaded.push({ plugin, ctx });
+    } catch (err) {
+      await rollback();
+      throw err;
     }
   }
 
-  async function teardown(): Promise<void> {
+  /** Dynamic-import a plugin: prefer index.ts, fall back to index.js. */
+  async function importPlugin(id: string, pluginDir: string): Promise<Plugin> {
+    const tsEntry = path.join(pluginDir, "index.ts");
+    const jsEntry = path.join(pluginDir, "index.js");
+    const entry = fs.existsSync(tsEntry)
+      ? tsEntry
+      : fs.existsSync(jsEntry)
+        ? jsEntry
+        : undefined;
+    if (!entry) {
+      throw new PluginLoadError("plugin '" + id + "' has no index.ts or index.js entry");
+    }
+
+    let mod: Record<string, unknown>;
+    try {
+      mod = await import(pathToFileURL(entry).href);
+    } catch (err) {
+      throw new PluginLoadError("failed to import plugin '" + id + "': " + err);
+    }
+
+    const plugin = mod.default as Plugin;
+    if (
+      !plugin ||
+      typeof plugin !== "object" ||
+      typeof plugin.manifest !== "object" ||
+      typeof plugin.setup !== "function"
+    ) {
+      throw new PluginLoadError("plugin '" + id + "' has no valid default export");
+    }
+    return plugin;
+  }
+
+  /** Tear down already-set-up plugins in reverse order, isolating each error. */
+  async function rollback(): Promise<void> {
     for (let i = loaded.length - 1; i >= 0; i--) {
       const { plugin } = loaded[i];
       try {
@@ -134,6 +198,10 @@ export function createLoader(deps: LoaderDeps): Loader {
       }
     }
     loaded.length = 0;
+  }
+
+  async function teardown(): Promise<void> {
+    await rollback();
   }
 
   return { load, teardown };
