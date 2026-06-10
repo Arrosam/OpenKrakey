@@ -16,15 +16,19 @@ export function createClock(opts: { defaultIntervalMs: number }): Clock {
   let running = false;
   let countdownStart = 0;
 
-  /** Arm a fresh countdown for `currentIntervalMs` and stamp its start. */
+  /** Arm a fresh countdown for `currentIntervalMs` and stamp its start. Clears any
+   *  existing timer first so a re-entrant arm can never leave two timers armed. */
   function arm(): void {
+    clearTimer();
     countdownStart = Date.now();
     timer = setTimeout(onTimer, currentIntervalMs);
   }
 
   /** Re-arm for an explicit duration WITHOUT moving countdownStart (used when a
-   *  shortened/lengthened interval must still fire at absolute `ms` from origin). */
+   *  shortened/lengthened interval must still fire at absolute `ms` from origin).
+   *  Clears any existing timer first for the same re-entrancy reason as `arm`. */
   function rearmRemaining(ms: number): void {
+    clearTimer();
     timer = setTimeout(onTimer, ms);
   }
 
@@ -78,17 +82,20 @@ export function createClock(opts: { defaultIntervalMs: number }): Clock {
 
     setInterval(ms: number): void {
       currentIntervalMs = ms;
+      if (!running) {
+        // No countdown is in progress — just record the new current interval; it is
+        // used when the clock next arms via start(). Never fire, never consult elapsed.
+        return;
+      }
       const elapsed = Date.now() - countdownStart;
       if (ms <= elapsed) {
         // The new interval is already satisfied — behave as if the countdown completed.
         clearTimer();
         activate();
-      } else if (running) {
+      } else {
         // Reschedule to fire at absolute `ms` from the original start.
-        clearTimer();
         rearmRemaining(ms - elapsed);
       }
-      // If not running and ms > elapsed: just record the new current (done above).
     },
 
     setDefaultInterval(ms: number): void {
