@@ -760,3 +760,288 @@ test("isolation: a plugin's blocks land only in ITS loader's orchestrator", asyn
   assert.ok(orcA.getBlock("owned"), "the loading orchestrator must hold the block");
   assert.equal(orcB.getBlock("owned"), undefined, "an unrelated orchestrator must not see it");
 });
+
+// ###########################################################################
+// EXTENSION — newly-specified loader behaviors (contracts/loader updated).
+// All plugin sources below are self-contained & observable (export module-level
+// arrays/flags) so assertions read the SAME module the loader imported.
+// ###########################################################################
+
+// ---------------------------------------------------------------------------
+// extra plugin writers (kept local so existing helpers stay untouched)
+// ---------------------------------------------------------------------------
+
+/**
+ * A "good" plugin that, on setup, registers a uniquely-named action on the
+ * actionbus and records setupCalled; on teardown it UNREGISTERS that action and
+ * records teardownCalled. The action name is the plugin id so two loaders that
+ * both load this plugin would collide on the bus UNLESS the first run's teardown
+ * (rollback) unregistered it. Module-level `state` is observable across re-import.
+ */
+function goodRegistrarPlugin(id: string, action: string): string {
+  return `
+export const state = { setupCalled: false, teardownCalled: false };
+export const calls = [];
+let unsub;
+export default {
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  async setup(ctx) {
+    calls.push(ctx);
+    unsub = ctx.actions.register(${JSON.stringify(action)}, async () => "ok");
+    state.setupCalled = true;
+  },
+  async teardown() {
+    if (typeof unsub === "function") unsub();
+    state.teardownCalled = true;
+  },
+};
+`;
+}
+
+/** A plugin that throws during module evaluation (import fails). */
+function explodingModule(id: string): string {
+  return `throw new Error("import of ${id} exploded");\nexport default {};`;
+}
+
+/**
+ * A plugin whose manifest carries `provides` (a capability another plugin's
+ * `requires` may name). Observable via module-level `calls`.
+ */
+function providerPlugin(opts: { id: string; provides?: string[]; requires?: string[] }): string {
+  const { id, provides, requires } = opts;
+  const provLit = provides ? `, provides: ${JSON.stringify(provides)}` : "";
+  const reqLit = requires ? `, requires: ${JSON.stringify(requires)}` : "";
+  return `
+export const calls = [];
+export default {
+  manifest: { id: ${JSON.stringify(id)}, version: "1"${provLit}${reqLit} },
+  async setup(ctx) { calls.push(ctx); },
+};
+`;
+}
+
+// ===========================================================================
+// EXT-1 — All-or-nothing rollback: a later failure tears down earlier plugins
+//          in reverse order (and that teardown really un-did setup's effects)
+// ===========================================================================
+
+test("rollback: a later plugin's import failure rejects load() AND tears down the earlier good plugin", async () => {
+  writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.act"));
+  writePlugin(publicPluginDir, "zz-bad", explodingModule("zz-bad"));
+
+  // aa-good loads first (deterministic order), then zz-bad fails to import.
+  const { loader } = makeLoader(def({ plugins: ["aa-good", "zz-bad"] }));
+  await assert.rejects(loader.load(), "a downstream failure must reject the whole load()");
+
+  const good = await importPlugin(publicPluginDir, "aa-good");
+  assert.equal(good.state.setupCalled, true, "the earlier good plugin had run its setup");
+  assert.equal(
+    good.state.teardownCalled,
+    true,
+    "rollback must have invoked the earlier good plugin's teardown",
+  );
+});
+
+test("rollback: an UNMET-requires failure also tears down the earlier good plugin", async () => {
+  writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.r2"));
+  // zz-needy requires a plugin/capability nobody provides -> DependencyError.
+  writePlugin(publicPluginDir, "zz-needy", providerPlugin({ id: "zz-needy", requires: ["nobody"] }));
+
+  const { loader } = makeLoader(def({ plugins: ["aa-good", "zz-needy"] }));
+  await assert.rejects(loader.load(), DependencyError);
+
+  const good = await importPlugin(publicPluginDir, "aa-good");
+  assert.equal(good.state.teardownCalled, true, "rollback ran the good plugin's teardown");
+});
+
+test("rollback: proven by a SECOND loader on the SAME event-system loading aa-good without an 'already registered' collision", async () => {
+  writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.unique"));
+  writePlugin(publicPluginDir, "zz-bad", explodingModule("zz-bad"));
+
+  // Share ONE event-system across both loaders so a leaked action registration
+  // would collide on the bus.
+  const sys = createEventSystem();
+  const make = (d: AgentDefinition) =>
+    createLoader({
+      agentId: d.id,
+      def: d,
+      events: sys,
+      orchestrator: stubOrchestrator(),
+      library,
+      publicPluginDir,
+      agentDir,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+
+  // First loader fails at zz-bad; rollback must un-register aa-good's action.
+  const l1 = make(def({ plugins: ["aa-good", "zz-bad"] }));
+  await assert.rejects(l1.load());
+  assert.equal(sys.actions.has("aa-good.unique"), false, "rollback must leave the bus clean");
+
+  // Second loader (same bus) loads aa-good alone: must NOT throw a duplicate-
+  // registration error — proving the first run's teardown actually ran.
+  const l2 = make(def({ id: "ag1", plugins: ["aa-good"] }));
+  await assert.doesNotReject(
+    l2.load(),
+    "re-registering on the same bus must succeed because rollback unregistered it",
+  );
+  assert.equal(sys.actions.has("aa-good.unique"), true, "the second load registered the action");
+});
+
+// ===========================================================================
+// EXT-2 — Plugin id validation happens BEFORE any filesystem copy or import
+// ===========================================================================
+
+test("id validation: a public plugin id containing '..' rejects with PluginLoadError before any import", async () => {
+  // Provide a real, importable plugin so failure can ONLY come from id validation.
+  const { loader } = makeLoader(def({ plugins: ["../evil"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("id validation: a public plugin id of exactly '..' rejects with PluginLoadError", async () => {
+  const { loader } = makeLoader(def({ plugins: [".."] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("id validation: a privatePlugins id containing '..' rejects BEFORE any filesystem copy (no traversal artifacts)", async () => {
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["../evil"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+
+  // No agents/<id>/plugins/ tree may have been created from the bad id, and no
+  // path-traversal artifact may exist above the agent's plugins dir.
+  const escaped = path.join(agentDir, "plugins", "..", "evil");
+  assert.equal(fs.existsSync(escaped), false, "id validation must precede any copy (no traversal artifact)");
+});
+
+test("id validation: a privatePlugins id of exactly '..' rejects with PluginLoadError", async () => {
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: [".."] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+// ===========================================================================
+// EXT-3 — requires resolve against the WHOLE load set (order-independent)
+// ===========================================================================
+
+test("requires (load-set): private 'aaa' requires 'zzz' — even though 'aaa' sorts first, load() SUCCEEDS", async () => {
+  const privDir = path.join(agentDir, "plugins");
+  // "aaa" requires plugin id "zzz" (no dot => plugin-id/capability requirement).
+  writePlugin(privDir, "aaa", providerPlugin({ id: "aaa", requires: ["zzz"] }));
+  writePlugin(privDir, "zzz", providerPlugin({ id: "zzz" }));
+
+  // privatePlugins are auto-loaded from the private folder, sorted by name:
+  // "aaa" before "zzz" — yet the requirement is checked against the FULL set.
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["aaa", "zzz"] }));
+  await assert.doesNotReject(
+    loader.load(),
+    "a plugin-id requirement satisfied LATER in the load order must still pass",
+  );
+
+  const aaa = await importPlugin(privDir, "aaa");
+  const zzz = await importPlugin(privDir, "zzz");
+  assert.equal(aaa.calls.length, 1, "aaa was set up");
+  assert.equal(zzz.calls.length, 1, "zzz was set up");
+});
+
+test("requires (load-set): 'alpha' requires capability 'storage' provided by sibling 'zeta' => SUCCEEDS", async () => {
+  writePlugin(publicPluginDir, "alpha", providerPlugin({ id: "alpha", requires: ["storage"] }));
+  writePlugin(publicPluginDir, "zeta", providerPlugin({ id: "zeta", provides: ["storage"] }));
+
+  // alpha listed FIRST; its capability requirement is met by zeta's provides
+  // regardless of order.
+  const { loader } = makeLoader(def({ plugins: ["alpha", "zeta"] }));
+  await assert.doesNotReject(loader.load(), "a `provides` capability anywhere in the load set satisfies `requires`");
+
+  const alpha = await importPlugin(publicPluginDir, "alpha");
+  assert.equal(alpha.calls.length, 1, "alpha was set up once its capability requirement was met");
+});
+
+test("requires (load-set): a non-dotted requirement matched by NOBODY's id/provides => DependencyError", async () => {
+  writePlugin(publicPluginDir, "alpha", providerPlugin({ id: "alpha", requires: ["storage"] }));
+  // A sibling that provides something ELSE — does NOT satisfy "storage".
+  writePlugin(publicPluginDir, "zeta", providerPlugin({ id: "zeta", provides: ["cache"] }));
+
+  const { loader } = makeLoader(def({ plugins: ["alpha", "zeta"] }));
+  await assert.rejects(loader.load(), DependencyError);
+});
+
+// ===========================================================================
+// EXT-4 — Action-name requires (dotted) are still checked at SETUP time against
+//          the actionbus, hence order-dependent: provider must set up first.
+// ===========================================================================
+
+test("requires (action, ordered): provider sorts first and registers the action => dependent loads OK", async () => {
+  // "a-provider" registers action "svc.ready" in its setup; "b-consumer"
+  // requires that dotted action. "a-" sorts before "b-", so the action exists
+  // on the bus by the time the consumer's setup-time check runs.
+  writePlugin(
+    publicPluginDir,
+    "a-provider",
+    `
+export const calls = [];
+export default {
+  manifest: { id: "a-provider", version: "1" },
+  async setup(ctx) { calls.push(ctx); ctx.actions.register("svc.ready", async () => "ok"); },
+};
+`,
+  );
+  writePlugin(publicPluginDir, "b-consumer", providerPlugin({ id: "b-consumer", requires: ["svc.ready"] }));
+
+  const { loader } = makeLoader(def({ plugins: ["a-provider", "b-consumer"] }));
+  await assert.doesNotReject(
+    loader.load(),
+    "a dotted action requirement met by an EARLIER plugin's setup must pass",
+  );
+
+  const consumer = await importPlugin(publicPluginDir, "b-consumer");
+  assert.equal(consumer.calls.length, 1, "the consumer was set up after the action became available");
+});
+
+// ===========================================================================
+// EXT-5 — Independent copy is CODE-ONLY: the source's accumulated data/ is NOT
+//          copied into the agent's private copy.
+// ===========================================================================
+
+test("independent copy: data/ is excluded — code is copied but source-accumulated data is not", async () => {
+  // Public source has both code (index.ts) and an accumulated data/ file.
+  writePlugin(publicPluginDir, "store", observablePlugin({ id: "store" }));
+  const srcDataDir = path.join(publicPluginDir, "store", "data");
+  fs.mkdirSync(srcDataDir, { recursive: true });
+  fs.writeFileSync(path.join(srcDataDir, "seed.txt"), "accumulated", "utf8");
+
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["store"] }));
+  await loader.load();
+
+  const dest = path.join(agentDir, "plugins", "store");
+  assert.equal(fs.existsSync(path.join(dest, "index.ts")), true, "the plugin CODE must be copied");
+  assert.equal(
+    fs.existsSync(path.join(dest, "data", "seed.txt")),
+    false,
+    "the source's accumulated data/ must NOT be copied into the independent copy",
+  );
+});
+
+// ===========================================================================
+// EXT-6 — index.js fallback: a plugin dir with ONLY index.js (ESM) loads.
+// ===========================================================================
+
+test("index.js fallback: a plugin dir containing only index.js loads successfully", async () => {
+  const pdir = path.join(publicPluginDir, "jsonly");
+  fs.mkdirSync(pdir, { recursive: true });
+  fs.writeFileSync(
+    path.join(pdir, "index.js"),
+    `
+export const calls = [];
+export default {
+  manifest: { id: "jsonly", version: "1" },
+  async setup(ctx) { calls.push(ctx); },
+};
+`,
+    "utf8",
+  );
+
+  const { loader } = makeLoader(def({ plugins: ["jsonly"] }));
+  await assert.doesNotReject(loader.load(), "a plugin exposing only index.js must load");
+
+  const mod = await import(pathToFileURL(path.join(pdir, "index.js")).href);
+  assert.equal(mod.calls.length, 1, "the index.js plugin's setup ran exactly once");
+});
