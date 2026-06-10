@@ -72,19 +72,30 @@ export function createAgentInstance(
 
   let started = false;
   let stopped = false;
+  let running = false;
 
   const start = async (): Promise<void> => {
     if (started) return;
     started = true;
-    events.events.emit(Events.AGENT_START, { at: Date.now(), data: { agentId: def.id } });
     await loader.load();
+    // A stop() may have arrived while load was in flight: nothing is wired yet,
+    // so tear the just-loaded plugins down and end genuinely stopped — no
+    // AGENT_START, no armed timer.
+    if (stopped) {
+      await loader.teardown();
+      return;
+    }
+    // Emit after plugins have subscribed (during load) but before the first tick.
+    events.events.emit(Events.AGENT_START, { at: Date.now(), data: { agentId: def.id } });
     orchestrator.start();
     clock.start();
+    running = true;
   };
 
   const stop = async (): Promise<void> => {
     if (stopped || !started) return;
     stopped = true;
+    if (!running) return; // start() is mid-load — it owns teardown of the in-flight load.
     clock.stop();
     orchestrator.stop();
     await loader.teardown();

@@ -565,7 +565,9 @@ try {
   process.exit(0); // force exit: a violating impl's leaked timer must not hang the child
 }
 `;
-  const scriptPath = path.join(tmp, "inflight-child.ts");
+  // .mts forces ESM: the temp dir has no package.json, so a .ts child would be
+  // transpiled as CJS and reject the script's top-level await.
+  const scriptPath = path.join(tmp, "inflight-child.mts");
   fs.writeFileSync(scriptPath, script, "utf8");
 
   const run = spawnSync(process.execPath, ["--import", "tsx", scriptPath], {
