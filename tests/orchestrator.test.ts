@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createOrchestrator } from "../packages/orchestrator/src";
 import { createEventSystem } from "../packages/event-system/src";
-import { Events } from "../shared/actions";
+import { Events, Actions } from "../shared/actions";
 import type { ContextBlock } from "../contracts/context";
 import type { Clock } from "../contracts/clock";
 
@@ -62,6 +62,26 @@ function block(id: string, priority: number, text: string): ContextBlock {
 /** Let the asynchronous beat (block render + compose) flush before asserting. */
 function settle(ms = 10): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * A render() that returns a genuinely-REJECTING promise — but the test keeps its
+ * own reference and pre-attaches a no-op `.catch` so a buggy (non-isolating)
+ * orchestrator that forgets to await/catch the block cannot turn this into a
+ * process-level unhandledRejection that the runner would attribute to an arbitrary
+ * test. The promise still rejects, so a correct compose() must catch it and degrade
+ * the block to ""; the assertions on the composed text decide pass/fail. This keeps
+ * the test BLACK-BOX (we hand the orchestrator a rejecting render) while failing on
+ * a real assertion rather than a harness-level crash.
+ */
+function rejectingRender(message: string): () => Promise<string> {
+  return () => {
+    const p = Promise.reject<string>(new Error(message));
+    p.catch(() => {
+      /* swallow at the source so the test never leaks a free-floating rejection */
+    });
+    return p;
+  };
 }
 
 /**
@@ -764,4 +784,499 @@ test("compose reflects block-store edits made between beats (removal + replaceme
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
   await settle();
   assert.equal(texts[1], "A2", "second beat reflects the replacement and the removal");
+});
+
+// ===========================================================================
+// Behavior 11 — per-block render ISOLATION (a failing block degrades to "",
+// never drops siblings or the beat)
+// ===========================================================================
+//
+// compose() renders each block in isolation: a block whose render() throws
+// synchronously OR returns a rejecting promise contributes empty text for that
+// beat, but the good block's text still makes it into the composed context and
+// the LLM_REQUEST still fires exactly once.
+
+test("isolation: a block whose render() REJECTS degrades to empty text; the good block + LLM_REQUEST survive", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.setBlock(block("good", 100, "GOOD"));
+  orc.setBlock({
+    id: "rejects",
+    priority: 50,
+    render: rejectingRender("render rejected"),
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(requestCount, 1, "the beat is NOT dropped — LLM_REQUEST still fires exactly once");
+  assert.equal(texts.length, 1, "exactly one context composed");
+  assert.ok(
+    texts[0].includes("GOOD"),
+    "the good block's text must survive a sibling render rejection",
+  );
+  assert.ok(
+    !texts[0].includes("render rejected"),
+    "the failed block must not leak its error text into the context",
+  );
+});
+
+test("isolation: a block whose render() THROWS synchronously degrades to empty; siblings + beat survive", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.setBlock(block("good", 100, "GOOD"));
+  orc.setBlock({
+    id: "throws",
+    priority: 50,
+    render: () => {
+      throw new Error("sync render blew up");
+    },
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(requestCount, 1, "a synchronously-throwing block must not drop the beat");
+  assert.equal(texts.length, 1);
+  assert.ok(texts[0].includes("GOOD"), "the good block must still compose");
+});
+
+test("isolation: a rejecting AND a synchronously-throwing block alongside a good one — only the good text composes", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+
+  orc.setBlock(block("good", 100, "GOOD"));
+  orc.setBlock({
+    id: "rejects",
+    priority: 80,
+    render: rejectingRender("reject"),
+  });
+  orc.setBlock({
+    id: "throws",
+    priority: 60,
+    render: () => {
+      throw new Error("throw");
+    },
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(texts.length, 1, "the beat composes once despite two failing blocks");
+  // Both failed blocks degrade to empty string; the good block remains. Whether the
+  // empty contributions inject blank lines is implementation detail, but GOOD must
+  // be present and the error texts must NOT be.
+  assert.ok(texts[0].includes("GOOD"), "the single good block's text must be present");
+  assert.ok(!texts[0].includes("reject"), "rejected block error must not leak");
+  assert.ok(!texts[0].includes("throw"), "thrown block error must not leak");
+});
+
+// ===========================================================================
+// Behavior 12 — queued-beat cancellation on stop(); in-flight collapse to ONE
+// follow-up
+// ===========================================================================
+//
+// A beat is in-flight while its (slow) render is pending. Ticks that arrive
+// during an in-flight beat collapse to at most ONE queued follow-up beat. stop()
+// cancels the queued follow-up so no further PROMPT_GATHER/LLM_REQUEST fires.
+
+/** A block whose render resolves only after `ms`, letting a beat stay in-flight. */
+function slowBlock(id: string, priority: number, text: string, ms = 30): ContextBlock {
+  return {
+    id,
+    priority,
+    render: () => new Promise<string>((r) => setTimeout(() => r(text), ms)),
+  };
+}
+
+test("cancellation: stop() during an in-flight beat cancels the QUEUED follow-up beat (no further PROMPT_GATHER/LLM_REQUEST)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let gatherCount = 0;
+  let requestCount = 0;
+  events.on(Events.PROMPT_GATHER, () => {
+    gatherCount++;
+  });
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.setBlock(slowBlock("slow", 10, "SLOW", 40));
+
+  orc.start();
+  // Two back-to-back ticks: the 1st starts an in-flight beat (slow render pending),
+  // the 2nd queues behind it.
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+
+  // Stop BEFORE the in-flight render settles, so the queued follow-up is cancelled.
+  orc.stop();
+
+  // Let everything settle well past the slow render's resolution.
+  await settle(120);
+
+  // The first (in-flight) beat may or may not have already gathered before stop(),
+  // but the QUEUED second beat must never run: at most one of each fired, and no
+  // SECOND LLM_REQUEST appears after stop().
+  assert.ok(requestCount <= 1, "the queued follow-up beat must be cancelled by stop()");
+  assert.ok(gatherCount <= 1, "no extra PROMPT_GATHER from the cancelled queued beat");
+});
+
+test("cancellation: no NEW beat work is emitted strictly AFTER stop() when a beat was queued", async (t) => {
+  const { orc, events } = freshOrc(t);
+  orc.setBlock(slowBlock("slow", 10, "SLOW", 40));
+
+  let stopped = false;
+  let requestsAfterStop = 0;
+  let gathersAfterStop = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    if (stopped) requestsAfterStop++;
+  });
+  events.on(Events.PROMPT_GATHER, () => {
+    if (stopped) gathersAfterStop++;
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+
+  stopped = true;
+  orc.stop();
+
+  await settle(120);
+
+  assert.equal(requestsAfterStop, 0, "no LLM_REQUEST may fire after stop()");
+  assert.equal(gathersAfterStop, 0, "no PROMPT_GATHER may fire after stop()");
+});
+
+test("queueing: 3 back-to-back ticks during ONE in-flight beat collapse to exactly TWO LLM_REQUESTs (one in-flight + one coalesced follow-up)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.setBlock(slowBlock("slow", 10, "SLOW", 30));
+
+  orc.start();
+  // Three ticks arrive while the first beat's slow render is still pending.
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 3 } });
+
+  // Settle long enough for the in-flight beat AND its single coalesced follow-up
+  // (each ~30ms) to fully complete.
+  await settle(150);
+
+  assert.equal(
+    requestCount,
+    2,
+    "ticks during an in-flight beat coalesce to exactly one follow-up (1 in-flight + 1 queued = 2 total)",
+  );
+});
+
+test("queueing: 2 back-to-back ticks during ONE in-flight beat yield exactly TWO LLM_REQUESTs", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.setBlock(slowBlock("slow", 10, "SLOW", 30));
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+
+  await settle(150);
+
+  assert.equal(requestCount, 2, "one in-flight beat + one queued follow-up = exactly two requests");
+});
+
+// ===========================================================================
+// Behavior 13 — clock rhythm actions registered while started
+// ===========================================================================
+//
+// While started, the orchestrator registers the well-known CLOCK_* actions on
+// the actionbus. Invoking them forwards to the injected clock; invalid params
+// reject WITHOUT touching the clock; stop() unregisters them; stop()/start()
+// re-registers without throwing.
+
+/**
+ * A clock that RECORDS every rhythm call so tests can assert forwarding. Shape
+ * matches the Clock contract; the orchestrator stores it and the beat is driven
+ * by CLOCK_TICK events, so these handlers need only record.
+ */
+function recordingClock(): Clock & {
+  setIntervalCalls: number[];
+  setDefaultIntervalCalls: number[];
+  fireNowCalls: number;
+} {
+  const rec = {
+    setIntervalCalls: [] as number[],
+    setDefaultIntervalCalls: [] as number[],
+    fireNowCalls: 0,
+    start() {},
+    stop() {},
+    setInterval(ms: number) {
+      rec.setIntervalCalls.push(ms);
+    },
+    setDefaultInterval(ms: number) {
+      rec.setDefaultIntervalCalls.push(ms);
+    },
+    fireNow() {
+      rec.fireNowCalls++;
+    },
+    onFire(_handler: () => void) {},
+  };
+  return rec;
+}
+
+/** Orchestrator wired to a recording clock (own event-system), with teardown. */
+function orcWithRecordingClock(t: { after(fn: () => void): void }) {
+  const sys = createEventSystem();
+  const clock = recordingClock();
+  const orc = createOrchestrator({ events: sys, clock });
+  t.after(() => {
+    try {
+      orc.stop();
+    } catch {
+      /* teardown must never throw */
+    }
+  });
+  return { orc, sys, events: sys.events, actions: sys.actions, clock };
+}
+
+// --- positive: registration + forwarding --------------------------------------
+
+test("clock actions: after start(), the three CLOCK_* actions are registered on the actionbus", (t) => {
+  const { orc, actions } = orcWithRecordingClock(t);
+  orc.start();
+  assert.equal(actions.has(Actions.CLOCK_SET_INTERVAL), true, "clock.set_interval should be registered");
+  assert.equal(
+    actions.has(Actions.CLOCK_SET_DEFAULT_INTERVAL),
+    true,
+    "clock.set_default_interval should be registered",
+  );
+  assert.equal(actions.has(Actions.CLOCK_FIRE_NOW), true, "clock.fire_now should be registered");
+  const listed = actions.list();
+  assert.ok(listed.includes(Actions.CLOCK_SET_INTERVAL));
+  assert.ok(listed.includes(Actions.CLOCK_SET_DEFAULT_INTERVAL));
+  assert.ok(listed.includes(Actions.CLOCK_FIRE_NOW));
+});
+
+test("clock actions: invoking clock.set_interval {ms:50} forwards to clock.setInterval(50)", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await actions.invoke(Actions.CLOCK_SET_INTERVAL, { ms: 50 });
+  assert.deepEqual(clock.setIntervalCalls, [50], "the injected clock's setInterval must receive 50");
+  assert.equal(clock.setDefaultIntervalCalls.length, 0, "set_interval must not touch setDefaultInterval");
+  assert.equal(clock.fireNowCalls, 0, "set_interval must not fire");
+});
+
+test("clock actions: invoking clock.set_default_interval {ms:200} forwards to clock.setDefaultInterval(200)", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await actions.invoke(Actions.CLOCK_SET_DEFAULT_INTERVAL, { ms: 200 });
+  assert.deepEqual(
+    clock.setDefaultIntervalCalls,
+    [200],
+    "the injected clock's setDefaultInterval must receive 200",
+  );
+  assert.equal(clock.setIntervalCalls.length, 0, "set_default_interval must not touch setInterval");
+  assert.equal(clock.fireNowCalls, 0, "set_default_interval must not fire");
+});
+
+test("clock actions: invoking clock.fire_now (no params) forwards to clock.fireNow()", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await actions.invoke(Actions.CLOCK_FIRE_NOW);
+  assert.equal(clock.fireNowCalls, 1, "fire_now must call the clock's fireNow exactly once");
+  assert.equal(clock.setIntervalCalls.length, 0);
+  assert.equal(clock.setDefaultIntervalCalls.length, 0);
+});
+
+test("clock actions: a positive boundary ms (1) is forwarded verbatim", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await actions.invoke(Actions.CLOCK_SET_INTERVAL, { ms: 1 });
+  await actions.invoke(Actions.CLOCK_SET_DEFAULT_INTERVAL, { ms: 1 });
+  assert.deepEqual(clock.setIntervalCalls, [1]);
+  assert.deepEqual(clock.setDefaultIntervalCalls, [1]);
+});
+
+// --- negative: invalid params reject WITHOUT touching the clock ----------------
+
+test("clock actions: set_interval with {} REJECTS and does not touch the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await assert.rejects(
+    () => actions.invoke(Actions.CLOCK_SET_INTERVAL, {}),
+    "missing ms must reject",
+  );
+  assert.equal(clock.setIntervalCalls.length, 0, "rejected call must not reach the clock");
+});
+
+test("clock actions: set_interval with {ms:-1} REJECTS and does not touch the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await assert.rejects(
+    () => actions.invoke(Actions.CLOCK_SET_INTERVAL, { ms: -1 }),
+    "non-positive ms must reject",
+  );
+  assert.equal(clock.setIntervalCalls.length, 0, "rejected call must not reach the clock");
+});
+
+test("clock actions: set_interval with {ms:0} REJECTS (must be positive) and does not touch the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await assert.rejects(
+    () => actions.invoke(Actions.CLOCK_SET_INTERVAL, { ms: 0 }),
+    "zero ms must reject (interval must be positive)",
+  );
+  assert.equal(clock.setIntervalCalls.length, 0, "rejected call must not reach the clock");
+});
+
+test("clock actions: set_interval with undefined params REJECTS and does not touch the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await assert.rejects(
+    () => actions.invoke(Actions.CLOCK_SET_INTERVAL, undefined),
+    "undefined params must reject",
+  );
+  assert.equal(clock.setIntervalCalls.length, 0, "rejected call must not reach the clock");
+});
+
+test("clock actions: set_default_interval with {} and {ms:-1} REJECT and do not touch the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  await assert.rejects(() => actions.invoke(Actions.CLOCK_SET_DEFAULT_INTERVAL, {}));
+  await assert.rejects(() => actions.invoke(Actions.CLOCK_SET_DEFAULT_INTERVAL, { ms: -1 }));
+  assert.equal(clock.setDefaultIntervalCalls.length, 0, "no invalid call may reach the clock");
+});
+
+// --- state transitions: stop() unregisters; stop()/start() re-registers --------
+
+test("clock actions: after stop(), the three CLOCK_* actions are NO LONGER registered", (t) => {
+  const { orc, actions } = orcWithRecordingClock(t);
+  orc.start();
+  assert.equal(actions.has(Actions.CLOCK_SET_INTERVAL), true, "registered while started");
+
+  orc.stop();
+  assert.equal(actions.has(Actions.CLOCK_SET_INTERVAL), false, "set_interval unregistered on stop()");
+  assert.equal(
+    actions.has(Actions.CLOCK_SET_DEFAULT_INTERVAL),
+    false,
+    "set_default_interval unregistered on stop()",
+  );
+  assert.equal(actions.has(Actions.CLOCK_FIRE_NOW), false, "fire_now unregistered on stop()");
+});
+
+test("clock actions: a stop()/start() cycle RE-REGISTERS the three actions without throwing", (t) => {
+  const { orc, actions } = orcWithRecordingClock(t);
+  orc.start();
+  orc.stop();
+  assert.equal(actions.has(Actions.CLOCK_FIRE_NOW), false, "unregistered after stop");
+
+  assert.doesNotThrow(() => orc.start(), "re-start must not throw (e.g. on duplicate-register)");
+  assert.equal(actions.has(Actions.CLOCK_SET_INTERVAL), true, "re-registered after restart");
+  assert.equal(actions.has(Actions.CLOCK_SET_DEFAULT_INTERVAL), true);
+  assert.equal(actions.has(Actions.CLOCK_FIRE_NOW), true);
+});
+
+test("clock actions: after a stop()/start() cycle the re-registered fire_now still forwards to the clock", async (t) => {
+  const { orc, actions, clock } = orcWithRecordingClock(t);
+  orc.start();
+  orc.stop();
+  orc.start();
+  await actions.invoke(Actions.CLOCK_FIRE_NOW);
+  assert.equal(clock.fireNowCalls, 1, "the re-registered action must still reach the clock");
+});
+
+// ===========================================================================
+// Behavior 14 — LLM_RETURN robustness against undefined / null payloads
+// ===========================================================================
+//
+// An LLM_RETURN carrying undefined or null dispatches nothing, does not throw,
+// and does not break a subsequent valid beat/return.
+
+test("dispatch: LLM_RETURN with an UNDEFINED payload dispatches nothing and does not throw", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  let invoked = false;
+  actions.register("tool.x", async () => {
+    invoked = true;
+    return "ok";
+  });
+
+  orc.start();
+  assert.doesNotThrow(() => events.emit(Events.LLM_RETURN, undefined));
+  await settle();
+  assert.equal(invoked, false, "an undefined return must dispatch nothing");
+});
+
+test("dispatch: LLM_RETURN with a NULL payload dispatches nothing and does not throw", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  let invoked = false;
+  actions.register("tool.x", async () => {
+    invoked = true;
+    return "ok";
+  });
+
+  orc.start();
+  assert.doesNotThrow(() => events.emit(Events.LLM_RETURN, null));
+  await settle();
+  assert.equal(invoked, false, "a null return must dispatch nothing");
+});
+
+test("dispatch: after an undefined/null LLM_RETURN, the NEXT valid beat still emits LLM_REQUEST", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, undefined);
+  events.emit(Events.LLM_RETURN, null);
+  await settle();
+
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(requestCount, 1, "a malformed return must not break the subsequent beat");
+});
+
+test("dispatch: after an undefined LLM_RETURN, a SUBSEQUENT valid LLM_RETURN still dispatches its tool", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  let goodCalls = 0;
+  actions.register("tool.good", async () => {
+    goodCalls++;
+    return "ok";
+  });
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, undefined);
+  await settle();
+
+  events.emit(Events.LLM_RETURN, {
+    id: "2",
+    at: 0,
+    ok: true,
+    data: { content: "", toolCalls: [{ id: "g", name: "tool.good", arguments: {} }] },
+  });
+  await settle();
+
+  assert.equal(goodCalls, 1, "dispatch continues to work after a malformed return");
 });
