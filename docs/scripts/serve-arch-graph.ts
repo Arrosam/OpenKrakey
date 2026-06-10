@@ -44,7 +44,13 @@ const server = http.createServer((req, res) => {
 });
 
 function broadcast(): void {
-  for (const c of clients) c.write("data: changed\n\n");
+  for (const c of clients) {
+    try {
+      c.write("data: changed\n\n");
+    } catch {
+      clients.delete(c);
+    }
+  }
 }
 
 let timer: NodeJS.Timeout | null = null;
@@ -53,7 +59,7 @@ function onChange(): void {
   timer = setTimeout(() => {
     try {
       graph = buildGraph();
-      console.log(`rebuilt: ${graph.stats.files} files · ${graph.stats.imports} imports · ${graph.stats.refs} refs`);
+      console.log(`rebuilt: ${graph.stats.files} files · ${graph.stats.declarations} decls · ${graph.stats.imports} imports`);
       broadcast();
     } catch (err) {
       console.error("rebuild failed:", err);
@@ -78,7 +84,7 @@ function watch(): void {
   }
 }
 
-server.listen(PORT, () => {
+server.listen(PORT, "127.0.0.1", () => {
   watch();
   console.log(`OpenKrakey arch graph → http://localhost:${PORT}  (live; Ctrl+C to stop)`);
   console.log(`  ${graph.stats.files} files · ${graph.stats.declarations} decls · ${graph.stats.imports} imports`);
