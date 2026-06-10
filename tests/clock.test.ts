@@ -305,3 +305,157 @@ test("setDefaultInterval: subsequent beats use the new default after the next re
   mock.timers.tick(1); // beat 4
   assert.equal(c.count(), 4);
 });
+
+// ---------------------------------------------------------------------------
+// 11. setInterval(ms) BEFORE start(): never fires (no countdown in progress),
+//     only records. After start(), the FIRST beat uses the recorded ms (not the
+//     constructor default); subsequent beats revert to the default.
+// ---------------------------------------------------------------------------
+test("setInterval before start: never fires; first beat after start uses recorded ms, then reverts to default", () => {
+  const clock = createClock({ defaultIntervalMs: 100 });
+  const c = makeCounter(clock);
+
+  // No start() yet — recording only, must never fire even as time passes.
+  clock.setInterval(40);
+  mock.timers.tick(1000);
+  assert.equal(c.count(), 0, "setInterval before start() does not fire (no countdown in progress)");
+
+  clock.start();
+
+  // First beat is the RECORDED interval (40), not the constructor default (100).
+  mock.timers.tick(39);
+  assert.equal(c.count(), 0, "first beat not due before the recorded interval elapses");
+  mock.timers.tick(1); // t=40 since start -> first beat
+  assert.equal(c.count(), 1, "first beat after start uses the recorded interval, not the default");
+
+  // After that activation, current reverts to the default (100).
+  mock.timers.tick(99);
+  assert.equal(c.count(), 1, "second beat not due before the default interval");
+  mock.timers.tick(1); // 100ms after the first beat
+  assert.equal(c.count(), 2, "subsequent beats revert to the default interval");
+
+  // And the next beat is still the default.
+  mock.timers.tick(100);
+  assert.equal(c.count(), 3);
+});
+
+// ---------------------------------------------------------------------------
+// 12. setInterval(ms) AFTER stop() (clock previously ran, wall-clock advanced):
+//     never fires, records only. If start() is called again, the next beat uses
+//     the recorded current interval.
+// ---------------------------------------------------------------------------
+test("setInterval after stop: never fires; restart uses the recorded current interval", () => {
+  const clock = createClock({ defaultIntervalMs: 100 });
+  const c = makeCounter(clock);
+
+  // Run for a while so wall-clock time has advanced before we stop.
+  clock.start();
+  mock.timers.tick(100); // beat 1
+  mock.timers.tick(100); // beat 2
+  assert.equal(c.count(), 2);
+
+  clock.stop();
+  mock.timers.tick(250); // mid wall-clock; no countdown in progress
+  assert.equal(c.count(), 2, "no fires while stopped");
+
+  // Recording while stopped must never fire, even as more time passes.
+  clock.setInterval(40);
+  mock.timers.tick(1000);
+  assert.equal(c.count(), 2, "setInterval after stop() does not fire (no countdown in progress)");
+
+  // Restart: the next beat uses the recorded current interval (40), not the default (100).
+  clock.start();
+  mock.timers.tick(39);
+  assert.equal(c.count(), 2, "next beat after restart not due before the recorded interval");
+  mock.timers.tick(1); // 40ms after restart
+  assert.equal(c.count(), 3, "next beat after restart uses the recorded current interval");
+
+  // After that activation, current reverts to the default (100).
+  mock.timers.tick(99);
+  assert.equal(c.count(), 3, "subsequent beat not due before the default interval");
+  mock.timers.tick(1);
+  assert.equal(c.count(), 4, "subsequent beats revert to the default interval");
+});
+
+// ---------------------------------------------------------------------------
+// 13. Re-entrancy: a handler that synchronously calls fireNow() must not leave
+//     more than one armed timer. After the re-entrant activation, advancing time
+//     by exactly one interval yields exactly ONE further activation (no doubling).
+// ---------------------------------------------------------------------------
+test("re-entrancy: handler calling fireNow() does not leave a doubled cadence", () => {
+  const clock = createClock({ defaultIntervalMs: 100 });
+
+  let fired = 0;
+  let reentered = false;
+  clock.onFire(() => {
+    fired += 1;
+    // On the first activation only, synchronously re-fire from inside the handler.
+    if (!reentered) {
+      reentered = true;
+      clock.fireNow();
+    }
+  });
+
+  clock.start();
+  mock.timers.tick(100); // beat fires -> handler re-enters once via fireNow()
+  assert.equal(fired, 2, "one scheduled beat + one re-entrant fireNow = 2 activations");
+
+  // Exactly one armed timer must remain: one full interval -> exactly ONE more fire.
+  mock.timers.tick(100);
+  assert.equal(fired, 3, "exactly one further activation after one interval (no doubled cadence)");
+
+  // Still single-cadence on the following interval.
+  mock.timers.tick(100);
+  assert.equal(fired, 4, "cadence remains single (not doubled)");
+});
+
+test("re-entrancy: handler calling setInterval(small) does not leave a doubled cadence", () => {
+  const clock = createClock({ defaultIntervalMs: 100 });
+
+  let fired = 0;
+  let reentered = false;
+  clock.onFire(() => {
+    fired += 1;
+    // On the first activation only, synchronously change this beat's interval from inside.
+    if (!reentered) {
+      reentered = true;
+      clock.setInterval(10); // small; whether it fires now or reschedules, only one timer may remain
+    }
+  });
+
+  clock.start();
+  mock.timers.tick(100); // scheduled beat fires -> handler re-enters via setInterval(10)
+  const afterFirst = fired;
+  assert.ok(afterFirst >= 1, "at least the scheduled beat activated");
+
+  // After the re-entrant activation, exactly one armed timer should remain.
+  // Advancing by one full default interval must yield exactly ONE further activation.
+  const before = fired;
+  mock.timers.tick(100);
+  assert.equal(fired, before + 1, "exactly one further activation per interval (no doubled cadence)");
+
+  // And again — cadence stays single.
+  const before2 = fired;
+  mock.timers.tick(100);
+  assert.equal(fired, before2 + 1, "cadence remains single (not doubled)");
+});
+
+// ---------------------------------------------------------------------------
+// 14. stop() called from INSIDE the fire handler results in no further activations.
+// ---------------------------------------------------------------------------
+test("re-entrancy: stop() from inside the handler halts all further activations", () => {
+  const clock = createClock({ defaultIntervalMs: 100 });
+
+  let fired = 0;
+  clock.onFire(() => {
+    fired += 1;
+    clock.stop(); // stop from within the activation
+  });
+
+  clock.start();
+  mock.timers.tick(100); // first beat fires, then stops itself
+  assert.equal(fired, 1, "handler fired exactly once");
+
+  mock.timers.tick(1000); // plenty of intervals — none should fire after the in-handler stop
+  assert.equal(fired, 1, "no further activations after stop() from inside the handler");
+});
