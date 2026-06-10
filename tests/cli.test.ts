@@ -27,7 +27,19 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createCli, CliError } from "../packages/cli/src";
+import * as cliModule from "../packages/cli/src";
+const { createCli, CliError } = cliModule;
+/**
+ * `CliParseError` is a CONTRACT ADDITION not yet implemented. We resolve it at
+ * runtime (instead of a static named import) so this whole test file still LOADS
+ * — otherwise a missing named export would crash the harness and mask every
+ * other test. Until the impl exports it, this falls back to a private sentinel
+ * class that NO real thrown error can ever be an instanceof, so the
+ * `instanceof CliParseError` assertions fail honestly (red), not on import.
+ */
+const CliParseError: any =
+  (cliModule as any).CliParseError ??
+  class __MissingCliParseError__ extends (CliError as any) {};
 import type { AgentDefinition } from "../contracts/agent";
 import type { DefaultAgentSetting, LLMConfig } from "../shared/config";
 
@@ -578,4 +590,275 @@ test("readLLMConfig: round-trips an explicitly-empty communicators map", async (
   await cli.writeLLMConfig({ communicators: {} });
   assert.deepEqual(await cli.readLLMConfig(), { communicators: {} });
   assert.deepEqual(await cli.listCommunicators(), []);
+});
+
+// ===========================================================================
+// 12. CliParseError — a file that EXISTS but holds invalid JSON is a distinct,
+//     recoverable error (corrupt) vs an ABSENT file (which keeps prior behavior).
+//     Contract addition: CliParseError extends CliError.
+// ===========================================================================
+
+/** Write a deliberately-broken JSON body straight to disk (bypassing the Cli). */
+function writeGarbage(file: string, body = "{ this is : not json,, ]"): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, body, "utf8");
+}
+
+// --- CliParseError must itself be a CliError subclass (so the TUI's CliError
+//     catch keeps working) yet be distinguishable for "corrupt vs absent". ---
+
+test("CliParseError: is exported by the cli module and subclasses CliError", () => {
+  // Pin BOTH the export's existence and its class hierarchy. (Asserting on the
+  // module export — not the runtime fallback — keeps this red until implemented.)
+  const Exported = (cliModule as any).CliParseError;
+  assert.equal(typeof Exported, "function", "cli module must export a CliParseError class");
+  const e = new Exported("boom");
+  assert.ok(e instanceof Exported, "must be a CliParseError");
+  assert.ok(e instanceof CliError, "CliParseError must extend CliError");
+  assert.ok(e instanceof Error, "and ultimately an Error");
+});
+
+// --- readDefault: invalid JSON => CliParseError; absent => CliError but NOT CliParseError ---
+
+test("readDefault: invalid-JSON default file rejects with CliParseError (also a CliError)", async () => {
+  writeGarbage(defaultPath);
+  const cli = makeCli();
+  await assert.rejects(cli.readDefault(), (err: unknown) => {
+    assert.ok(err instanceof CliParseError, "corrupt default must be a CliParseError");
+    assert.ok(err instanceof CliError, "CliParseError must also be a CliError");
+    return true;
+  });
+});
+
+test("readDefault: ABSENT default rejects with a CliError that is NOT a CliParseError", async () => {
+  const cli = makeCli();
+  assert.equal(fs.existsSync(defaultPath), false, "precondition: default absent");
+  await assert.rejects(cli.readDefault(), (err: unknown) => {
+    assert.ok(err instanceof CliError, "absent default is still a CliError");
+    assert.equal(
+      err instanceof CliParseError,
+      false,
+      "absent (not corrupt) must NOT be flagged as a parse error",
+    );
+    return true;
+  });
+});
+
+// --- readAgent: invalid JSON => CliParseError; absent => CliError but NOT CliParseError ---
+
+test("readAgent: an agent config.json holding invalid JSON rejects with CliParseError", async () => {
+  writeGarbage(path.join(agentsDir, "alice", "config.json"));
+  const cli = makeCli();
+  await assert.rejects(cli.readAgent("alice"), (err: unknown) => {
+    assert.ok(err instanceof CliParseError, "corrupt agent config must be a CliParseError");
+    assert.ok(err instanceof CliError, "and also a CliError");
+    return true;
+  });
+});
+
+test("readAgent: an ABSENT id rejects with a CliError that is NOT a CliParseError", async () => {
+  const cli = makeCli();
+  await assert.rejects(cli.readAgent("ghost"), (err: unknown) => {
+    assert.ok(err instanceof CliError, "absent id is still a CliError ('not found')");
+    assert.equal(
+      err instanceof CliParseError,
+      false,
+      "a missing agent must not be reported as a parse error",
+    );
+    return true;
+  });
+});
+
+// --- readLLMConfig: invalid JSON => CliParseError; absent => empty catalogue (no throw) ---
+
+test("readLLMConfig: an llm.json holding invalid JSON rejects with CliParseError (also a CliError)", async () => {
+  writeGarbage(llmPath);
+  const cli = makeCli();
+  await assert.rejects(cli.readLLMConfig(), (err: unknown) => {
+    assert.ok(err instanceof CliParseError, "corrupt llm.json must be a CliParseError");
+    assert.ok(err instanceof CliError, "and also a CliError");
+    return true;
+  });
+});
+
+test("readLLMConfig: an ABSENT llm.json keeps prior behavior — returns { communicators: {} }, never throws", async () => {
+  const cli = makeCli();
+  assert.equal(fs.existsSync(llmPath), false, "precondition: llm.json absent");
+  // Absent must NOT be conflated with corrupt: the empty-catalogue contract stands.
+  const got = await cli.readLLMConfig();
+  assert.deepEqual(got, { communicators: {} });
+});
+
+test("listCommunicators: an llm.json holding invalid JSON rejects with CliParseError", async () => {
+  // listCommunicators reads the same file; a corrupt catalogue must surface as parse error.
+  writeGarbage(llmPath);
+  const cli = makeCli();
+  await assert.rejects(cli.listCommunicators(), (err: unknown) => {
+    assert.ok(err instanceof CliParseError, "corrupt catalogue must be a CliParseError");
+    assert.ok(err instanceof CliError, "and also a CliError");
+    return true;
+  });
+});
+
+// ===========================================================================
+// 13. Id validation in the pure core — read/create/write/removeAgent reject the
+//     dangerous ids "..", ".", "a/b", "a\\b", "" with CliError WITHOUT touching
+//     the filesystem (no traversal escape, no create/overwrite/delete outside).
+// ===========================================================================
+
+/** The ids the pure core must reject before any fs access. */
+const BAD_IDS = ["..", ".", "a/b", "a\\b", ""];
+
+// --- readAgent rejects each bad id with CliError ---
+
+for (const bad of BAD_IDS) {
+  test(`readAgent: rejects dangerous id ${JSON.stringify(bad)} with CliError`, async () => {
+    const cli = makeCli();
+    await assert.rejects(cli.readAgent(bad), CliError);
+  });
+}
+
+// --- createAgent rejects each bad id with CliError (even when a default exists) ---
+
+for (const bad of BAD_IDS) {
+  test(`createAgent: rejects dangerous id ${JSON.stringify(bad)} with CliError (default present)`, async () => {
+    const cli = makeCli();
+    await cli.writeDefault(sampleDefault());
+    await assert.rejects(cli.createAgent(bad), CliError);
+  });
+}
+
+// --- writeAgent rejects each bad id with CliError ---
+
+for (const bad of BAD_IDS) {
+  test(`writeAgent: rejects dangerous id ${JSON.stringify(bad)} with CliError`, async () => {
+    const cli = makeCli();
+    await assert.rejects(
+      cli.writeAgent(bad, { id: bad, intervalMs: 100, plugins: [] }),
+      CliError,
+    );
+  });
+}
+
+// --- removeAgent rejects each bad id with CliError ---
+
+for (const bad of BAD_IDS) {
+  test(`removeAgent: rejects dangerous id ${JSON.stringify(bad)} with CliError`, async () => {
+    const cli = makeCli();
+    await assert.rejects(cli.removeAgent(bad), CliError);
+  });
+}
+
+// --- The decisive traversal assertions: ".." must never escape agentsDir. ---
+
+test('createAgent(".."): does NOT create/overwrite anything outside agentsDir (sentinel one level up untouched)', async () => {
+  const cli = makeCli();
+  await cli.writeDefault(sampleDefault({ intervalMs: 4242, plugins: ["x"] }));
+
+  // A sentinel sitting EXACTLY where agents/../config.json (== <tmp>/config.json)
+  // would land if traversal were honored. It must survive byte-for-byte.
+  const escapeTarget = path.join(path.dirname(agentsDir), "config.json");
+  touch(escapeTarget, "DO-NOT-TOUCH");
+  const before = fs.readFileSync(escapeTarget, "utf8");
+
+  await assert.rejects(cli.createAgent(".."), CliError);
+
+  assert.equal(
+    fs.readFileSync(escapeTarget, "utf8"),
+    before,
+    'createAgent("..") must NOT write through the parent of agentsDir',
+  );
+  assert.equal(before, "DO-NOT-TOUCH", "sanity: sentinel body unchanged");
+});
+
+test('createAgent(".."): rejects BEFORE touching the filesystem — agentsDir stays absent if it was', async () => {
+  const cli = makeCli();
+  await cli.writeDefault(sampleDefault());
+  // writeDefault touched config/ but NOT agents/. The rejected create must not
+  // lazily materialize the agents dir either.
+  const agentsExistedBefore = fs.existsSync(agentsDir);
+  await assert.rejects(cli.createAgent(".."), CliError);
+  assert.equal(
+    fs.existsSync(agentsDir),
+    agentsExistedBefore,
+    'createAgent("..") must not create the agents directory as a side effect',
+  );
+});
+
+test('removeAgent(".."): does NOT delete the sentinel one level above agentsDir', async () => {
+  const cli = makeCli();
+
+  // Same escape target as the create test; removeAgel must not unlink it.
+  const escapeTarget = path.join(path.dirname(agentsDir), "config.json");
+  touch(escapeTarget, "DO-NOT-DELETE");
+
+  await assert.rejects(cli.removeAgent(".."), CliError);
+
+  assert.equal(
+    fs.existsSync(escapeTarget),
+    true,
+    'removeAgent("..") must NOT delete a file outside agentsDir',
+  );
+  assert.equal(
+    fs.readFileSync(escapeTarget, "utf8"),
+    "DO-NOT-DELETE",
+    "and must leave its contents intact",
+  );
+});
+
+test('writeAgent("a/b"): a slashed id does NOT create a nested file under agentsDir', async () => {
+  const cli = makeCli();
+  await assert.rejects(
+    cli.writeAgent("a/b", { id: "a/b", intervalMs: 100, plugins: [] }),
+    CliError,
+  );
+  // No "a/" subtree, no "a/b/config.json" must have appeared.
+  assert.equal(
+    fs.existsSync(path.join(agentsDir, "a", "b", "config.json")),
+    false,
+    "slashed id must not create a nested config path",
+  );
+  assert.equal(
+    fs.existsSync(path.join(agentsDir, "a")),
+    false,
+    "no intermediate directory may be created for a slashed id",
+  );
+});
+
+// ===========================================================================
+// 14. createAgent id precedence — the REQUESTED id always wins, even when the
+//     default-setting file maliciously/accidentally carries its own "id" field.
+// ===========================================================================
+
+test('createAgent: created config carries id === the REQUESTED id, NOT a stray "id" in the default', async () => {
+  const cli = makeCli();
+  // DefaultAgentSetting has no id in its type, but the on-disk file could still
+  // contain one (hand-edited / malicious). It must be overridden by the request.
+  await cli.writeDefault({
+    intervalMs: 5000,
+    plugins: ["weather"],
+    // @ts-expect-error — deliberately stuffing an out-of-contract "id" into the default file.
+    id: "evil-default-id",
+  });
+
+  await cli.createAgent("alice");
+
+  // Via the Cli read...
+  assert.equal((await cli.readAgent("alice")).id, "alice", "readAgent must report the requested id");
+  // ...and via a raw on-disk read (no normalization could be hiding it).
+  assert.equal(rawAgentConfig("alice").id, "alice", "persisted file must carry the requested id");
+});
+
+test('createAgent: a stray default "id" does not leak into a SECOND created agent either', async () => {
+  const cli = makeCli();
+  await cli.writeDefault({
+    intervalMs: 1000,
+    plugins: [],
+    // @ts-expect-error — stray id in the default file.
+    id: "evil-default-id",
+  });
+  await cli.createAgent("alice");
+  await cli.createAgent("bob");
+  assert.equal(rawAgentConfig("alice").id, "alice");
+  assert.equal(rawAgentConfig("bob").id, "bob", "each created agent gets ITS OWN requested id");
 });
