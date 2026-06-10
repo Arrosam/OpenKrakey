@@ -49,6 +49,14 @@ export interface Message {
   toolCallId?: string;
   /** Optional name (e.g. the tool name for a tool-result message). */
   name?: string;
+  /**
+   * For role:"assistant" — the tool calls this assistant turn emitted. Required to
+   * replay multi-turn tool conversations: a later role:"tool" message references a
+   * ToolCall id, and providers reject a tool result whose call was never re-sent.
+   * Adapters map these onto the provider's native form (Anthropic `tool_use`
+   * blocks, OpenAI `tool_calls`, Responses `function_call` items).
+   */
+  toolCalls?: ToolCall[];
 }
 
 export interface ToolDef {
@@ -79,7 +87,9 @@ export interface LLMRequest {
   temperature?: number;
   maxTokens?: number;
   stop?: string[];
+  /** RESERVED — streaming is not yet implemented; adapters currently ignore this. */
   stream?: boolean;
+  /** RESERVED — not yet forwarded to providers; adapters currently ignore this. */
   metadata?: Record<string, unknown>;
 }
 
@@ -88,6 +98,12 @@ export interface LLMResponse {
   content: string;
   /** Tool calls the model requested (already parsed). */
   toolCalls?: ToolCall[];
+  /**
+   * NORMALIZED stop reason: adapters map each provider's native value onto the
+   * named members ("stop" | "length" | "tool_use" | "content_filter"); an
+   * unrecognized native value passes through as-is. The provider-native value is
+   * always available via `raw`.
+   */
   stopReason?: "stop" | "length" | "tool_use" | "content_filter" | string;
   usage?: Usage;
   /** Provider-native payload — escape hatch for plugins that need specifics. */

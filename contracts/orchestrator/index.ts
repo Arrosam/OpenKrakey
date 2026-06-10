@@ -6,8 +6,21 @@
  *  2. expose the eventbus (via event-system) so plugins add/modify/remove blocks;
  *  3. execute LLM-parsed tool calls async/non-blocking (via the actionbus);
  *  4. maintain the actionbus for plugin invocation;
- *  5. coordinate clock rhythm.
- * Beat: clock tick → compose → invoke `llm.chat` → parse → dispatch.
+ *  5. coordinate clock rhythm: while started, it registers the well-known clock
+ *     actions (`clock.set_interval` / `clock.set_default_interval` /
+ *     `clock.fire_now` — see shared/actions Actions.CLOCK_*) on the actionbus so
+ *     plugins can adjust the rhythm; they are unregistered on stop().
+ *
+ * Beat (EVENT-driven, fire-and-forget): clock tick (a `clock.tick` event) →
+ * emit `prompt.gather` (plugins refresh blocks) → compose → emit `llm.request`
+ * (Request<{context}>) WITHOUT awaiting — the beat ends at the emit. The LLM
+ * round-trip returns later as an `llm.return` event (Reply<LLMResponse>) whose
+ * tool calls are dispatched fire-and-forget on the actionbus.
+ *
+ * Degradation: compose renders each block in ISOLATION — a block whose render()
+ * throws/rejects degrades to empty text for that beat (logged); it never drops
+ * the other blocks or the beat. After stop(), no further beat work runs: a beat
+ * queued behind an in-flight one is cancelled.
  *
  * `agent_instance` uses start/stop; `loader` wires PluginContext's block ops to
  * the block-store methods below.

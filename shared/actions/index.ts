@@ -13,11 +13,18 @@
 import type { ComposedContext } from "../../contracts/context";
 import type { LLMResponse } from "../../contracts/llm";
 
-/** Well-known synchronous capability actions invoked on the actionbus. */
+/**
+ * Well-known actions invoked on the actionbus. (LLM access is NOT an action —
+ * plugins use the key-less `PluginContext.llm` library directly.)
+ *
+ * CLOCK_* rhythm controls are registered by the orchestrator while it is started
+ * (unregistered on stop). Params: the two setters take `{ ms: number }` (positive);
+ * `clock.fire_now` takes none.
+ */
 export const Actions = {
-  LLM_EMBED: "llm.embed",
-  LLM_OCR: "llm.ocr",
-  LLM_RERANK: "llm.rerank",
+  CLOCK_SET_INTERVAL: "clock.set_interval",
+  CLOCK_SET_DEFAULT_INTERVAL: "clock.set_default_interval",
+  CLOCK_FIRE_NOW: "clock.fire_now",
 } as const;
 
 /** Well-known generic events emitted on the eventbus to activate plugins. */
