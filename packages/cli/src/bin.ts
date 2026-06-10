@@ -25,7 +25,7 @@ function parsePage(args: string[]): InitialPage {
     case "providers":
       return "providers";
     default:
-      console.log(USAGE);
+      console.error(USAGE);
       process.exit(1);
   }
 }
