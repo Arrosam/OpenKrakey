@@ -22,6 +22,9 @@ function mapContentPart(part: ContentPart): unknown {
       return { type: "text", text: part.text };
     case "image": {
       const img = part.image;
+      if (!img.url && !img.data) {
+        return { type: "text", text: "[unsupported image content]" };
+      }
       return {
         type: "image",
         source: img.url
@@ -35,6 +38,9 @@ function mapContentPart(part: ContentPart): unknown {
     }
     case "document": {
       const doc = part.document;
+      if (!doc.url && !doc.data) {
+        return { type: "text", text: "[unsupported document content]" };
+      }
       return {
         type: "document",
         source: doc.url
@@ -60,11 +66,26 @@ function mapContent(content: string | ContentPart[]): unknown {
   return content.map(mapContentPart);
 }
 
-/** Map our messages onto Anthropic messages (role user/assistant only). */
+/** Map an assistant message's text content into Anthropic text blocks. */
+function assistantTextBlocks(content: string | ContentPart[]): unknown[] {
+  if (typeof content === "string") {
+    return content.length > 0 ? [{ type: "text", text: content }] : [];
+  }
+  return content
+    .filter((p) => p.type === "text" && p.text.length > 0)
+    .map((p) => ({ type: "text", text: (p as { text: string }).text }));
+}
+
+/**
+ * Map our messages onto Anthropic messages (role user/assistant only). system
+ * messages are hoisted out separately (see {@link chat}) and never appear here.
+ */
 function mapMessages(messages: Message[]): unknown[] {
-  return messages.map((m) => {
+  const out: unknown[] = [];
+  for (const m of messages) {
+    if (m.role === "system") continue;
     if (m.role === "tool") {
-      return {
+      out.push({
         role: "user",
         content: [
           {
@@ -73,10 +94,40 @@ function mapMessages(messages: Message[]): unknown[] {
             content: mapContent(m.content),
           },
         ],
-      };
+      });
+      continue;
     }
-    return { role: m.role, content: mapContent(m.content) };
-  });
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      const blocks = [
+        ...assistantTextBlocks(m.content),
+        ...m.toolCalls.map((tc) => ({
+          type: "tool_use",
+          id: tc.id,
+          name: tc.name,
+          input: tc.arguments,
+        })),
+      ];
+      out.push({ role: "assistant", content: blocks });
+      continue;
+    }
+    out.push({ role: m.role, content: mapContent(m.content) });
+  }
+  return out;
+}
+
+/** Concatenate the text of any role:"system" messages (in order). */
+function hoistSystem(messages: Message[]): string | undefined {
+  const texts = messages
+    .filter((m) => m.role === "system")
+    .map((m) =>
+      typeof m.content === "string"
+        ? m.content
+        : m.content
+            .filter((p) => p.type === "text")
+            .map((p) => (p as { text: string }).text)
+            .join(""),
+    );
+  return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
 /** Map our tool defs onto Anthropic tool defs. */
@@ -102,6 +153,21 @@ interface AnthropicResponse {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
+/** Map an Anthropic stop_reason onto the normalized stopReason vocabulary. */
+function normalizeStopReason(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "max_tokens":
+      return "length";
+    case "tool_use":
+      return "tool_use";
+    default:
+      return reason;
+  }
+}
+
 export async function chat(
   req: LLMRequest,
   cfg: AdapterCfg,
@@ -113,7 +179,12 @@ export async function chat(
     max_tokens: req.maxTokens ?? cfg.maxTokens ?? 4096,
     messages: mapMessages(req.messages),
   };
-  if (req.system !== undefined) body.system = req.system;
+  const hoisted = hoistSystem(req.messages);
+  const system =
+    req.system !== undefined && hoisted !== undefined
+      ? `${req.system}\n${hoisted}`
+      : (req.system ?? hoisted);
+  if (system !== undefined) body.system = system;
   if (req.tools !== undefined) body.tools = mapTools(req.tools);
   const temperature = req.temperature ?? cfg.temperature;
   if (temperature !== undefined) body.temperature = temperature;
@@ -154,7 +225,7 @@ export async function chat(
 
   const response: LLMResponse = {
     content,
-    stopReason: data.stop_reason,
+    stopReason: normalizeStopReason(data.stop_reason),
     usage: {
       inputTokens: data.usage?.input_tokens,
       outputTokens: data.usage?.output_tokens,

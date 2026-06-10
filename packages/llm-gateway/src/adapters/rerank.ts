@@ -26,6 +26,19 @@ interface RerankApiResponse {
   usage?: { input_tokens?: number; output_tokens?: number };
 }
 
+/** A provider's echoed document is a string, or an object with a string `.text`. */
+function echoedDocument(doc: unknown): string | undefined {
+  if (typeof doc === "string") return doc;
+  if (
+    doc !== null &&
+    typeof doc === "object" &&
+    typeof (doc as { text?: unknown }).text === "string"
+  ) {
+    return (doc as { text: string }).text;
+  }
+  return undefined;
+}
+
 export async function rerank(
   req: RerankRequest,
   cfg: AdapterCfg,
@@ -57,13 +70,17 @@ export async function rerank(
 
   const data = (await res.json()) as RerankApiResponse;
 
-  const results: RerankResult[] = (data.results ?? [])
+  let results: RerankResult[] = (data.results ?? [])
     .map((r) => ({
       index: r.index,
       score: r.relevance_score,
-      document: req.documents[r.index],
+      document: echoedDocument(r.document) ?? req.documents[r.index],
     }))
     .sort((a, b) => b.score - a.score);
+
+  if (req.topN !== undefined) {
+    results = results.slice(0, req.topN);
+  }
 
   const response: RerankResponse = { results };
   if (data.usage !== undefined) {
