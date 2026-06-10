@@ -25,9 +25,24 @@
 - 共享插件放 `public_plugin/<id>/`（数据共享 → 多 Agent 共享知识）；Agent 私有插件放 `agents/<id>/plugins/<id>/`（数据隔离，覆盖同名共享插件）。
 - "共享代码、而非共享单例"：每个 Agent 各自实例化，共享/隔离取决于插件数据目录的位置。
 
+## 快速开始（MVP）
+
+```bash
+npm install
+cp config/llm.example.json config/llm.json   # 填入你的 API key（或用 "${ENV_VAR}" 引用环境变量）
+npm run cli                                   # → Agents → ➕ Create new（以 Default 为模板，含全部 MVP 插件）
+npm start                                     # 启动所有 agents/*/config.json —— 直接在终端对话
+```
+
+MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份块）· `history`（对话记忆，重启不丢）·
+`console-channel`（终端输入/输出，输入即唤醒）· `notes`（持久笔记工具）· `toolbox`（时间 + LLM 自调节奏）。
+把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本。
+
 ## 状态
 
-🚧 设计定稿（见 ARCHITECTURE.md），正在从零重建实现。栈：TypeScript + Node.js。
+✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 6 个插件，
+端到端测试覆盖完整一拍：输入 → compose → LLM → 工具调用 → 结果折叠进下一拍 → 输出）已完成，616 项测试全绿。
+栈：TypeScript + Node.js。
 
 ## License
 

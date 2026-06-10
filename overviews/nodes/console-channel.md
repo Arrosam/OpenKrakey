@@ -22,7 +22,8 @@ channels (Discord etc.) are siblings behind the same input/output event seam.
   pattern used by tests/agent.test.ts) — it deliberately has no in-process stream injection.
 
 ## Status
-planned
+done
 
 ## Change log
 - 2026-06-11: node specced (Phase-1 MVP wave).
+- 2026-06-11: implemented (Phase-1 MVP wave) — edge tests + e2e loop green.
