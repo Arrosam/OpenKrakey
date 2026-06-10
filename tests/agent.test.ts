@@ -31,8 +31,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import { createAgentInstance } from "../packages/agent_instance/src";
 import type { AgentDefinition } from "../contracts/agent";
+import { Events } from "../shared/actions";
 
 // ---------------------------------------------------------------------------
 // per-test temp sandbox (all ABSOLUTE paths; both dirs start EMPTY)
@@ -370,4 +373,216 @@ test("BVA: a very large intervalMs — bare agent starts and stops cleanly", asy
   const agent = make(bareDef("interval-huge", { intervalMs: 2_147_483_647 }), baseDeps());
   await assert.doesNotReject(() => agent.start());
   await assert.doesNotReject(() => agent.stop());
+});
+
+// ===========================================================================
+// Behavior 7 — core events ACTIVATE plugins: agent.start is plugin-observable
+//
+// These are still black-box at the agent boundary (we only drive start/stop),
+// but they exercise the contract promise from shared/actions: the core emits
+// Events.AGENT_START to ACTIVATE plugins, so a plugin that subscribes during
+// setup MUST observe agent.start once the agent is live. We make the plugin
+// OBSERVABLE the same way the loader tests do: it writes its observations into
+// exported module state, and the test re-imports the SAME file by URL (ESM
+// caches by resolved URL) to read them back.
+// ===========================================================================
+
+/**
+ * Write a public plugin under <publicPluginDir>/<id>/index.ts. A public plugin
+ * named in def.plugins is loaded from this shared location (mirrors the loader
+ * tests). `body` is the full module source.
+ */
+function writePublicPlugin(id: string, body: string): string {
+  const pdir = path.join(publicPluginDir, id);
+  fs.mkdirSync(pdir, { recursive: true });
+  const file = path.join(pdir, "index.ts");
+  fs.writeFileSync(file, body, "utf8");
+  return file;
+}
+
+/** Re-import the SAME module file the agent's loader imported (ESM URL cache). */
+async function importPublicPlugin(id: string): Promise<any> {
+  const file = path.join(publicPluginDir, id, "index.ts");
+  return import(pathToFileURL(file).href);
+}
+
+/**
+ * A recorder plugin: in setup it subscribes to the bus and appends every event
+ * name it sees (in order) to exported `seen`, and records each agent.start
+ * payload's agentId into `startIds`. `setupDelayMs`, if > 0, makes setup AWAIT
+ * that long before returning (used to model an in-flight start()).
+ *
+ * Event names are passed literally so the module is self-contained (it cannot
+ * import the test's `Events` constant), but the test asserts against the
+ * Events.* constants to stay coupled to the contract vocabulary.
+ */
+function recorderPlugin(id: string, setupDelayMs = 0): string {
+  const delay =
+    setupDelayMs > 0
+      ? `await new Promise((r) => setTimeout(r, ${setupDelayMs}));`
+      : "";
+  return `
+export const seen = [];      // event names, in arrival order
+export const startIds = [];  // agentId from each agent.start payload
+export default {
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  async setup(ctx) {
+    ctx.events.on("agent.start", (p) => {
+      seen.push("agent.start");
+      startIds.push(p && p.data ? p.data.agentId : undefined);
+    });
+    ctx.events.on("clock.tick", () => { seen.push("clock.tick"); });
+    ${delay}
+  },
+};
+`;
+}
+
+/** Poll a synchronous predicate up to `timeoutMs`, resolving as soon as true. */
+async function waitUntil(pred: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test("activation: a plugin subscribing to Events.AGENT_START in setup observes agent.start after start() resolves", async () => {
+  writePublicPlugin("rec-start", recorderPlugin("rec-start"));
+  const agent = make(
+    bareDef("act-1", { intervalMs: 10_000, plugins: ["rec-start"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  // The contract: core emits AGENT_START to ACTIVATE plugins. By the time start()
+  // has resolved, the subscribed plugin must have seen exactly one agent.start.
+  const mod = await importPublicPlugin("rec-start");
+  assert.equal(
+    mod.seen.filter((e: string) => e === Events.AGENT_START).length,
+    1,
+    "the plugin subscribed in setup must observe agent.start exactly once",
+  );
+
+  await agent.stop();
+});
+
+test("activation: the agent.start payload's data.agentId equals the def id", async () => {
+  writePublicPlugin("rec-id", recorderPlugin("rec-id"));
+  const agent = make(
+    bareDef("act-id-7", { intervalMs: 10_000, plugins: ["rec-id"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-id");
+  assert.deepEqual(
+    mod.startIds,
+    ["act-id-7"],
+    "agent.start must carry data.agentId === the AgentDefinition id",
+  );
+
+  await agent.stop();
+});
+
+test("activation/ordering: agent.start arrives BEFORE the first clock.tick", async () => {
+  // A short interval so a tick actually fires within the test window.
+  writePublicPlugin("rec-order", recorderPlugin("rec-order"));
+  const agent = make(
+    bareDef("act-order", { intervalMs: 25, plugins: ["rec-order"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  // Wait until at least one tick has been recorded (or we time out).
+  const mod = await importPublicPlugin("rec-order");
+  await waitUntil(() => mod.seen.includes(Events.CLOCK_TICK), 1500);
+  await agent.stop();
+
+  assert.ok(mod.seen.includes(Events.AGENT_START), "agent.start must have been observed");
+  assert.ok(mod.seen.includes(Events.CLOCK_TICK), "at least one clock.tick must have fired");
+  assert.ok(
+    mod.seen.indexOf(Events.AGENT_START) < mod.seen.indexOf(Events.CLOCK_TICK),
+    "agent.start must be delivered BEFORE the first clock.tick",
+  );
+});
+
+// ===========================================================================
+// Behavior 8 — stop() during an in-flight start() lands genuinely stopped
+//
+// A plugin whose setup AWAITS keeps start() in flight. We call start() WITHOUT
+// awaiting, immediately stop(), then await the original start() promise: neither
+// must reject, and crucially NO live beat timer may survive.
+//
+// ISOLATION NOTE: this scenario runs in a CHILD process. A violating
+// implementation leaks an unstoppable re-arming timer (stop() is latched, so
+// nothing in-process can ever clear it), which would keep THIS process's event
+// loop alive forever and hang the whole test run. The child makes the same
+// observations, reports them as JSON, and force-exits, so the suite finishes
+// in both the red and green states.
+// ===========================================================================
+
+test("inflight stop: stop() during an in-flight start() leaks NO live clock timer; both settle; a later cycle works", () => {
+  const agentEntry = pathToFileURL(
+    path.resolve("packages", "agent_instance", "src", "index.ts"),
+  ).href;
+  const script = `
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createAgentInstance } from ${JSON.stringify(agentEntry)};
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-inflight-"));
+const publicPluginDir = path.join(tmp, "public_plugin");
+const agentsDir = path.join(tmp, "agents");
+const pdir = path.join(publicPluginDir, "rec-inflight");
+fs.mkdirSync(pdir, { recursive: true });
+fs.mkdirSync(agentsDir, { recursive: true });
+fs.writeFileSync(path.join(pdir, "index.ts"), ${JSON.stringify(recorderPlugin("rec-inflight", 30))}, "utf8");
+
+const result = { startRejected: false, stopRejected: false, ticks: -1, cycleOk: false };
+try {
+  const agent = createAgentInstance(
+    { id: "act-inflight", intervalMs: 20, plugins: ["rec-inflight"] },
+    { publicPluginDir, agentsDir },
+  );
+  // start() is in flight (its plugin setup awaits ~30ms). Do NOT await it.
+  const p = agent.start();
+  await agent.stop().catch(() => { result.stopRejected = true; });
+  await p.catch(() => { result.startRejected = true; });
+
+  // Give any (erroneously) armed timer well over 2x the interval to fire.
+  await new Promise((r) => setTimeout(r, 20 * 5));
+  const mod = await import(pathToFileURL(path.join(pdir, "index.ts")).href);
+  result.ticks = mod.seen.filter((e) => e === "clock.tick").length;
+
+  // The agent must end genuinely settled — a later start()/stop() pair must not reject.
+  try { await agent.start(); await agent.stop(); result.cycleOk = true; } catch { result.cycleOk = false; }
+} finally {
+  console.log("RESULT:" + JSON.stringify(result));
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  process.exit(0); // force exit: a violating impl's leaked timer must not hang the child
+}
+`;
+  const scriptPath = path.join(tmp, "inflight-child.ts");
+  fs.writeFileSync(scriptPath, script, "utf8");
+
+  const run = spawnSync(process.execPath, ["--import", "tsx", scriptPath], {
+    cwd: path.resolve("."), // repo root so the child resolves tsx + packages
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  const line = (run.stdout ?? "").split(/\r?\n/).find((l) => l.startsWith("RESULT:"));
+  assert.ok(line, "child must report a RESULT line (stderr: " + (run.stderr ?? "") + ")");
+  const result = JSON.parse(line!.slice("RESULT:".length));
+
+  assert.equal(result.stopRejected, false, "stop() during an in-flight start() must resolve");
+  assert.equal(result.startRejected, false, "the in-flight start() promise must not reject after stop()");
+  assert.equal(
+    result.ticks,
+    0,
+    "an agent stopped during start() must NOT leave a live beat timer (no clock.tick)",
+  );
+  assert.equal(result.cycleOk, true, "a later start()/stop() pair must settle without rejecting");
 });
