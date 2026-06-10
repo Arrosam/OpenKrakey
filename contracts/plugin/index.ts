@@ -16,8 +16,14 @@ import type { CommunicatorLibrary } from "../llm";
 export interface PluginManifest {
   id: string;
   version: string;
-  /** Plugin ids / action names this plugin needs; the loader verifies at load. */
+  /**
+   * What this plugin needs, verified by the loader: an entry containing a dot is
+   * an ACTION name (must be registered on the actionbus by that plugin's setup
+   * time); any other entry must match a plugin id or a `provides` capability of a
+   * plugin in the same load set.
+   */
   requires?: string[];
+  /** Capability names this plugin provides; another plugin's `requires` may name them. */
   provides?: string[];
   configSchema?: unknown;
 }

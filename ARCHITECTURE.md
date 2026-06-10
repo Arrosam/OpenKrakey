@@ -80,8 +80,8 @@
 2. 经 event-system **暴露 eventbus**：插件注册进来、在特定事件下改 context 块——块按 **id 寻址**，任何插件都可改**别的插件**的块（如 A 改 B 的 `BBB`）；
 3. **异步、不阻塞**地执行从 LLM 解析出的指令（工具调用）；
 4. 经 event-system **维持 actionbus** 供插件被调用；
-5. **协调时钟节奏**。
-> 一拍（beat）：clock 发 tick → orchestrator compose 完整 context → 调 `llm.chat`（插件）→ 解析返回 → dispatch 工具调用（异步）。
+5. **协调时钟节奏**：启动期间在 actionbus 注册 `clock.set_interval` / `clock.set_default_interval` / `clock.fire_now`（见 shared/actions `Actions.CLOCK_*`），插件可随时调节奏；stop 时注销。
+> 一拍（beat，**事件驱动**）：clock 发 tick（`clock.tick` 事件）→ orchestrator 发 `prompt.gather`（插件刷新各自块）→ compose 完整 context → 发 `llm.request` 事件（**不等待**，拍到此结束）。LLM 插件监听 `llm.request`、完成往返后发 `llm.return`（`Reply<LLMResponse>`，含已解析的 toolCalls）→ orchestrator dispatch 工具调用（异步、互相隔离）。compose 对每块**单独容错**：某块 render 失败仅降级为空文本，绝不拖垮整拍。
 
 **event-system** —— **独立的中枢总线**：`eventbus`（emit/on）+ `actionbus`（register/invoke）。clock、loader、orchestrator、各插件**都接到这里**来收发各类事件、注册可调用动作。保持独立，正是因为接入它的东西多。
 
@@ -102,10 +102,10 @@
      ▲                                                          │
      │                                          clock 倒数到点 → 发 tick
      │                                                          ▼
-     │                       orchestrator: compose 完整 context → invoke("llm.chat", ctx) ─▶ LLM 插件
-     │                                                          │ (在途；不阻塞)
+     │              orchestrator: 发 prompt.gather → compose 完整 context → emit "llm.request" ─▶ LLM 插件（监听）
+     │                                                          │ (在途；不阻塞，拍到此结束)
      │                                                          ▼
-     │                              解析返回（response.parse 插件 / 默认）→ 动作[]
+     │                LLM 插件完成往返 + 解析 → emit "llm.return"（Reply<LLMResponse>，含 toolCalls）
      └──invoke◀── event-system(actionbus) ◀── orchestrator 逐个 dispatch（工具异步甩出）
 ```
 
