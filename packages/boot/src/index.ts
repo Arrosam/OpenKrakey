@@ -55,7 +55,10 @@ export function loadLLMConfig(llmPath: string): LLMConfig {
   const p = path.resolve(process.cwd(), llmPath);
   if (!fs.existsSync(p)) return { communicators: {} };
   try {
-    return JSON.parse(fs.readFileSync(p, "utf8")) as LLMConfig;
+    const cfg = JSON.parse(fs.readFileSync(p, "utf8")) as LLMConfig;
+    // A config that omits `communicators` (or sets it null) degrades to an empty
+    // catalogue so downstream consumers never see undefined.
+    return cfg.communicators == null ? { ...cfg, communicators: {} } : cfg;
   } catch (err) {
     console.warn("failed to read/parse " + p + ": " + err);
     return { communicators: {} };
@@ -73,11 +76,22 @@ export async function run(
 ): Promise<AgentHandle[]> {
   const handles: AgentHandle[] = [];
   for (const def of defs) {
+    let agent: AgentHandle | undefined;
     try {
-      const agent = createAgentInstance(def, { library: opts?.library, log: opts?.log });
+      agent = createAgentInstance(def, { library: opts?.library, log: opts?.log });
       await agent.start();
       handles.push(agent);
     } catch (err) {
+      // If the handle was created but start() failed, tear it down so plugins
+      // that loaded before the failure release their resources. Swallow any
+      // teardown error — the loop must still continue to the next def.
+      if (agent !== undefined) {
+        try {
+          await agent.stop();
+        } catch {
+          // best-effort cleanup
+        }
+      }
       (opts?.log ?? consoleLogger).error("failed to start agent '" + def.id + "': " + err);
     }
   }
