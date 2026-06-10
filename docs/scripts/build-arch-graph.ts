@@ -72,8 +72,12 @@ function lineOf(node: ts.Node, sf: ts.SourceFile): number {
 }
 function signatureOf(node: ts.Node, sf: ts.SourceFile): string {
   let t = node.getText(sf);
-  const brace = t.indexOf("{");
-  if (brace !== -1) t = t.slice(0, brace);
+  // Strip only an actual body, not the first "{" (which would truncate inline
+  // object types in params/returns). Function-like nodes carry a `.body`; type
+  // aliases and interface members have none, so we keep their full text.
+  const body = (node as unknown as { body?: ts.Node }).body
+    ?? ((node as unknown as { initializer?: ts.Node }).initializer as unknown as { body?: ts.Node })?.body;
+  if (body) t = node.getText(sf).slice(0, body.getStart(sf) - node.getStart(sf));
   return t.replace(/\bexport\b\s*/, "").replace(/[;{]\s*$/, "").replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
@@ -86,12 +90,18 @@ function extractFile(abs: string): FileInfo {
   let fileDoc = "";
   const lead = ts.getLeadingCommentRanges(text, 0);
   if (lead && lead.length) {
-    fileDoc = text.slice(lead[0].pos, lead[0].end).replace(/^\/\*\*?/, "").replace(/\*\/$/, "")
+    // Prefer the LAST JSDoc-style block comment so a leading license/lint banner
+    // doesn't shadow the real file doc; fall back to the first comment otherwise.
+    const jsdoc = [...lead].reverse().find((r) => text.slice(r.pos, r.end).startsWith("/**"));
+    const r = jsdoc ?? lead[0];
+    fileDoc = text.slice(r.pos, r.end).replace(/^\/\*\*?/, "").replace(/\*\/$/, "")
       .split("\n").map((l) => l.replace(/^\s*\*?\s?/, "")).join(" ").replace(/\s+/g, " ").trim();
   }
 
   for (const st of sf.statements) {
     if (ts.isImportDeclaration(st) && ts.isStringLiteral(st.moduleSpecifier)) {
+      imports.push(st.moduleSpecifier.text);
+    } else if (ts.isExportDeclaration(st) && st.moduleSpecifier && ts.isStringLiteral(st.moduleSpecifier)) {
       imports.push(st.moduleSpecifier.text);
     } else if (ts.isInterfaceDeclaration(st)) {
       decls.push({ name: st.name.text, kind: "interface", signature: "interface " + st.name.text + " { " + st.members.map((m) => signatureOf(m, sf)).join("; ") + " }", doc: jsDoc(st), line: lineOf(st, sf) });
