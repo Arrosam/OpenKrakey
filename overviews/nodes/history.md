@@ -28,7 +28,8 @@ conversation so far, and persists it as JSONL under `dataDir` so it survives res
 - teardown: `ctx.removeBlock("history")`, unsubscribe all listeners.
 
 ## Status
-planned
+done
 
 ## Change log
 - 2026-06-11: node specced (Phase-1 MVP wave).
+- 2026-06-11: implemented (Phase-1 MVP wave) — edge tests + e2e loop green.

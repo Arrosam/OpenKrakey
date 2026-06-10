@@ -18,7 +18,8 @@ concise and helpful."; `priority` = 10000.
 - teardown: `ctx.removeBlock("persona")`.
 
 ## Status
-planned
+done
 
 ## Change log
 - 2026-06-11: node specced (Phase-1 MVP wave).
+- 2026-06-11: implemented (Phase-1 MVP wave) — edge tests + e2e loop green.
