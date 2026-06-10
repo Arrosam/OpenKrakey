@@ -41,6 +41,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadAgentConfigs, loadLLMConfig, run } from "../packages/boot/src";
+// createCommunicatorLibrary is the llm-gateway node's PUBLIC seam (the factory boot
+// calls to turn an LLMConfig into a CommunicatorLibrary). Imported here only as that
+// public entry point — its implementation is not inspected.
+import { createCommunicatorLibrary } from "../packages/llm-gateway/src";
 import type { AgentDefinition, AgentHandle } from "../contracts/agent";
 import type { CommunicatorLibrary } from "../contracts/llm";
 
@@ -318,4 +322,125 @@ test("run: handle.stop() resolves (and is idempotent enough to call once here)",
   // Explicitly exercise stop() as a Promise; afterEach will call it again and
   // Promise.allSettled tolerates a second stop on an already-stopped handle.
   await assert.doesNotReject(() => handles[0].stop());
+});
+
+// ===========================================================================
+// loadLLMConfig — communicators-key NORMALIZATION (pin #1)
+//
+// A file that is VALID JSON but is MISSING the `communicators` key must still
+// yield a normalized LLMConfig whose `.communicators` is an EMPTY OBJECT (never
+// `undefined`). Downstream (createCommunicatorLibrary) iterates that map, so an
+// absent key has to be filled in, not passed through as undefined.
+// ===========================================================================
+
+test("loadLLMConfig: valid JSON object WITHOUT a communicators key -> communicators normalized to {}", () => {
+  // `default` present, but no `communicators` key at all.
+  writeLLMRaw(JSON.stringify({ default: "x" }));
+
+  const got = loadLLMConfig(llmPathFor());
+  // The key must exist and be an (empty) object — not undefined.
+  assert.notEqual(got.communicators, undefined);
+  assert.deepEqual(got.communicators, {});
+});
+
+test("loadLLMConfig: valid JSON object WITHOUT a communicators key preserves other keys (e.g. default)", () => {
+  writeLLMRaw(JSON.stringify({ default: "x" }));
+
+  const got = loadLLMConfig(llmPathFor());
+  // Normalization fills communicators but must not drop the rest of the object.
+  assert.equal(got.default, "x");
+});
+
+test("loadLLMConfig: an EMPTY JSON object {} -> { communicators: {} } (key normalized in)", () => {
+  writeLLMRaw(JSON.stringify({}));
+
+  const got = loadLLMConfig(llmPathFor());
+  assert.notEqual(got.communicators, undefined);
+  assert.deepEqual(got, { communicators: {} });
+});
+
+// ===========================================================================
+// run — DEGRADE-NOT-CRASH (spec R3) (pin #2)
+//
+// Given a batch where one def is unbuildable (its loader import fails) and one is
+// a bare zero-plugin def, run() must NOT reject: it degrades, dropping the broken
+// agent and returning ONLY the good agent's handle. The good handle must then
+// stop() cleanly.
+// ===========================================================================
+
+test("run: a def whose plugin import fails is dropped; the good def still yields exactly one handle (R3)", async () => {
+  const bad: AgentDefinition = {
+    id: "broken",
+    intervalMs: 10000,
+    plugins: ["definitely-not-a-real-plugin"],
+    privatePlugins: [],
+    config: {},
+  };
+  const good = bareDef("survivor");
+
+  let handles: AgentHandle[] = [];
+  await assert.doesNotReject(async () => {
+    handles = trackAll(await run([bad, good], { library: stubLibrary() }));
+  });
+
+  // Exactly one handle — and it is the GOOD agent, not the broken one.
+  assert.equal(handles.length, 1);
+  assert.equal(handles[0].id, "survivor");
+});
+
+test("run: after a degraded batch, the surviving handle stop()s cleanly (R3)", async () => {
+  const bad: AgentDefinition = {
+    id: "broken",
+    intervalMs: 10000,
+    plugins: ["definitely-not-a-real-plugin"],
+    privatePlugins: [],
+    config: {},
+  };
+  const good = bareDef("survivor");
+
+  const handles = trackAll(await run([bad, good], { library: stubLibrary() }));
+  assert.equal(handles.length, 1);
+  // The good agent is fully wired and must shut down without error.
+  await assert.doesNotReject(() => handles[0].stop());
+});
+
+// ===========================================================================
+// createCommunicatorLibrary — RESILIENCE to degenerate config (pin #3)
+//
+// The llm-gateway factory boot calls. Handed a config with no communicators
+// (empty object, or one that only carries a `default`), it must NOT throw and
+// must yield an EMPTY library: list() is empty and withCapability("chat") is
+// empty. (Cast as any: these are the degenerate shapes loadLLMConfig normalizes
+// toward; the test only cares about runtime behavior, not the static type.)
+// ===========================================================================
+
+test("createCommunicatorLibrary: empty config {} does not throw and yields an empty library", () => {
+  let lib: CommunicatorLibrary | undefined;
+  assert.doesNotThrow(() => {
+    lib = createCommunicatorLibrary({} as any);
+  });
+  assert.ok(lib);
+  assert.deepEqual(lib!.list(), []);
+  assert.deepEqual(lib!.withCapability("chat"), []);
+});
+
+test("createCommunicatorLibrary: a config with only { default } (no communicators) yields an empty library", () => {
+  let lib: CommunicatorLibrary | undefined;
+  assert.doesNotThrow(() => {
+    lib = createCommunicatorLibrary({ default: "x" } as any);
+  });
+  assert.ok(lib);
+  assert.deepEqual(lib!.list(), []);
+});
+
+test("createCommunicatorLibrary: empty library reports nothing present (has/get/withCapability all empty)", () => {
+  const lib = createCommunicatorLibrary({} as any);
+  // Nothing registered: list empty, has() false, get() undefined, every
+  // capability bucket empty.
+  assert.deepEqual(lib.list(), []);
+  assert.equal(lib.has("anything"), false);
+  assert.equal(lib.get("anything"), undefined);
+  for (const cap of ["chat", "embed", "rerank", "ocr"] as const) {
+    assert.deepEqual(lib.withCapability(cap), []);
+  }
 });
