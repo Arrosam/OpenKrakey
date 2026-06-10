@@ -27,6 +27,14 @@ export class CliError extends Error {
   }
 }
 
+/** Thrown when a file EXISTS but holds invalid JSON (distinct from "absent"). */
+export class CliParseError extends CliError {
+  constructor(message: string) {
+    super(message);
+    this.name = "CliParseError";
+  }
+}
+
 /** The pure config-file surface the interactive shell drives. */
 export interface Cli {
   /** Agent ids that have a config.json, sorted. Missing dir → []. */
@@ -88,7 +96,7 @@ async function listSubdirs(dir: string): Promise<string[]> {
     .sort();
 }
 
-/** Read + JSON.parse a file. ENOENT → undefined; parse error → CliError(badJsonMsg). */
+/** Read + JSON.parse a file. ENOENT → undefined; parse error → CliParseError(badJsonMsg). */
 async function readJson<T>(
   path: string,
   badJsonMsg: string,
@@ -103,7 +111,14 @@ async function readJson<T>(
   try {
     return JSON.parse(raw) as T;
   } catch {
-    throw new CliError(badJsonMsg);
+    throw new CliParseError(badJsonMsg);
+  }
+}
+
+/** Reject ids that can't be a single safe folder name (before any fs access). */
+function assertValidAgentId(id: string): void {
+  if (id.trim().length === 0 || id === "." || id === ".." || /[/\\\s]/.test(id)) {
+    throw new CliError(`invalid agent id "${id}"`);
   }
 }
 
@@ -162,6 +177,7 @@ export function createCli(deps: CliDeps): Cli {
     },
 
     async readAgent(id: string): Promise<AgentDefinition> {
+      assertValidAgentId(id);
       const config = paths(id).config;
       const def = await readJson<AgentDefinition>(
         config,
@@ -174,6 +190,7 @@ export function createCli(deps: CliDeps): Cli {
     },
 
     async createAgent(id: string): Promise<void> {
+      assertValidAgentId(id);
       const { dir, config } = paths(id);
       try {
         await readFile(config);
@@ -196,18 +213,20 @@ export function createCli(deps: CliDeps): Cli {
         throw err;
       }
 
-      const def: AgentDefinition = { id, ...setting };
+      const def: AgentDefinition = { ...setting, id };
       await mkdir(dir, { recursive: true });
       await writeFile(config, JSON.stringify(def, null, PRETTY));
     },
 
     async writeAgent(id: string, def: AgentDefinition): Promise<void> {
+      assertValidAgentId(id);
       const { dir, config } = paths(id);
       await mkdir(dir, { recursive: true });
       await writeFile(config, JSON.stringify(def, null, PRETTY));
     },
 
     async removeAgent(id: string): Promise<void> {
+      assertValidAgentId(id);
       await rm(paths(id).config, { force: true });
     },
 

@@ -8,7 +8,7 @@
  * private QuitSignal; expected CliErrors are printed and the loop continues;
  * anything else bubbles out.
  */
-import { checkbox, confirm, input, select } from "@inquirer/prompts";
+import { checkbox, confirm, input, password, select } from "@inquirer/prompts";
 
 import type { AgentDefinition } from "../../../contracts/agent";
 import type {
@@ -17,7 +17,7 @@ import type {
   LLMConfig,
 } from "../../../shared/config";
 
-import { CliError, type Cli } from "./index";
+import { CliError, CliParseError, type Cli } from "./index";
 import { KRAKEY_LOGO } from "./logo";
 
 export type InitialPage = "landing" | "agents" | "default" | "providers";
@@ -362,10 +362,23 @@ export async function runInteractiveLoop(
   }
 
   async function defaultPage(): Promise<Page> {
-    let setting = await guard<DefaultAgentSetting | null>(
-      () => cli.readDefault(),
-      null,
-    );
+    // A corrupt default file: print + bail to landing rather than offer a seed
+    // that would overwrite it. Absent (plain CliError) → offer to seed below.
+    let setting: DefaultAgentSetting | null;
+    try {
+      setting = await cli.readDefault();
+    } catch (err) {
+      if (err instanceof CliParseError) {
+        out(err.message);
+        return "landing";
+      }
+      if (err instanceof CliError) {
+        out(err.message);
+        setting = null;
+      } else {
+        throw err;
+      }
+    }
     if (setting === null) {
       // No default yet → offer to seed an empty one.
       const create = await ask(() =>
@@ -403,13 +416,21 @@ export async function runInteractiveLoop(
     name: string,
     isNew: boolean,
   ): Promise<boolean> {
-    const existing = cfg.communicators[name];
-    const draft: CommunicatorDef = {
-      provider: existing?.provider ?? "",
-      model: existing?.model ?? "",
-      baseURL: existing?.baseURL,
-      apiKey: existing?.apiKey,
+    // Seed the draft from the full existing def so fields we never edit
+    // (capabilities/input/output/temperature/maxTokens/…) survive a Save.
+    const existing: CommunicatorDef = cfg.communicators[name] ?? {
+      provider: "",
+      model: "",
     };
+    const draft = {
+      provider: existing.provider,
+      model: existing.model,
+      baseURL: existing.baseURL,
+      apiKey: existing.apiKey,
+    };
+    // A blank baseURL only REMOVES the field when the user explicitly cleared it;
+    // an untouched baseURL is preserved as-is.
+    let baseURLCleared = false;
 
     for (;;) {
       const maskedKey =
@@ -434,17 +455,21 @@ export async function runInteractiveLoop(
       if (field === "cancel") return false;
 
       if (field === "save") {
-        cfg.communicators[name] = {
+        const def: CommunicatorDef = {
+          ...existing,
           provider: draft.provider,
           model: draft.model,
-          ...(draft.baseURL ? { baseURL: draft.baseURL } : {}),
-          ...(draft.apiKey ? { apiKey: draft.apiKey } : {}),
         };
+        if (draft.baseURL) def.baseURL = draft.baseURL;
+        else if (baseURLCleared) delete def.baseURL;
+        if (draft.apiKey) def.apiKey = draft.apiKey;
+        cfg.communicators[name] = def;
         return true;
       }
 
       if (field === "delete") {
         delete cfg.communicators[name];
+        if (cfg.default === name) delete cfg.default;
         return true;
       }
 
@@ -468,10 +493,11 @@ export async function runInteractiveLoop(
           )
         ).trim();
         draft.baseURL = v === "" ? undefined : v;
+        baseURLCleared = v === "";
       } else {
-        // apiKey — never pre-fill with the real value; blank keeps the current.
+        // apiKey — masked entry; never pre-fill; blank keeps the current.
         const v = await ask(() =>
-          input({ message: "apiKey (blank to keep current)" }),
+          password({ message: "apiKey (blank to keep current)", mask: true }),
         );
         if (v.trim() !== "") draft.apiKey = v;
       }
@@ -479,9 +505,23 @@ export async function runInteractiveLoop(
   }
 
   async function providersPage(): Promise<Page> {
-    const cfg = await guard<LLMConfig>(() => cli.readLLMConfig(), {
-      communicators: {},
-    });
+    // A corrupt catalogue may hold API keys: print + bail to landing rather than
+    // risk overwriting it with an edit. Absent → empty catalogue (guard fallback).
+    let cfg: LLMConfig;
+    try {
+      cfg = await cli.readLLMConfig();
+    } catch (err) {
+      if (err instanceof CliParseError) {
+        out(err.message);
+        return "landing";
+      }
+      if (err instanceof CliError) {
+        out(err.message);
+        cfg = { communicators: {} };
+      } else {
+        throw err;
+      }
+    }
     const names = Object.keys(cfg.communicators).sort();
 
     const choice = await ask(() =>
