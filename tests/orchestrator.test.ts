@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createOrchestrator } from "../packages/orchestrator/src";
 import { createEventSystem } from "../packages/event-system/src";
 import { Events, Actions } from "../shared/actions";
+import type { Reply } from "../shared/actions";
 import type { ContextBlock } from "../contracts/context";
 import type { Clock } from "../contracts/clock";
 
@@ -1279,4 +1280,188 @@ test("dispatch: after an undefined LLM_RETURN, a SUBSEQUENT valid LLM_RETURN sti
   await settle();
 
   assert.equal(goodCalls, 1, "dispatch continues to work after a malformed return");
+});
+
+// ===========================================================================
+// Behavior 15 — tool.result emission as each dispatched tool call settles
+// ===========================================================================
+//
+// Contract (orchestrator header + shared/actions EventPayloads["tool.result"]):
+// "As EACH dispatched call settles, a `tool.result` event is emitted (Reply:
+//  id = the ToolCall id, name = the action name; ok+data on success,
+//  ok:false+error on rejection)". Payload type = Reply<unknown> & { name }.
+//
+// We drive via start() then emit LLM_RETURN with a Reply whose data.toolCalls
+// name actions registered on the bus, and observe Events.TOOL_RESULT.
+
+/**
+ * Collect every TOOL_RESULT payload the orchestrator emits. Returns the live
+ * array (newest pushed last) plus a by-id lookup helper, since settle order
+ * across concurrent dispatches is not guaranteed — assertions must key on id.
+ */
+function captureToolResults(events: ReturnType<typeof freshOrc>["events"]): {
+  all: Array<Reply<unknown> & { name: string }>;
+  byId(id: string): (Reply<unknown> & { name: string }) | undefined;
+} {
+  const all: Array<Reply<unknown> & { name: string }> = [];
+  events.on(Events.TOOL_RESULT, (payload) => {
+    all.push(payload as Reply<unknown> & { name: string });
+  });
+  return {
+    all,
+    byId: (id) => all.find((r) => r.id === id),
+  };
+}
+
+test("tool.result: a successful tool call emits exactly one tool.result with id/name/ok:true and the resolved data", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  const results = captureToolResults(events);
+  actions.register("tool.x", async () => ({ answer: 42 }));
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, {
+    id: "ret-1",
+    at: 0,
+    ok: true,
+    data: {
+      content: "",
+      toolCalls: [{ id: "call-x", name: "tool.x", arguments: { q: 1 } }],
+    },
+  });
+  await settle();
+
+  assert.equal(results.all.length, 1, "exactly one tool.result for one settled call");
+  const r = results.byId("call-x");
+  assert.ok(r, "tool.result id must equal the ToolCall id");
+  assert.equal(r!.id, "call-x", "id === the ToolCall id (not the llm.return id)");
+  assert.equal(r!.name, "tool.x", "name === the dispatched action name");
+  assert.equal(r!.ok, true, "a resolved handler yields ok:true");
+  assert.deepEqual(r!.data, { answer: 42 }, "data === the handler's resolved value");
+  assert.equal(r!.error, undefined, "a successful result carries no error");
+});
+
+test("tool.result: a rejecting tool call emits ok:false + non-empty string error, and its sibling success still emits its own ok result (isolation)", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  const results = captureToolResults(events);
+  actions.register("tool.bad", async () => {
+    throw new Error("tool blew up");
+  });
+  actions.register("tool.good", async () => "GOOD-VALUE");
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, {
+    id: "ret-1",
+    at: 0,
+    ok: true,
+    data: {
+      content: "",
+      toolCalls: [
+        { id: "call-bad", name: "tool.bad", arguments: { x: 1 } },
+        { id: "call-good", name: "tool.good", arguments: { y: 2 } },
+      ],
+    },
+  });
+  await settle();
+
+  assert.equal(results.all.length, 2, "both settled calls emit a tool.result");
+
+  const bad = results.byId("call-bad");
+  assert.ok(bad, "the rejecting call still emits a tool.result");
+  assert.equal(bad!.name, "tool.bad");
+  assert.equal(bad!.ok, false, "a rejection yields ok:false");
+  assert.equal(typeof bad!.error, "string", "rejection error must be a string");
+  assert.ok(bad!.error!.length > 0, "rejection error must be non-empty");
+
+  const good = results.byId("call-good");
+  assert.ok(good, "the sibling success still emits its own tool.result (isolation)");
+  assert.equal(good!.name, "tool.good");
+  assert.equal(good!.ok, true, "the sibling success is ok:true despite the rejection");
+  assert.equal(good!.data, "GOOD-VALUE", "the sibling's resolved value is carried through");
+});
+
+test("tool.result: two tool calls in one llm.return produce two tool.results whose ids match pairwise (regardless of settle order)", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  const results = captureToolResults(events);
+  // Make the first-listed call settle LAST so we cannot rely on emission order.
+  actions.register("tool.slow", async () => {
+    await new Promise((r) => setTimeout(r, 25));
+    return "slow-done";
+  });
+  actions.register("tool.fast", async () => "fast-done");
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, {
+    id: "ret-1",
+    at: 0,
+    ok: true,
+    data: {
+      content: "",
+      toolCalls: [
+        { id: "call-slow", name: "tool.slow", arguments: {} },
+        { id: "call-fast", name: "tool.fast", arguments: {} },
+      ],
+    },
+  });
+  await settle(60);
+
+  assert.equal(results.all.length, 2, "exactly two tool.result events for two calls");
+  // Assert by id lookup, never by sequence (settle order may differ from list order).
+  const slow = results.byId("call-slow");
+  const fast = results.byId("call-fast");
+  assert.ok(slow, "slow call's id must appear");
+  assert.ok(fast, "fast call's id must appear");
+  assert.equal(slow!.name, "tool.slow");
+  assert.equal(slow!.ok, true);
+  assert.equal(slow!.data, "slow-done");
+  assert.equal(fast!.name, "tool.fast");
+  assert.equal(fast!.ok, true);
+  assert.equal(fast!.data, "fast-done");
+});
+
+test("tool.result: an UNKNOWN action name emits ok:false (invoke rejects with 'Unknown action') rather than nothing", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const results = captureToolResults(events);
+
+  orc.start();
+  events.emit(Events.LLM_RETURN, {
+    id: "ret-1",
+    at: 0,
+    ok: true,
+    data: {
+      content: "",
+      toolCalls: [{ id: "call-missing", name: "tool.unregistered", arguments: {} }],
+    },
+  });
+  await settle();
+
+  assert.equal(results.all.length, 1, "an unknown action must still produce a tool.result, not silence");
+  const r = results.byId("call-missing");
+  assert.ok(r, "tool.result carries the original ToolCall id");
+  assert.equal(r!.name, "tool.unregistered", "name === the (unknown) action name");
+  assert.equal(r!.ok, false, "an unknown action rejects => ok:false");
+  assert.equal(typeof r!.error, "string", "the rejection error must be a string");
+  assert.ok(r!.error!.length > 0, "the rejection error must be non-empty");
+});
+
+test("tool.result: after stop(), a late llm.return produces NO tool.result (the llm.return subscription is gone)", async (t) => {
+  const { orc, actions, events } = freshOrc(t);
+  const results = captureToolResults(events);
+  let invoked = 0;
+  actions.register("tool.x", async () => {
+    invoked++;
+    return "ok";
+  });
+
+  orc.start();
+  orc.stop();
+  events.emit(Events.LLM_RETURN, {
+    id: "ret-late",
+    at: 0,
+    ok: true,
+    data: { content: "", toolCalls: [{ id: "call-x", name: "tool.x", arguments: {} }] },
+  });
+  await settle();
+
+  assert.equal(invoked, 0, "a stopped orchestrator no longer dispatches the tool");
+  assert.equal(results.all.length, 0, "and therefore emits no tool.result for the late return");
 });
