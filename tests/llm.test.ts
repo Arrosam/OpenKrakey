@@ -616,7 +616,7 @@ test("chat (openai): normalizes content/toolCalls(parsed)/stopReason/usage", asy
 
   assert.equal(res.content, "yo");
   assert.deepEqual(res.toolCalls, [{ id: "c1", name: "bar", arguments: { x: 2 } }]);
-  assert.equal(res.stopReason, "tool_calls");
+  assert.equal(res.stopReason, "tool_use", "openai finish_reason 'tool_calls' normalizes to 'tool_use'");
   assert.ok(res.usage);
   assert.equal(res.usage!.inputTokens, 7);
   assert.equal(res.usage!.outputTokens, 9);
@@ -1083,4 +1083,526 @@ test("transport: after a rejected call the same communicator recovers on the nex
   cannedBody = anthropicOK("recovered");
   const res = await c.chat!({ messages: [{ role: "user", content: "hi again" }] });
   assert.equal(res.content, "recovered");
+});
+
+// ===========================================================================
+// 12. stopReason NORMALIZATION — provider-native -> named vocabulary
+//     ("stop" | "length" | "tool_use" | "content_filter")
+// ===========================================================================
+
+test("stopReason (anthropic): end_turn normalizes to 'stop'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = {
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "end_turn",
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "stop", "anthropic end_turn -> 'stop'");
+});
+
+test("stopReason (anthropic): max_tokens normalizes to 'length'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = {
+    content: [{ type: "text", text: "ok" }],
+    stop_reason: "max_tokens",
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "length", "anthropic max_tokens -> 'length'");
+});
+
+test("stopReason (anthropic): tool_use stays 'tool_use'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = {
+    content: [{ type: "tool_use", id: "t1", name: "foo", input: {} }],
+    stop_reason: "tool_use",
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "tool_use", "anthropic tool_use stays 'tool_use'");
+});
+
+test("stopReason (openai chat): stop -> 'stop'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI() }));
+  const c = lib.get("o")!;
+  cannedBody = {
+    choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "stop", "openai stop -> 'stop'");
+});
+
+test("stopReason (openai chat): length -> 'length'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI() }));
+  const c = lib.get("o")!;
+  cannedBody = {
+    choices: [{ message: { content: "ok" }, finish_reason: "length" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "length", "openai length -> 'length'");
+});
+
+test("stopReason (openai chat): content_filter -> 'content_filter'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI() }));
+  const c = lib.get("o")!;
+  cannedBody = {
+    choices: [{ message: { content: "ok" }, finish_reason: "content_filter" }],
+    usage: { prompt_tokens: 1, completion_tokens: 1 },
+  };
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(res.stopReason, "content_filter", "openai content_filter stays 'content_filter'");
+});
+
+// ===========================================================================
+// 13. ANTHROPIC SYSTEM HANDLING — req.system + hoisted role:"system" messages
+// ===========================================================================
+
+test("anthropic system: req.system 'sys' goes to body.system and never into body.messages", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }], system: "sys" });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(body.system, "sys", "req.system must populate body.system");
+  const hasSystemMsg = body.messages.some((m: any) => m.role === "system");
+  assert.equal(
+    hasSystemMsg,
+    false,
+    `no system role may appear inside body.messages: ${JSON.stringify(body.messages)}`,
+  );
+});
+
+test("anthropic system: a messages[] entry with role 'system' is HOISTED into body.system", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "system", content: "hoisted-sys" },
+      { role: "user", content: "hi" },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  assert.ok(
+    typeof body.system === "string" && body.system.includes("hoisted-sys"),
+    `system message must be hoisted into body.system, got: ${JSON.stringify(body.system)}`,
+  );
+  for (const m of body.messages) {
+    assert.ok(
+      ["user", "assistant", "tool"].includes(m.role),
+      `body.messages must contain only user/assistant/tool roles, saw role '${m.role}'`,
+    );
+  }
+});
+
+test("anthropic system: req.system + a role 'system' message are concatenated into body.system", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "system", content: "from-message" },
+      { role: "user", content: "hi" },
+    ],
+    system: "from-request",
+  });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(typeof body.system, "string", "body.system must be a string");
+  assert.ok(
+    body.system.includes("from-request") && body.system.includes("from-message"),
+    `both system sources must be concatenated into body.system, got: ${JSON.stringify(body.system)}`,
+  );
+  assert.ok(
+    !body.messages.some((m: any) => m.role === "system"),
+    "no system role may remain inside body.messages",
+  );
+});
+
+// ===========================================================================
+// 14. ASSISTANT toolCalls REPLAY — Message.toolCalls -> provider-native form
+// ===========================================================================
+
+test("toolCalls replay (anthropic): assistant toolCalls -> a tool_use content block", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "f", arguments: { x: 1 } }] },
+      { role: "tool", toolCallId: "t1", content: "result" },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const assistant = body.messages.find((m: any) => m.role === "assistant");
+  assert.ok(assistant, "an assistant message must be present");
+  assert.ok(Array.isArray(assistant.content), "assistant content must be a content-block array");
+  const toolUse = assistant.content.find((b: any) => b.type === "tool_use");
+  assert.ok(toolUse, `a tool_use block must be present: ${JSON.stringify(assistant.content)}`);
+  assert.equal(toolUse.id, "t1");
+  assert.equal(toolUse.name, "f");
+  assert.deepEqual(toolUse.input, { x: 1 });
+});
+
+test("toolCalls replay (openai chat): assistant toolCalls -> tool_calls[].function with JSON-string arguments", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI() }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "f", arguments: { x: 1 } }] },
+      { role: "tool", toolCallId: "t1", content: "result" },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const assistant = body.messages.find(
+    (m: any) => m.role === "assistant" && Array.isArray(m.tool_calls),
+  );
+  assert.ok(assistant, `an assistant message with tool_calls must be present: ${JSON.stringify(body.messages)}`);
+  assert.equal(assistant.tool_calls.length, 1);
+  const tc = assistant.tool_calls[0];
+  assert.equal(tc.function.name, "f", "function name must be replayed");
+  assert.equal(typeof tc.function.arguments, "string", "openai function.arguments must be a JSON STRING");
+  assert.deepEqual(JSON.parse(tc.function.arguments), { x: 1 }, "the JSON string must parse to the arguments");
+});
+
+// ===========================================================================
+// 15. OPENAI CHAT AUDIO — ContentPart audio wire mapping
+// ===========================================================================
+
+test("openai chat audio: mime audio/mpeg + base64 data -> input_audio format 'mp3'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "audio"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: [{ type: "audio", audio: { data: "QUJD", mime: "audio/mpeg" } }] },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "user content must be a parts array");
+  const audioPart = user.content.find((p: any) => p.type === "input_audio");
+  assert.ok(audioPart, `an input_audio part must be present: ${JSON.stringify(user.content)}`);
+  assert.equal(audioPart.input_audio.format, "mp3", "audio/mpeg must map to format 'mp3'");
+  assert.equal(audioPart.input_audio.data, "QUJD", "the base64 data must be carried");
+});
+
+test("openai chat audio: mime audio/wav -> input_audio format 'wav'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "audio"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: [{ type: "audio", audio: { data: "QUJD", mime: "audio/wav" } }] },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  const audioPart = user.content.find((p: any) => p.type === "input_audio");
+  assert.ok(audioPart, "an input_audio part must be present");
+  assert.equal(audioPart.input_audio.format, "wav", "audio/wav must map to format 'wav'");
+});
+
+test("openai chat audio: a URL-only audio part (no data) degrades to a text placeholder, never input_audio with undefined data", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "audio"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: [{ type: "audio", audio: { url: "http://x/a.mp3" } }] },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "user content must be a parts array");
+  const badAudio = user.content.find(
+    (p: any) => p.type === "input_audio" && (!p.input_audio || p.input_audio.data === undefined),
+  );
+  assert.equal(
+    badAudio,
+    undefined,
+    `a URL-only audio part must NOT produce an input_audio part with undefined data: ${JSON.stringify(user.content)}`,
+  );
+  const hasText = user.content.some((p: any) => p.type === "text");
+  assert.ok(hasText, `the URL-only audio must degrade to a text placeholder part: ${JSON.stringify(user.content)}`);
+});
+
+// ===========================================================================
+// 16. OPENAI CHAT INLINE DOCUMENT — base64 document -> a file part
+// ===========================================================================
+
+test("openai chat document: inline base64 document (no url) -> a file part with a data: URI and a filename", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "document"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "document", document: { data: "REFUQQ==", mime: "application/pdf" } }],
+      },
+    ],
+  });
+
+  const raw = sentBodyRaw(lastCall!.init);
+  assert.ok(
+    !raw.includes("[unsupported document content]"),
+    "inline base64 documents must no longer be dropped as unsupported",
+  );
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "user content must be a parts array");
+  const filePart = user.content.find((p: any) => p.type === "file");
+  assert.ok(filePart, `a file part must be present: ${JSON.stringify(user.content)}`);
+  assert.ok(filePart.file, "the file part must carry a file object");
+  assert.ok(
+    typeof filePart.file.file_data === "string" && filePart.file.file_data.startsWith("data:"),
+    `file_data must be a data: URI, got: ${JSON.stringify(filePart.file.file_data)}`,
+  );
+  assert.ok(
+    filePart.file.file_data.includes("REFUQQ=="),
+    "the data: URI must embed the original base64",
+  );
+  assert.ok(filePart.file.filename, "a filename must be present");
+});
+
+// ===========================================================================
+// 17. MULTIMODAL CHAT INPUT — image wire shapes per provider
+// ===========================================================================
+
+test("multimodal (anthropic): [text, image{url}] emits an image source url block", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC({ input: ["text", "image"] }) }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", image: { url: "http://x/pic.png" } },
+        ],
+      },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "anthropic user content must be a content-block array");
+  const imgBlock = user.content.find((b: any) => b.type === "image");
+  assert.ok(imgBlock, `an image block must be present: ${JSON.stringify(user.content)}`);
+  const raw = sentBodyRaw(lastCall!.init);
+  assert.ok(raw.includes("http://x/pic.png"), "the image url must reach the request body");
+});
+
+test("multimodal (openai chat): [text, image{url}] emits an image_url part", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "image"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", image: { url: "http://x/pic.png" } },
+        ],
+      },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  assert.ok(Array.isArray(user.content), "openai user content must be a parts array");
+  const imgPart = user.content.find((p: any) => p.type === "image_url");
+  assert.ok(imgPart, `an image_url part must be present: ${JSON.stringify(user.content)}`);
+  const raw = sentBodyRaw(lastCall!.init);
+  assert.ok(raw.includes("http://x/pic.png"), "the image url must reach the request body");
+});
+
+// ===========================================================================
+// 18. EMPTY MediaRef — neither url nor data degrades to a text placeholder
+// ===========================================================================
+
+test("empty MediaRef (anthropic): an empty image ref degrades to text — no source with undefined data", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC({ input: ["text", "image"] }) }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({
+    messages: [{ role: "user", content: [{ type: "image", image: {} }] }],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  const blocks = Array.isArray(user.content) ? user.content : [];
+  // No image block whose source carries an undefined/empty url or data.
+  for (const b of blocks) {
+    if (b.type === "image") {
+      const src = b.source ?? {};
+      assert.ok(
+        src.data !== undefined && src.data !== "" || src.url !== undefined && src.url !== "",
+        `an empty image ref must NOT emit a source with undefined data/url: ${JSON.stringify(b)}`,
+      );
+    }
+  }
+  const hasText = blocks.some((b: any) => b.type === "text");
+  assert.ok(hasText, `the empty image ref must degrade to a text placeholder: ${JSON.stringify(blocks)}`);
+});
+
+test("empty MediaRef (openai chat): an empty document ref degrades to text — no image_url with empty url", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI({ input: ["text", "image", "document"] }) }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({
+    messages: [{ role: "user", content: [{ type: "document", document: {} }] }],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  const parts = Array.isArray(user.content) ? user.content : [];
+  for (const p of parts) {
+    if (p.type === "image_url") {
+      const url = p.image_url?.url;
+      assert.ok(url !== undefined && url !== "", `no image_url with empty url allowed: ${JSON.stringify(p)}`);
+    }
+    if (p.type === "file") {
+      assert.ok(
+        p.file && p.file.file_data !== undefined && p.file.file_data !== "",
+        `no file part with empty file_data allowed: ${JSON.stringify(p)}`,
+      );
+    }
+  }
+  const hasText = parts.some((p: any) => p.type === "text");
+  assert.ok(hasText, `the empty document ref must degrade to a text placeholder: ${JSON.stringify(parts)}`);
+});
+
+// ===========================================================================
+// 19. RERANK — topN truncation (after score-desc sort) + echoed-document preference
+// ===========================================================================
+
+test("rerank: more results than topN are truncated to topN (after score-desc sort)", async () => {
+  const lib = createCommunicatorLibrary(cfg({ r: COHERE() }));
+  const c = lib.get("r")!;
+  // Provider returns 3 results (out of order); req.topN = 2 -> expect the top-2 by score.
+  cannedBody = {
+    results: [
+      { index: 0, relevance_score: 0.2 },
+      { index: 2, relevance_score: 0.95 },
+      { index: 1, relevance_score: 0.5 },
+    ],
+  };
+
+  const res = await c.rerank!({ query: "q", documents: ["d0", "d1", "d2"], topN: 2 });
+  assert.equal(res.results.length, 2, "results must be truncated to topN");
+  assert.equal(res.results[0].index, 2, "highest score first");
+  assert.equal(res.results[0].score, 0.95);
+  assert.equal(res.results[1].index, 1, "second-highest score second");
+  assert.equal(res.results[1].score, 0.5);
+});
+
+test("rerank: an echoed `document` field is preferred over indexing into req.documents", async () => {
+  const lib = createCommunicatorLibrary(cfg({ r: COHERE() }));
+  const c = lib.get("r")!;
+  cannedBody = {
+    results: [{ index: 0, relevance_score: 0.9, document: "ECHOED-TEXT" }],
+  };
+
+  const res = await c.rerank!({ query: "q", documents: ["original-d0"] });
+  assert.equal(res.results.length, 1);
+  assert.equal(
+    res.results[0].document,
+    "ECHOED-TEXT",
+    "the provider-echoed document must win over req.documents[index]",
+  );
+});
+
+// ===========================================================================
+// 20. OCR via ANTHROPIC — document vs image source block typing
+// ===========================================================================
+
+test("ocr (anthropic): a document/pdf source sends a content block of type 'document', not 'image'", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({ a: ANTHROPIC({ capabilities: ["ocr"], input: ["document"] }) }),
+  );
+  const c = lib.get("a")!;
+  assert.ok(c.ocr, "ocr must be present");
+  cannedBody = anthropicOK("EXTRACTED");
+
+  await c.ocr!({ source: { data: "JVBERi0=", mime: "application/pdf" } });
+
+  assert.ok(lastCall!.url.endsWith("/v1/messages"), `ocr via anthropic must hit /v1/messages, got: ${lastCall!.url}`);
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  const blocks = Array.isArray(user.content) ? user.content : [];
+  const docBlock = blocks.find((b: any) => b.type === "document");
+  assert.ok(docBlock, `a 'document' content block must be present: ${JSON.stringify(blocks)}`);
+  const imgBlock = blocks.find((b: any) => b.type === "image");
+  assert.equal(imgBlock, undefined, "a pdf OCR source must NOT be sent as an 'image' block");
+});
+
+test("ocr (anthropic): an image/png source still sends a content block of type 'image'", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({ a: ANTHROPIC({ capabilities: ["ocr"], input: ["image"] }) }),
+  );
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("EXTRACTED");
+
+  await c.ocr!({ source: { data: "iVBORw0=", mime: "image/png" } });
+
+  const body = sentBody(lastCall!.init);
+  const user = body.messages.find((m: any) => m.role === "user");
+  const blocks = Array.isArray(user.content) ? user.content : [];
+  const imgBlock = blocks.find((b: any) => b.type === "image");
+  assert.ok(imgBlock, `an 'image' content block must be present for an image source: ${JSON.stringify(blocks)}`);
+});
+
+// ===========================================================================
+// 21. GATEWAY GUARD — malformed config does not throw, yields empty library
+// ===========================================================================
+
+test("gateway guard: createCommunicatorLibrary({}) does not throw and yields an empty library", () => {
+  let lib!: CommunicatorLibrary;
+  assert.doesNotThrow(() => {
+    lib = createCommunicatorLibrary({} as any);
+  }, "an empty config object must not throw");
+  assert.deepEqual(lib.list(), [], "no communicators expected");
+});
+
+test("gateway guard: createCommunicatorLibrary({default:'claude'}) (no communicators) yields an empty library", () => {
+  let lib!: CommunicatorLibrary;
+  assert.doesNotThrow(() => {
+    lib = createCommunicatorLibrary({ default: "claude" } as any);
+  }, "a config with only a default and no communicators must not throw");
+  assert.deepEqual(lib.list(), [], "no communicators expected");
+  assert.equal(lib.has("claude"), false, "the dangling default must not resolve to a communicator");
 });

@@ -218,7 +218,11 @@ test("responses chat: normalizes content/toolCalls(parsed)/stopReason/usage", as
     [{ id: "fc_1", name: "do_thing", arguments: { x: 1 } }],
     "function_call -> ToolCall with call_id->id and arguments JSON-parsed",
   );
-  assert.equal(res.stopReason, "completed");
+  assert.equal(
+    res.stopReason,
+    "tool_use",
+    "a completed response whose output contains a function_call normalizes to 'tool_use'",
+  );
   assert.ok(res.usage, "usage must be present");
   assert.equal(res.usage!.inputTokens, 11);
   assert.equal(res.usage!.outputTokens, 7);
@@ -502,4 +506,126 @@ test("responses security: no own enumerable property value equals the secret key
   for (const [k, v] of Object.entries(c)) {
     assert.notEqual(v, SECRET, `own property '${k}' leaks the API key`);
   }
+});
+
+// ===========================================================================
+// 8. stopReason NORMALIZATION — Responses status -> named vocabulary
+// ===========================================================================
+
+test("responses stopReason: a completed text-only response normalizes to 'stop'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ gptr: RESP({ capabilities: ["chat"] }) }));
+  const c = lib.get("gptr")!;
+  cannedBody = responsesTextOnly("plain");
+
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(
+    res.stopReason,
+    "stop",
+    "a completed response with no function_call normalizes to 'stop'",
+  );
+});
+
+test("responses stopReason: status 'incomplete' with reason 'max_output_tokens' normalizes to 'length'", async () => {
+  const lib = createCommunicatorLibrary(cfg({ gptr: RESP({ capabilities: ["chat"] }) }));
+  const c = lib.get("gptr")!;
+  cannedBody = {
+    output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "cut off" }] }],
+    usage: { input_tokens: 1, output_tokens: 1 },
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+  };
+
+  const res = await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+  assert.equal(
+    res.stopReason,
+    "length",
+    "incomplete + max_output_tokens normalizes to 'length'",
+  );
+});
+
+// ===========================================================================
+// 9. ASSISTANT toolCalls REPLAY — Message.toolCalls -> function_call input item
+// ===========================================================================
+
+test("responses toolCalls replay: assistant toolCalls -> a function_call input item with a JSON-string arguments", async () => {
+  const lib = createCommunicatorLibrary(cfg({ gptr: RESP({ capabilities: ["chat"] }) }));
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "f", arguments: { x: 1 } }] },
+      { role: "tool", toolCallId: "t1", content: "result" },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  assert.ok(Array.isArray(body.input), "Responses body.input must be an array");
+  const fc = body.input.find((it: any) => it && it.type === "function_call");
+  assert.ok(fc, `a function_call input item must be present: ${JSON.stringify(body.input)}`);
+  assert.equal(fc.call_id, "t1", "the ToolCall id maps to call_id");
+  assert.equal(fc.name, "f", "the tool name is replayed");
+  assert.equal(typeof fc.arguments, "string", "function_call arguments must be a JSON STRING");
+  assert.deepEqual(JSON.parse(fc.arguments), { x: 1 }, "the JSON string must parse back to the arguments");
+});
+
+// ===========================================================================
+// 10. INLINE BASE64 DOCUMENT WITH NO MIME — data: URI defaults to application/pdf
+// ===========================================================================
+
+test("responses document: inline base64 document with NO mime -> file_data prefixed data:application/pdf", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({ gptr: RESP({ capabilities: ["chat"], input: ["text", "document"] }) }),
+  );
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({
+    messages: [{ role: "user", content: [{ type: "document", document: { data: "REFUQQ==" } }] }],
+  });
+
+  const body = sentBody(lastCall!.init);
+  const raw =
+    typeof lastCall!.init?.body === "string"
+      ? lastCall!.init!.body
+      : Buffer.from(lastCall!.init!.body as ArrayBuffer).toString("utf8");
+  assert.ok(
+    raw.includes("data:application/pdf"),
+    `a mime-less document must default its data: URI to application/pdf, got body: ${raw}`,
+  );
+  assert.ok(raw.includes("REFUQQ=="), "the original base64 must be embedded in the data: URI");
+  // Sanity: the input array must carry the document, not drop it.
+  assert.ok(Array.isArray(body.input), "body.input must be an array");
+});
+
+// ===========================================================================
+// 11. MULTIMODAL CHAT INPUT — image wire shape (input_image)
+// ===========================================================================
+
+test("responses multimodal: [text, image{url}] emits an input_image part", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({ gptr: RESP({ capabilities: ["chat"], input: ["text", "image"] }) }),
+  );
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", image: { url: "http://x/pic.png" } },
+        ],
+      },
+    ],
+  });
+
+  const body = sentBody(lastCall!.init);
+  assert.ok(Array.isArray(body.input), "body.input must be an array");
+  // Find any input_image part anywhere in the input items' content arrays.
+  const flat = JSON.stringify(body.input);
+  assert.ok(flat.includes("input_image"), `an input_image part must be present: ${flat}`);
+  assert.ok(flat.includes("http://x/pic.png"), "the image url must reach the request body");
 });
