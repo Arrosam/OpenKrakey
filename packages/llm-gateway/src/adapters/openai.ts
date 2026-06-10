@@ -26,6 +26,21 @@ function mimeSubtype(mime: string | undefined): string | undefined {
   return slash >= 0 ? mime.slice(slash + 1) : mime;
 }
 
+/** Map an audio MIME subtype onto OpenAI's input_audio format enum. */
+function audioFormat(mime: string | undefined): "mp3" | "wav" {
+  switch (mimeSubtype(mime)) {
+    case "mpeg":
+    case "mp3":
+      return "mp3";
+    case "wav":
+    case "wave":
+    case "x-wav":
+      return "wav";
+    default:
+      return "mp3";
+  }
+}
+
 /** Map one ContentPart onto an OpenAI content part. */
 function mapContentPart(part: ContentPart): unknown {
   switch (part.type) {
@@ -33,25 +48,37 @@ function mapContentPart(part: ContentPart): unknown {
       return { type: "text", text: part.text };
     case "image": {
       const img = part.image;
+      if (!img.url && !img.data) {
+        return { type: "text", text: "[unsupported image content]" };
+      }
       const url =
-        img.url ??
-        (img.data ? `data:${img.mime ?? "image/png"};base64,${img.data}` : "");
+        img.url ?? `data:${img.mime ?? "image/png"};base64,${img.data}`;
       return { type: "image_url", image_url: { url } };
     }
     case "audio": {
       const audio = part.audio;
+      // OpenAI chat has no URL audio form — url-only audio degrades to text.
+      if (!audio.data) {
+        return { type: "text", text: "[unsupported audio content]" };
+      }
       return {
         type: "input_audio",
-        input_audio: {
-          data: audio.data,
-          format: mimeSubtype(audio.mime) ?? "mp3",
-        },
+        input_audio: { data: audio.data, format: audioFormat(audio.mime) },
       };
     }
     case "document": {
       const doc = part.document;
       if (doc.url) {
         return { type: "image_url", image_url: { url: doc.url } };
+      }
+      if (doc.data) {
+        return {
+          type: "file",
+          file: {
+            filename: "document",
+            file_data: `data:${doc.mime ?? "application/pdf"};base64,${doc.data}`,
+          },
+        };
       }
       return { type: "text", text: "[unsupported document content]" };
     }
@@ -74,6 +101,17 @@ function mapMessages(messages: Message[]): unknown[] {
         role: "tool",
         tool_call_id: m.toolCallId,
         content: mapContent(m.content),
+      };
+    }
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: mapContent(m.content),
+        tool_calls: m.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+        })),
       };
     }
     return { role: m.role, content: mapContent(m.content) };
@@ -106,6 +144,23 @@ interface OpenAIResponse {
     finish_reason?: string;
   }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+/** Map an OpenAI chat finish_reason onto the normalized stopReason vocabulary. */
+function normalizeFinishReason(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case "stop":
+      return "stop";
+    case "length":
+      return "length";
+    case "tool_calls":
+    case "function_call":
+      return "tool_use";
+    case "content_filter":
+      return "content_filter";
+    default:
+      return reason;
+  }
 }
 
 export async function chat(
@@ -170,7 +225,7 @@ export async function chat(
 
   const response: LLMResponse = {
     content,
-    stopReason: choice?.finish_reason,
+    stopReason: normalizeFinishReason(choice?.finish_reason),
     usage: {
       inputTokens: data.usage?.prompt_tokens,
       outputTokens: data.usage?.completion_tokens,
@@ -199,7 +254,7 @@ function mapResponsesContentPart(part: ContentPart, textType: string): unknown {
       if (doc.url) {
         return { type: "input_file", file_url: doc.url };
       }
-      const dataURI = `data:${doc.mime ?? "image/png"};base64,${doc.data ?? ""}`;
+      const dataURI = `data:${doc.mime ?? "application/pdf"};base64,${doc.data ?? ""}`;
       return { type: "input_file", filename: "document", file_data: dataURI };
     }
     case "audio":
@@ -220,24 +275,50 @@ function mapResponsesContent(
   return content.map((part) => mapResponsesContentPart(part, textType));
 }
 
+/** True when a message carries any content to send (non-empty string or parts). */
+function hasContent(content: string | ContentPart[]): boolean {
+  return typeof content === "string" ? content.length > 0 : content.length > 0;
+}
+
 /** Map our messages onto Responses API input items. */
 function mapResponsesInput(messages: Message[]): unknown[] {
-  return messages.map((m) => {
+  const out: unknown[] = [];
+  for (const m of messages) {
     if (m.role === "tool") {
       const output =
         typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-      return {
+      out.push({
         type: "function_call_output",
         call_id: m.toolCallId,
         output,
-      };
+      });
+      continue;
     }
-    return {
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      if (hasContent(m.content)) {
+        out.push({
+          type: "message",
+          role: m.role,
+          content: mapResponsesContent(m.content, m.role),
+        });
+      }
+      for (const tc of m.toolCalls) {
+        out.push({
+          type: "function_call",
+          call_id: tc.id,
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments),
+        });
+      }
+      continue;
+    }
+    out.push({
       type: "message",
       role: m.role,
       content: mapResponsesContent(m.content, m.role),
-    };
-  });
+    });
+  }
+  return out;
 }
 
 /** Map our tool defs onto Responses API (flat) function tool defs. */
@@ -273,6 +354,29 @@ interface OpenAIResponsesResponse {
   output_text?: string;
   usage?: { input_tokens?: number; output_tokens?: number };
   status?: string;
+  incomplete_details?: { reason?: string };
+}
+
+/** Derive the normalized stopReason from a Responses payload. */
+function responsesStopReason(
+  data: OpenAIResponsesResponse,
+): string | undefined {
+  if ((data.output ?? []).some((item) => item.type === "function_call")) {
+    return "tool_use";
+  }
+  if (data.status === "incomplete") {
+    const reason = data.incomplete_details?.reason;
+    switch (reason) {
+      case "max_output_tokens":
+        return "length";
+      case "content_filter":
+        return "content_filter";
+      default:
+        return reason;
+    }
+  }
+  if (data.status === "completed") return "stop";
+  return data.status;
 }
 
 export async function responsesChat(
@@ -348,7 +452,7 @@ export async function responsesChat(
 
   const response: LLMResponse = {
     content,
-    stopReason: data.status,
+    stopReason: responsesStopReason(data),
     usage: {
       inputTokens: data.usage?.input_tokens,
       outputTokens: data.usage?.output_tokens,
@@ -401,9 +505,9 @@ export async function embed(
   }
   const embeddings = rows.map((d) => d.embedding);
 
-  const response: EmbedResponse = {
-    embeddings,
-    usage: { inputTokens: data.usage?.prompt_tokens } as Usage,
-  };
+  const response: EmbedResponse = { embeddings };
+  if (data.usage !== undefined) {
+    response.usage = { inputTokens: data.usage.prompt_tokens } as Usage;
+  }
   return response;
 }

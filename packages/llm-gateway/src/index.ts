@@ -18,6 +18,7 @@ import type {
   Communicator,
   CommunicatorLibrary,
   Capability,
+  ContentPart,
   LLMRequest,
   LLMResponse,
   EmbedRequest,
@@ -140,15 +141,19 @@ function buildCommunicator(name: string, def: CommunicatorDef): Communicator {
         const chatFn = adapter.chat;
         if (!chatFn) throw unsupported(name, def.provider, cap);
         ocr = async (req) => {
+          // PDFs (and other non-image sources) go out as a document block; only
+          // genuine images use the image part.
+          const mime = req.source.mime;
+          const sourcePart: ContentPart =
+            mime !== undefined && !mime.startsWith("image/")
+              ? { type: "document", document: req.source }
+              : { type: "image", image: req.source };
           const resp = await chatFn(
             {
               messages: [
                 {
                   role: "user",
-                  content: [
-                    { type: "image", image: req.source },
-                    { type: "text", text: OCR_PROMPT },
-                  ],
+                  content: [sourcePart, { type: "text", text: OCR_PROMPT }],
                 },
               ],
               model: req.model,
@@ -192,7 +197,7 @@ export function createCommunicatorLibrary(
 ): CommunicatorLibrary {
   const map = new Map<string, Communicator>();
 
-  for (const [name, def] of Object.entries(config.communicators)) {
+  for (const [name, def] of Object.entries(config.communicators ?? {})) {
     try {
       map.set(name, buildCommunicator(name, def));
     } catch (err) {
