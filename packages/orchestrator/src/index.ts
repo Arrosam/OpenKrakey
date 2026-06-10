@@ -16,7 +16,7 @@ import type { EventSystem, Unsub } from "../../../contracts/event-system";
 import type { Clock } from "../../../contracts/clock";
 import type { ContextBlock, ComposedContext } from "../../../contracts/context";
 import type { LLMResponse } from "../../../contracts/llm";
-import { Events } from "../../../shared/actions";
+import { Actions, Events } from "../../../shared/actions";
 import type { Notify, Request, Reply } from "../../../shared/actions";
 import { consoleLogger, tagged } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
@@ -33,6 +33,7 @@ export function createOrchestrator(deps: {
   let beatQueued = false;
   let tickUnsub: Unsub | null = null;
   let returnUnsub: Unsub | null = null;
+  let clockUnsubs: Unsub[] = []; // CLOCK_* action registrations (while started)
   let seq = 0; // beat counter
   const log = tagged(deps.log ?? consoleLogger, "[orchestrator]");
 
@@ -41,12 +42,29 @@ export function createOrchestrator(deps: {
     // Sort by priority DESC; JS sort is stable, so equal priorities keep
     // insertion order. Empty buffer → { text: "" }.
     const sorted = [...blocks.values()].sort((a, b) => b.priority - a.priority);
-    const parts = await Promise.all(sorted.map((b) => b.render()));
+    // Render every block in ISOLATION: a block whose render() throws or rejects
+    // degrades to "" for this beat (logged); it never drops the others or the beat.
+    const parts = await Promise.all(
+      sorted.map(async (b) => {
+        try {
+          return await b.render();
+        } catch (err) {
+          log.warn(`block render failed: ${b.id}: ${err}`);
+          return "";
+        }
+      }),
+    );
     return { text: parts.join("\n") };
   }
 
   // ---- the beat ----
   async function runBeat(): Promise<void> {
+    // After stop() no beat work runs — emit nothing, even for a queued beat.
+    if (!running) {
+      beatBusy = false;
+      beatQueued = false;
+      return;
+    }
     try {
       const n = ++seq;
       // Let plugins refresh their blocks synchronously before we compose.
@@ -54,6 +72,8 @@ export function createOrchestrator(deps: {
       deps.events.events.emit(Events.PROMPT_GATHER, gather);
 
       const context = await compose();
+      // compose() is async; if we were stopped mid-flight, emit nothing further.
+      if (!running) return;
 
       // Request the LLM round-trip; do NOT await — the beat ends here. The reply
       // arrives later as LLM_RETURN. In Phase 0 nobody listens and that is fine.
@@ -67,12 +87,17 @@ export function createOrchestrator(deps: {
       log.warn(`beat failed: ${err}`);
     } finally {
       beatBusy = false;
-      if (beatQueued) {
+      // Only spin up a queued beat if still running; the re-entry also guards
+      // !running, so a stop() between scheduling and execution emits nothing.
+      if (beatQueued && running) {
         beatQueued = false;
         setImmediate(() => {
+          if (!running) return;
           beatBusy = true;
           runBeat();
         });
+      } else {
+        beatQueued = false;
       }
     }
   }
@@ -88,6 +113,8 @@ export function createOrchestrator(deps: {
   }
 
   function onReturn(payload: unknown): void {
+    // Guard a malformed payload: null/undefined or non-object → ignore (no throw).
+    if (payload === null || typeof payload !== "object") return;
     const p = payload as Reply<LLMResponse>;
     if (!p.ok || !p.data) return;
     const calls = p.data.toolCalls;
@@ -101,21 +128,53 @@ export function createOrchestrator(deps: {
     }
   }
 
+  // ---- clock-rhythm actions (registered while started) ----
+  // Validate { ms: number } for the setters: a missing/non-object params or a
+  // non-finite/non-positive ms REJECTS without touching the clock.
+  function readMs(params: unknown): number {
+    if (params === null || typeof params !== "object") {
+      throw new Error("expected params { ms: number }");
+    }
+    const ms = (params as { ms?: unknown }).ms;
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) {
+      throw new Error(`invalid ms: ${String(ms)}`);
+    }
+    return ms;
+  }
+
+  function registerClockActions(): void {
+    clockUnsubs = [
+      deps.events.actions.register(Actions.CLOCK_SET_INTERVAL, async (params) => {
+        deps.clock.setInterval(readMs(params));
+      }),
+      deps.events.actions.register(Actions.CLOCK_SET_DEFAULT_INTERVAL, async (params) => {
+        deps.clock.setDefaultInterval(readMs(params));
+      }),
+      deps.events.actions.register(Actions.CLOCK_FIRE_NOW, async () => {
+        deps.clock.fireNow();
+      }),
+    ];
+  }
+
   return {
     start(): void {
       if (running) return; // idempotent
       running = true;
       tickUnsub = deps.events.events.on(Events.CLOCK_TICK, () => onTick());
       returnUnsub = deps.events.events.on(Events.LLM_RETURN, (p) => onReturn(p));
+      registerClockActions();
     },
 
     stop(): void {
       if (!running) return; // idempotent
       running = false;
+      beatQueued = false; // drop any beat queued behind an in-flight one
       tickUnsub?.();
       tickUnsub = null;
       returnUnsub?.();
       returnUnsub = null;
+      for (const unsub of clockUnsubs) unsub();
+      clockUnsubs = [];
     },
 
     // ---- context-block store (the "context-buffer") ----
