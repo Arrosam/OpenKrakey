@@ -120,11 +120,33 @@ export function createOrchestrator(deps: {
     const calls = p.data.toolCalls;
     if (!calls || calls.length === 0) return;
     for (const tc of calls) {
-      // Fire-and-forget: each .catch is independent, so one failing tool does
-      // not affect the others and does not abort the beat.
+      // Fire-and-forget: each then/catch is independent, so one failing tool does
+      // not affect the others and does not abort the beat. As each settles, emit
+      // TOOL_RESULT (id = the ToolCall id, name = the action name) so plugins can
+      // fold the outcome into the next beat's context.
       deps.events.actions
         .invoke(tc.name, tc.arguments)
-        .catch((err) => log.warn(`tool dispatch failed: ${tc.name}: ${err}`));
+        .then((data) => {
+          const result: Reply<unknown> & { name: string } = {
+            id: tc.id,
+            at: Date.now(),
+            ok: true,
+            data,
+            name: tc.name,
+          };
+          deps.events.events.emit(Events.TOOL_RESULT, result);
+        })
+        .catch((err) => {
+          log.warn(`tool dispatch failed: ${tc.name}: ${err}`);
+          const result: Reply<unknown> & { name: string } = {
+            id: tc.id,
+            at: Date.now(),
+            ok: false,
+            error: String(err),
+            name: tc.name,
+          };
+          deps.events.events.emit(Events.TOOL_RESULT, result);
+        });
     }
   }
 
