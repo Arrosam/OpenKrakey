@@ -36,3 +36,4 @@ done
 ## Change log
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: implemented — reads config/llm.json, builds global communicator library, resilient startup.
+- 2026-06-11: bug-fix wave — loadLLMConfig normalizes a missing communicators key; run() best-effort stop()s an agent whose start failed so partially-loaded plugins release resources.

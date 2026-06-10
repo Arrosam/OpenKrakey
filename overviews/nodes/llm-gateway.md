@@ -42,3 +42,4 @@ done
 ## Change log
 - 2026-06-07: node created (LLM gateway — global, key-isolated, multi-provider).
 - 2026-06-08: expanded — capabilities (chat/embed/rerank/ocr), input/output modalities, resilient build (skip + onError).
+- 2026-06-11: bug-fix wave — normalized stopReason across providers; anthropic hoists role-system messages into body.system and replays assistant toolCalls as tool_use blocks; openai chat maps audio mime to the mp3/wav enum, sends inline base64 documents as file parts, replays toolCalls; responses derives a finish-style stopReason (tool_use/length/stop) and defaults inline docs to application/pdf; OCR sends document (not image) blocks for non-image mimes; rerank slices to topN + prefers the provider-echoed document; empty MediaRefs degrade to text placeholders; library tolerates a missing communicators key.

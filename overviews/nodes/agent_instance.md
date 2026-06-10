@@ -26,8 +26,10 @@ core
 Constructs clock (`defaultIntervalMs = def.intervalMs`) + event-system + orchestrator + loader at
 construction time. Falls back to an empty `CommunicatorLibrary` if `deps.library` is absent so a bare
 agent runs with no LLM config. The ONLY wiring/bridge: `clock.onFire` → emit `clock.tick`
-(`Notify<{seq}>`, the sole emitter of that event). `start()` (idempotent): emit `agent.start` →
-`await loader.load()` → `orchestrator.start()` → `clock.start()`. `stop()` (idempotent; no-op if never
+(`Notify<{seq}>`, the sole emitter of that event). `start()` (idempotent): `await loader.load()` →
+re-check `stopped` (a stop() that arrived mid-load tears the loaded plugins down and returns without
+arming anything) → emit `agent.start` (AFTER load, so plugins subscribed in setup observe it, and
+BEFORE the first tick) → `orchestrator.start()` → `clock.start()`. `stop()` (idempotent; no-op if never
 started): `clock.stop()` → `orchestrator.stop()` → `await loader.teardown()`.
 
 ## Status
@@ -36,3 +38,4 @@ done
 ## Change log
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: implemented — clock default from config, receives global llm library, emits `agent.start`.
+- 2026-06-11: bug-fix wave — `agent.start` now emitted after loader.load() (was emitted before any plugin could subscribe, dead on arrival); stop()-during-in-flight-start() re-checked after load (no more "stopped" agent with a live timer).

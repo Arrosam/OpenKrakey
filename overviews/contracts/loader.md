@@ -19,3 +19,6 @@ loader (impl) ↔ agent_instance
 
 ## Status
 locked
+
+## Change log
+- 2026-06-11: semantics pinned — load() is all-or-nothing (rollback in reverse on any failure after a setup); plugin ids must be simple names; deterministic order; requires resolves plugin-ids/capabilities against the full load set (dotted action names stay order-dependent); call load() exactly once.

@@ -27,3 +27,6 @@ clock (impl) ↔ orchestrator, agent_instance (consumers)
 
 ## Status
 locked
+
+## Change log
+- 2026-06-11: semantics pinned — setInterval while not running records without firing; re-entrant handler calls never leave two armed timers; rhythm exposed to plugins via the orchestrator's Actions.CLOCK_* actionbus registrations.

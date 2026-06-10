@@ -12,10 +12,20 @@ orchestrator (impl) ↔ agent_instance, loader
 - `setBlock(block)` (add/replace by id); `getBlock(id)`; `removeBlock(id)→boolean`; `listBlocks()→[{id,priority}]`.
 
 ## Behavioral constraints
-- Beat: compose context (blocks by priority DESC) → invoke `llm.chat` (skip if unregistered) → parse
-  (`response.parse` action or none) → dispatch tool calls async (a rejected call must not abort the beat).
+- Beat (EVENT-driven, fire-and-forget): `clock.tick` → emit `prompt.gather` → compose context (blocks
+  by priority DESC, each block rendered in ISOLATION — a failing render degrades to empty text, never
+  drops the beat) → emit `llm.request` without awaiting. The LLM round-trip returns later as
+  `llm.return`; its tool calls are dispatched async (a rejected call must not abort the beat).
 - One beat in flight per Agent; a tick while busy queues at most one. Non-blocking — new input/results
-  fold into the next beat. `setBlock` with an existing id replaces it.
+  fold into the next beat. After stop() nothing further is emitted (a queued beat is cancelled).
+- Clock rhythm: while started, the well-known `clock.set_interval` / `clock.set_default_interval` /
+  `clock.fire_now` actions (shared/actions `Actions.CLOCK_*`) are registered on the actionbus
+  (unregistered on stop). `setBlock` with an existing id replaces it.
 
 ## Status
 locked
+
+## Change log
+- 2026-06-11: doc-drift fix — described beat was a phantom actionbus flow (`llm.chat`/`response.parse`);
+  rewritten to the real event-driven flow (`llm.request`/`llm.return`). Added per-block render isolation,
+  queued-beat cancellation on stop, and the CLOCK_* rhythm actions (interface unchanged).

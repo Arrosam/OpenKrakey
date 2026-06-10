@@ -41,3 +41,4 @@ done
 ## Change log
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: implemented — injects key-less `ctx.llm` (CommunicatorLibrary); depends on `llm`.
+- 2026-06-11: bug-fix wave — plugin ids validated (no separators/./..) before any fs/import; deterministic sorted private order; two-pass load (import+validate ALL, then setup in order) with requires resolved against the full load set + manifest.provides; all-or-nothing rollback on any pass-2 failure; independent copies exclude the source data/; index.js entry fallback.
