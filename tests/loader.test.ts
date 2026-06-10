@@ -825,20 +825,26 @@ export default {
 //          in reverse order (and that teardown really un-did setup's effects)
 // ===========================================================================
 
-test("rollback: a later plugin's import failure rejects load() AND tears down the earlier good plugin", async () => {
+test("fail-fast: a later plugin's import failure rejects load() BEFORE any setup runs (zero side effects)", async () => {
   writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.act"));
   writePlugin(publicPluginDir, "zz-bad", explodingModule("zz-bad"));
 
-  // aa-good loads first (deterministic order), then zz-bad fails to import.
-  const { loader } = makeLoader(def({ plugins: ["aa-good", "zz-bad"] }));
+  // The whole load set is imported + validated BEFORE any setup runs, so
+  // zz-bad's import failure aborts the load while aa-good has had NO side
+  // effects at all — stronger than rollback (nothing to roll back).
+  const { loader, sys } = makeLoader(def({ plugins: ["aa-good", "zz-bad"] }));
   await assert.rejects(loader.load(), "a downstream failure must reject the whole load()");
 
   const good = await importPlugin(publicPluginDir, "aa-good");
-  assert.equal(good.state.setupCalled, true, "the earlier good plugin had run its setup");
   assert.equal(
-    good.state.teardownCalled,
-    true,
-    "rollback must have invoked the earlier good plugin's teardown",
+    good.state.setupCalled,
+    false,
+    "fail-fast: the earlier plugin must never have been set up when a later import fails",
+  );
+  assert.equal(
+    sys.actions.has("aa-good.act"),
+    false,
+    "no registration may leak from an aborted load",
   );
 });
 
