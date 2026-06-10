@@ -153,3 +153,6 @@ agents/
 
 # generated architecture graph (run `npm run arch:graph`)
 docs/arch-graph.html
+
+# Plugin runtime data (public = shared at runtime, never framework source)
+public_plugin/*/data/
