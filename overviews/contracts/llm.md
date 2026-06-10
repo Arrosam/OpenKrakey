@@ -35,3 +35,6 @@ llm-gateway (implements) ↔ orchestrator (uses `LLMResponse`), loader (injects 
 
 ## Status
 locked
+
+## Change log
+- 2026-06-11: additive — Message.toolCalls (assistant turns replay their tool calls; adapters map to tool_use / tool_calls / function_call); stopReason documented as NORMALIZED to the named union (provider-native in raw); stream/metadata documented as RESERVED no-ops.

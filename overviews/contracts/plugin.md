@@ -24,3 +24,6 @@ loader (loads + builds PluginContext), orchestrator (owns the block store) ↔ p
 
 ## Status
 locked
+
+## Change log
+- 2026-06-11: provides is now real — a requires entry may name a plugin id OR a provided capability of the same load set.

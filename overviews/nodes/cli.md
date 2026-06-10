@@ -40,3 +40,4 @@ pending
 ## Change log
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: redesigned — interactive @inquirer/prompts TUI (landing + deep-links + Providers page) instead of slash commands.
+- 2026-06-11: bug-fix wave — communicator editor preserves unedited fields (capabilities/input/output/temperature/maxTokens survive an edit); new CliParseError distinguishes corrupt from absent so providers/default pages abort instead of overwriting a corrupt (key-bearing) file; pure-core agent-id validation blocks ./../separators before any fs; createAgent spreads {...setting, id} so the requested id wins; deleting the default communicator clears the dangling pointer; apiKey entry uses a masked password prompt; usage errors go to stderr.

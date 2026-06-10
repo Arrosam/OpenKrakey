@@ -32,3 +32,4 @@ pending
 ## Change log
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: revised — default/current dual interval; `setInterval` immediate (this beat); `setDefaultInterval` added.
+- 2026-06-11: bug-fix wave — setInterval while NOT running (pre-start / stopped) records without firing (was: fired immediately off a stale/zero countdownStart); arm/rearm clear the pending timer first, so re-entrant fireNow/setInterval from inside the handler can no longer double-arm.
