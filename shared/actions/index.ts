@@ -75,6 +75,7 @@ export interface EventPayloads {
   "llm.return": Reply<LLMResponse>;
   "input.message": Notify<{ text: string; from?: string; channel?: string; meta?: Record<string, unknown> }>;
   "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
+  /** Emitted by the orchestrator as each dispatched tool call settles (id = ToolCall id). */
   "tool.result": Reply<unknown> & { name: string };
 }
 

@@ -1,6 +1,11 @@
 {
   "intervalMs": 30000,
-  "plugins": [],
+  "plugins": ["llm-core", "persona", "history", "console-channel", "notes", "toolbox"],
   "privatePlugins": [],
-  "config": {}
+  "config": {
+    "persona": {
+      "text": "You are Krakey, an autonomous agent. Be concise and helpful."
+    },
+    "llm-core": {}
+  }
 }
