@@ -98,6 +98,27 @@ export async function run(
   return handles;
 }
 
+/**
+ * Friendly pre-flight hints for startup: tell a new user the NEXT step instead
+ * of leaving them with silence. No agents → point at the cli; agents without
+ * any configured AI service → warn that they can't reply (moot without agents,
+ * so at most one hint is ever returned).
+ */
+export function startupHints(
+  defs: AgentDefinition[],
+  library: CommunicatorLibrary,
+): string[] {
+  if (defs.length === 0) {
+    return ["No agents yet — run `npm run cli` to set one up (guided setup will walk you through it)."];
+  }
+  if (library.list().length === 0) {
+    return [
+      "Warning: no AI service (LLM provider) is configured, so your agents cannot reply — run `npm run cli` and add one under \"AI services\".",
+    ];
+  }
+  return [];
+}
+
 /** Process entry point: wire everything, start agents, wait for Ctrl+C. */
 async function main(): Promise<void> {
   const defs = loadAgentConfigs(PATHS.agentsDir);
@@ -123,8 +144,10 @@ async function main(): Promise<void> {
     };
   }
 
+  for (const hint of startupHints(defs, library)) {
+    console.log(hint);
+  }
   if (defs.length === 0) {
-    console.log("No agent configs found under " + PATHS.agentsDir + ". Nothing to start.");
     return;
   }
 
