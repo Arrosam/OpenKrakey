@@ -41,6 +41,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadAgentConfigs, loadLLMConfig, run } from "../packages/boot/src";
+import * as bootModule from "../packages/boot/src";
 // createCommunicatorLibrary is the llm-gateway node's PUBLIC seam (the factory boot
 // calls to turn an LLMConfig into a CommunicatorLibrary). Imported here only as that
 // public entry point — its implementation is not inspected.
@@ -443,4 +444,66 @@ test("createCommunicatorLibrary: empty library reports nothing present (has/get/
   for (const cap of ["chat", "embed", "rerank", "ocr"] as const) {
     assert.deepEqual(lib.withCapability(cap), []);
   }
+});
+
+// ===========================================================================
+// EXT — startupHints: the friendly pre-flight messages main() prints so a new
+//        user learns the NEXT step instead of staring at silence.
+//        Resolved defensively: red on a missing export, never an import crash.
+// ===========================================================================
+
+const startupHints: any = (bootModule as any).startupHints;
+
+/** A CommunicatorLibrary stub with nothing configured. */
+const libWithNothing = (): CommunicatorLibrary => ({
+  get: () => undefined,
+  has: () => false,
+  list: () => [],
+  withCapability: () => [],
+});
+
+/** A CommunicatorLibrary stub with one (chat) communicator configured. */
+const libWithOne = (): CommunicatorLibrary => ({
+  get: () => undefined,
+  has: (n) => n === "x",
+  list: () => ["x"],
+  withCapability: () => ["x"],
+});
+
+const hintDef = (id: string): AgentDefinition => ({ id, intervalMs: 60_000, plugins: [] });
+
+test("startupHints: exported as a function from the boot node", () => {
+  assert.equal(typeof startupHints, "function", "startupHints not implemented yet");
+});
+
+test("startupHints: no agents -> exactly one hint that names agents and points at `npm run cli`", () => {
+  assert.equal(typeof startupHints, "function", "startupHints not implemented yet");
+  const hints = startupHints([], libWithOne());
+  assert.equal(hints.length, 1, "exactly one hint");
+  assert.match(hints[0], /agent/i, "the hint must say what is missing (an agent)");
+  assert.ok(hints[0].includes("npm run cli"), "the hint must give the exact next command");
+});
+
+test("startupHints: agents but NO AI service -> exactly one can't-reply warning pointing at `npm run cli`", () => {
+  assert.equal(typeof startupHints, "function", "startupHints not implemented yet");
+  const hints = startupHints([hintDef("a"), hintDef("b")], libWithNothing());
+  assert.equal(hints.length, 1, "exactly one hint");
+  assert.ok(hints[0].includes("npm run cli"), "the hint must give the exact next command");
+  assert.match(
+    hints[0],
+    /provider|service|reply/i,
+    "the hint must explain the consequence (no provider -> agents can't reply)",
+  );
+});
+
+test("startupHints: agents + a configured service -> no hints at all", () => {
+  assert.equal(typeof startupHints, "function", "startupHints not implemented yet");
+  assert.deepEqual(startupHints([hintDef("a")], libWithOne()), []);
+});
+
+test("startupHints: nothing configured at all -> only the no-agents hint (provider warning is moot)", () => {
+  assert.equal(typeof startupHints, "function", "startupHints not implemented yet");
+  const hints = startupHints([], libWithNothing());
+  assert.equal(hints.length, 1, "one hint, not two");
+  assert.match(hints[0], /agent/i, "and it is the no-agents hint");
 });
