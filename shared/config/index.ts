@@ -105,64 +105,71 @@ export interface ProviderInfo {
   baseURLHint: string;
   /** A concrete example baseURL. */
   baseURLExample: string;
+  /** A concrete example model id (format guidance, not a recommendation). */
+  modelExample: string;
 }
 
 /** Every provider type the gateway accepts, with UI guidance. */
 export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
   {
     id: "anthropic",
-    label: "Anthropic (Claude)",
-    summary: "The official Anthropic Messages API.",
+    label: "Anthropic-compatible (Messages API)",
+    summary: "Anthropic's /v1/messages wire format — Claude, or any Anthropic-compatible endpoint.",
     capabilities: ["chat", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "document"],
     outputs: ["text"],
     baseURLHint: "API root WITHOUT /v1 — leave blank for the official endpoint",
     baseURLExample: "https://api.anthropic.com",
+    modelExample: "claude-sonnet-4-6",
   },
   {
     id: "openai-completion",
     label: "OpenAI-compatible (chat completions)",
-    summary: "OpenAI itself, or any compatible endpoint: oneAPI, Ollama, vLLM, LM Studio…",
+    summary: "The /chat/completions wire format — OpenAI, or any compatible endpoint (oneAPI, Ollama, vLLM…).",
     capabilities: ["chat", "embed", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "audio"],
     outputs: ["text"],
     baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
     baseURLExample: "http://localhost:11434/v1",
+    modelExample: "gpt-4o",
   },
   {
     id: "openai-responses",
     label: "OpenAI (Responses API)",
-    summary: "OpenAI's newer Responses API.",
+    summary: "OpenAI's /responses wire format.",
     capabilities: ["chat", "embed", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "document"],
     outputs: ["text"],
     baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
     baseURLExample: "https://api.openai.com/v1",
+    modelExample: "gpt-4o",
   },
   {
     id: "cohere",
-    label: "Cohere (reranking)",
-    summary: "Cohere's /rerank endpoint for scoring documents against a query.",
+    label: "Cohere (rerank)",
+    summary: "Cohere's /rerank wire format for scoring documents against a query.",
     capabilities: ["rerank"],
     defaultCapabilities: ["rerank"],
     inputs: ["text"],
     outputs: ["text"],
     baseURLHint: "leave blank for the official endpoint",
     baseURLExample: "https://api.cohere.com/v2",
+    modelExample: "rerank-v3.5",
   },
   {
     id: "jina",
-    label: "Jina (reranking)",
-    summary: "Jina's /rerank endpoint for scoring documents against a query.",
+    label: "Jina (rerank)",
+    summary: "Jina's /rerank wire format for scoring documents against a query.",
     capabilities: ["rerank"],
     defaultCapabilities: ["rerank"],
     inputs: ["text"],
     outputs: ["text"],
     baseURLHint: "leave blank for the official endpoint",
     baseURLExample: "https://api.jina.ai/v1",
+    modelExample: "jina-reranker-v2-base-multilingual",
   },
 ];
 
