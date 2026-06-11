@@ -35,6 +35,17 @@ export class CliParseError extends CliError {
   }
 }
 
+/**
+ * Clean a user-entered baseURL: trim whitespace, strip ALL trailing slashes
+ * (adapters append their own paths — a trailing slash would yield `//chat/…`).
+ * Returns undefined when nothing usable remains, meaning "no override, use the
+ * provider's default endpoint".
+ */
+export function normalizeBaseURL(raw: string): string | undefined {
+  const cleaned = raw.trim().replace(/\/+$/, "");
+  return cleaned === "" ? undefined : cleaned;
+}
+
 /** The pure config-file surface the interactive shell drives. */
 export interface Cli {
   /** Agent ids that have a config.json, sorted. Missing dir → []. */
