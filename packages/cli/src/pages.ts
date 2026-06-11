@@ -592,6 +592,10 @@ export async function runInteractiveLoop(
     // A blank baseURL only REMOVES the field when the user explicitly cleared it;
     // an untouched baseURL is preserved as-is.
     let baseURLCleared = false;
+    // Deleting is a two-step arm-and-confirm: the first ENTER arms (the entry
+    // turns into an explicit warning and keeps the cursor), the second ENTER
+    // deletes. Picking anything else disarms.
+    let armedDelete = false;
 
     /** Keep selections legal after a provider-type change. */
     const clampToProvider = () => {
@@ -633,12 +637,36 @@ export async function runInteractiveLoop(
             },
             { name: mint("Save"), value: "save" },
             // Delete only applies to an EXISTING communicator, not a new one.
-            ...(isNew ? [] : [{ name: red("Delete this service"), value: "delete" }]),
+            ...(isNew
+              ? []
+              : [
+                  {
+                    name: armedDelete
+                      ? red(bold(`Press ENTER again to DELETE "${name}"`))
+                      : red("Delete this service"),
+                    value: "delete",
+                  },
+                ]),
             { name: dim("Cancel"), value: "cancel" },
           ],
+          // While armed, keep the cursor ON the delete entry so the second
+          // ENTER lands there — that is the whole double-enter contract.
+          default: armedDelete ? "delete" : undefined,
           loop: false,
         }),
       );
+
+      if (field === "delete") {
+        if (!armedDelete) {
+          armedDelete = true;
+          continue;
+        }
+        delete cfg.communicators[name];
+        if (cfg.default === name) delete cfg.default;
+        return true;
+      }
+      // Any other selection disarms a pending delete.
+      armedDelete = false;
 
       if (field === "cancel") return false;
 
@@ -659,12 +687,6 @@ export async function runInteractiveLoop(
         else if (baseURLCleared) delete def.baseURL;
         if (draft.apiKey) def.apiKey = draft.apiKey;
         cfg.communicators[name] = def;
-        return true;
-      }
-
-      if (field === "delete") {
-        delete cfg.communicators[name];
-        if (cfg.default === name) delete cfg.default;
         return true;
       }
 
