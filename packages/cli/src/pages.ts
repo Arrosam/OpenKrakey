@@ -8,7 +8,19 @@
  * private QuitSignal; expected CliErrors are printed and the loop continues;
  * anything else bubbles out.
  */
-import { checkbox, confirm, input, password, select } from "@inquirer/prompts";
+import {
+  STAR,
+  bold,
+  checkbox,
+  confirm,
+  failure,
+  heading,
+  input,
+  password,
+  select,
+  step,
+  success,
+} from "./theme";
 
 import type { AgentDefinition } from "../../../contracts/agent";
 import type { Capability, Modality } from "../../../contracts/llm";
@@ -184,7 +196,7 @@ export async function runInteractiveLoop(
       return await op();
     } catch (err) {
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         return fallback;
       }
       throw err;
@@ -399,7 +411,7 @@ export async function runInteractiveLoop(
     const save = await editSettingFields(`Agent "${id}"`, draft, plugins);
     if (save) {
       await guard(() => cli.writeAgent(id, draft), undefined);
-      out(`Saved agent "${id}".`);
+      out(success(`Saved agent "${id}".`));
     }
   }
 
@@ -413,8 +425,8 @@ export async function runInteractiveLoop(
     const fresh = agents.length === 0 || services.length === 0;
     const wizardEntry = {
       name: fresh
-        ? "🚀 Guided setup — connect an AI service and create your first agent"
-        : "Guided setup — add another AI service + agent",
+        ? `${STAR} Guided setup — connect an AI service and create your first agent`
+        : `${STAR} Guided setup — add another AI service + agent`,
       value: "wizard" as Page,
     };
     const main: Array<{ name: string; value: Page }> = [
@@ -487,7 +499,7 @@ export async function runInteractiveLoop(
       );
       if (yes) {
         await guard(() => cli.removeAgent(choice), undefined);
-        out(`Removed config for "${choice}".`);
+        out(success(`Removed config for "${choice}".`));
       }
     }
     return "agents";
@@ -501,11 +513,11 @@ export async function runInteractiveLoop(
       setting = await cli.readDefault();
     } catch (err) {
       if (err instanceof CliParseError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         setting = null;
       } else {
         throw err;
@@ -536,7 +548,7 @@ export async function runInteractiveLoop(
     const save = await editSettingFields("Default setting", draft, plugins);
     if (save) {
       await guard(() => cli.writeDefault(draft), undefined);
-      out("Saved default setting.");
+      out(success("Saved default settings."));
     }
     return "landing";
   }
@@ -688,11 +700,11 @@ export async function runInteractiveLoop(
       cfg = await cli.readLLMConfig();
     } catch (err) {
       if (err instanceof CliParseError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         cfg = { communicators: {} };
       } else {
         throw err;
@@ -744,7 +756,7 @@ export async function runInteractiveLoop(
     const changed = await communicatorEditor(cfg, name, isNew);
     if (changed) {
       await guard(() => cli.writeLLMConfig(cfg), undefined);
-      out("Saved AI services.");
+      out(success("Saved AI services."));
     }
     return "providers";
   }
@@ -764,13 +776,20 @@ export async function runInteractiveLoop(
       cfg = await cli.readLLMConfig();
     } catch (err) {
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       throw err;
     }
 
-    out("Guided setup — connect an AI service, then create an agent that uses it. (Ctrl+C leaves at any point.)");
+    out("");
+    out(
+      heading(
+        "Guided setup",
+        "Connect an AI service, then create an agent that uses it. Ctrl+C leaves at any point.",
+      ),
+    );
+    out(step("Step 1 of 2 — the AI service"));
 
     // 1. The AI service.
     const info = await selectProviderType(undefined);
@@ -815,9 +834,10 @@ export async function runInteractiveLoop(
       return true;
     }, false);
     if (!wrote) return "landing";
-    out(`Saved AI service "${connName}".`);
+    out(success(`Saved AI service "${connName}".`));
 
     // 2. The agent.
+    out(step("Step 2 of 2 — your agent"));
     const wantAgent = await ask(() =>
       confirm({ message: "Create an agent that uses it now?", default: true }),
     );
@@ -839,7 +859,7 @@ export async function runInteractiveLoop(
       await cli.readDefault();
     } catch (err) {
       if (err instanceof CliParseError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       if (err instanceof CliError) {
@@ -881,7 +901,11 @@ export async function runInteractiveLoop(
     }, undefined);
 
     out("");
-    out('All set — run `npm start` and talk to "' + agentId + '" in this terminal.');
+    out(
+      success(
+        "All set — run " + bold("npm start") + ' and talk to "' + agentId + '" in this terminal.',
+      ),
+    );
     return "landing";
   }
 
