@@ -44,3 +44,4 @@ pending
 - 2026-06-12: usability rework — guided setup wizard (skippable); provider type/capabilities/modalities are selects from shared KNOWN_PROVIDERS (5x4 gateway cross-check test pins the table to reality); free fields state purpose + format + example; normalizeBaseURL strips trailing slashes; natural-language labels everywhere.
 - 2026-06-12: brand theming — theme.ts (mint #2FD69C palette + pre-themed prompt wrappers, star prefix); styled guided-setup headings/steps/success lines; soft-red error lines; emoji replaced with the star glyph; plain-text degrade on NO_COLOR/non-TTY.
 - 2026-06-12: semantic action colors — mint affirmative / red destructive / dim navigation across every select menu.
+- 2026-06-12: two-step arm-and-confirm delete for AI services (double-ENTER; any other selection disarms).
