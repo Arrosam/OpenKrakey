@@ -13,10 +13,13 @@ import {
   bold,
   checkbox,
   confirm,
+  dim,
   failure,
   heading,
   input,
+  mint,
   password,
+  red,
   select,
   step,
   success,
@@ -62,10 +65,13 @@ async function ask<T>(run: () => Promise<T>): Promise<T> {
 
 type Out = (msg: string) => void;
 
-const BACK = "← Back";
-const CREATE_NEW = "➕ Create new";
-const ADD = "➕ Add";
-const DONE = "Done";
+// Shared action labels, color-coded by intent: mint = constructive/affirmative,
+// red = destructive (or loses your edits), dim = plain navigation. Whole names
+// are painted (never substrings) so the focused-row highlight stays readable.
+const BACK = dim("← Back");
+const CREATE_NEW = mint("+ Create new");
+const ADD_SERVICE = mint("+ Add a new AI service");
+const DONE = mint("Done");
 
 /** Reusable id validator for agent ids: non-empty, no spaces/slashes/dot-dirs. */
 function validateId(raw: string): true | string {
@@ -217,8 +223,8 @@ export async function runInteractiveLoop(
           name: `${k}: ${JSON.stringify(cfg[k])}`,
           value: `edit:${k}`,
         })),
-        { name: "Add key", value: "add" },
-        { name: "Remove key", value: "remove" },
+        { name: mint("+ Add key"), value: "add" },
+        { name: red("Remove key"), value: "remove" },
         { name: DONE, value: "done" },
       ];
 
@@ -324,8 +330,8 @@ export async function runInteractiveLoop(
               name: `Plugin settings: ${Object.keys(draft.config ?? {}).length} item(s)`,
               value: "config",
             },
-            { name: "Save & Back", value: "save" },
-            { name: "Discard & Back", value: "discard" },
+            { name: mint("Save & Back"), value: "save" },
+            { name: red("Discard & Back"), value: "discard" },
           ],
           loop: false,
         }),
@@ -439,7 +445,7 @@ export async function runInteractiveLoop(
         message: "OpenKrakey config",
         choices: [
           ...(fresh ? [wizardEntry, ...main] : [...main, wizardEntry]),
-          { name: "Quit", value: "quit" },
+          { name: dim("Quit"), value: "quit" },
         ],
         loop: false,
       }),
@@ -481,7 +487,7 @@ export async function runInteractiveLoop(
         message: `Agent "${choice}"`,
         choices: [
           { name: "Edit", value: "edit" },
-          { name: "Delete config", value: "delete" },
+          { name: red("Delete config"), value: "delete" },
           { name: BACK, value: "back" },
         ],
         loop: false,
@@ -625,10 +631,10 @@ export async function runInteractiveLoop(
               name: `Output types: ${draft.output.map((m) => MODALITY_LABELS[m]).join(", ")}`,
               value: "output",
             },
-            { name: "Save", value: "save" },
+            { name: mint("Save"), value: "save" },
             // Delete only applies to an EXISTING communicator, not a new one.
-            ...(isNew ? [] : [{ name: "Delete this service", value: "delete" }]),
-            { name: "Cancel", value: "cancel" },
+            ...(isNew ? [] : [{ name: red("Delete this service"), value: "delete" }]),
+            { name: dim("Cancel"), value: "cancel" },
           ],
           loop: false,
         }),
@@ -723,7 +729,7 @@ export async function runInteractiveLoop(
               value: n,
             };
           }),
-          { name: `${ADD} a new AI service`, value: "\0add" },
+          { name: ADD_SERVICE, value: "\0add" },
           { name: BACK, value: "\0back" },
         ],
         loop: false,
