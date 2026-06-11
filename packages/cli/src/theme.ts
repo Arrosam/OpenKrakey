@@ -27,7 +27,8 @@ const wrap = (code: string) => (text: string) =>
 export const mint = wrap("38;2;47;214;156");
 export const dim = wrap("2");
 export const bold = wrap("1");
-const redText = wrap("38;2;255;107;107");
+/** Soft red — destructive actions and expected failures. */
+export const red = wrap("38;2;255;107;107");
 const mintBold = (text: string) => mint(bold(text));
 
 /** The brand glyph — a simple star, no emoji. */
@@ -44,7 +45,7 @@ export const step = (label: string): string => "\n" + mintBold(`${STAR} ${label}
 export const success = (msg: string): string => mint("✔ ") + msg;
 
 /** An expected-failure line: soft-red cross + message. */
-export const failure = (msg: string): string => redText("✖ " + msg);
+export const failure = (msg: string): string => red("✖ " + msg);
 
 // ---------------------------------------------------------------------------
 // Pre-themed prompt wrappers (same signatures as @inquirer/prompts).
