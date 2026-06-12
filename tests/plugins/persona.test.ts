@@ -50,8 +50,12 @@ const mod: any = await import("../../public_plugin/persona/index.ts").then(
 /** Asserts the module + default export exist; returns the default export. */
 function plugin(): any {
   assert.ok(mod, "persona module not implemented yet (import failed)");
-  assert.ok(mod.default, "persona plugin default export missing (not implemented yet)");
-  return mod.default;
+  assert.equal(
+    typeof mod?.default,
+    "function",
+    "persona plugin not implemented yet — the default export must be a PluginFactory",
+  );
+  return mod.default(); // one fresh per-Agent instance
 }
 
 // ---------------------------------------------------------------------------
