@@ -35,8 +35,13 @@ const mod: any = await import("../../public_plugin/llm-core/index.ts").then(
 
 /** Pull the Plugin default export, failing on a clean assertion if absent. */
 function plugin(): Plugin {
-  assert.ok(mod?.default, "plugin not implemented yet (public_plugin/llm-core/index.ts)");
-  return mod.default as Plugin;
+  assert.equal(
+    typeof mod?.default,
+    "function",
+    "plugin not implemented yet — the default export must be a PluginFactory (public_plugin/llm-core/index.ts)",
+  );
+  // The factory runs once per Agent; each call here is one fresh instance.
+  return (mod.default as () => Plugin)();
 }
 
 // ---- communicator + library stubs ----------------------------------------
