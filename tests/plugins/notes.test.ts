@@ -117,7 +117,8 @@ async function makeHarness(config: unknown = {}): Promise<Harness> {
     removeBlock: (id) => blocks.delete(id),
     listBlocks: () =>
       [...blocks.values()].map((b: any) => ({ id: b.id, priority: b.priority })),
-    log: () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: () => {},
   };
 
   await plugin.setup(ctx);
