@@ -45,9 +45,9 @@ const createConsoleChannel: PluginFactory = (): Plugin => {
 
       const unsubStart = ctx.events.on(Events.AGENT_START, (payload) => {
         const agentId = (payload as EventPayloads["agent.start"])?.data?.agentId;
-        process.stdout.write(
-          "[krakey] agent '" + agentId + "' is awake — type to talk.\n"
-        );
+        // The channel's STARTING MESSAGE — via ctx.print so it lands in the
+        // startup report of whichever console ran the program.
+        ctx.print("agent '" + agentId + "' is awake — type to talk.");
       });
 
       cleanup = () => {
