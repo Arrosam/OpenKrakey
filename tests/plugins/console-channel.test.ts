@@ -136,7 +136,8 @@ sys.events.on(${JSON.stringify(Events.INPUT_MESSAGE)}, (p) => {
 });
 
 const mod = await import(${JSON.stringify(PLUGIN_URL)}).then((m) => m, () => null);
-const plugin = mod && (mod.default || mod.plugin || mod);
+// The default export is a PluginFactory — one call = one per-Agent instance.
+const plugin = mod && typeof mod.default === "function" ? mod.default() : null;
 if (!plugin || typeof plugin.setup !== "function") {
   emit("NOT_IMPLEMENTED");
   process.exit(0);
