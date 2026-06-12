@@ -14,13 +14,13 @@
  *   - real plugin modules written to a per-test OS temp dir and dynamically
  *     imported by the loader.
  *
- * Plugins are made OBSERVABLE: each writes an `index.ts` that exports a `calls`
- * array and pushes the exact PluginContext it received in `setup`. Because ESM
- * caches modules by resolved file URL, the test re-imports the SAME file the
- * loader imported (`pathToFileURL(<dir>/<id>/index.ts)`) and inspects
- * `mod.calls[0]` — i.e. the very context object the loader passed. Every test
- * gets a FRESH temp dir, so each plugin file has a unique URL and there is no
- * cross-test ESM cache bleed.
+ * Plugins are made OBSERVABLE: each writes an `index.ts` whose DEFAULT EXPORT
+ * is a FACTORY (contracts/plugin PluginFactory — the loader calls it once per
+ * Agent) and which exports a module-level `calls` array; every instance's setup
+ * pushes its PluginContext there. ESM caches the MODULE by resolved file URL,
+ * so the test re-imports the same file and inspects `mod.calls[0]` — the very
+ * context object the loader passed. Every test gets a FRESH temp dir, so each
+ * plugin file has a unique URL and there is no cross-test ESM cache bleed.
  *
  * Nothing here reads node/contract source or assumes implementation internals;
  * behavior is taken from contracts/loader, contracts/plugin and the loader
@@ -104,8 +104,8 @@ function stubOrchestrator(): Orchestrator & { blocks: Map<string, ContextBlock> 
 // ---------------------------------------------------------------------------
 
 /**
- * Write a minimal, OBSERVABLE plugin. `body` is the object literal passed to
- * `export default` — it must include at least { manifest, setup }. The module
+ * Write a minimal, OBSERVABLE plugin. `body` is the module source whose default
+ * export is a FACTORY returning at least { manifest, setup }. The module
  * also exports a `calls` array; the supplied body's setup is expected to push
  * the ctx into it (the default body below does so).
  */
@@ -170,7 +170,7 @@ export const calls = [];
 export const teardowns = [];
 export const obs = {};
 export const MARKER = ${JSON.stringify(marker)};
-export default {
+export default () => ({
   manifest: { id: ${JSON.stringify(id)}, version: ${JSON.stringify(version)}${requiresLiteral} },
   async setup(ctx) {
     calls.push(ctx);
@@ -179,13 +179,14 @@ export default {
   async teardown() {
     teardowns.push(${JSON.stringify(orderTag)});${appendOrder}${throwStmt}
   },
-};
+});
 `;
 }
 
 /**
  * Re-import the SAME module file the loader imported. ESM caches by URL, so this
- * returns the identical instance — including its live `calls`/`teardowns`.
+ * returns the identical MODULE — its module-level `calls`/`teardowns` accumulate
+ * across every per-agent instance the loader created from the factory.
  */
 async function importPlugin(dir: string, id: string): Promise<any> {
   const file = path.join(dir, id, "index.ts");
@@ -617,7 +618,7 @@ test("invalid module: default missing `manifest` => PluginLoadError", async () =
   writePlugin(
     publicPluginDir,
     "bad",
-    `export default { async setup(_ctx) {} };`,
+    `export default () => ({ async setup(_ctx) {} });`,
   );
   const { loader } = makeLoader(def({ plugins: ["bad"] }));
   await assert.rejects(loader.load(), PluginLoadError);
@@ -627,7 +628,7 @@ test("invalid module: default missing `setup` => PluginLoadError", async () => {
   writePlugin(
     publicPluginDir,
     "bad",
-    `export default { manifest: { id: "bad", version: "1" } };`,
+    `export default () => ({ manifest: { id: "bad", version: "1" } });`,
   );
   const { loader } = makeLoader(def({ plugins: ["bad"] }));
   await assert.rejects(loader.load(), PluginLoadError);
@@ -714,10 +715,10 @@ test("teardown: a plugin WITHOUT a teardown? is skipped without error", async ()
     "noteardown",
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "noteardown", version: "1" },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `,
   );
   const { loader } = makeLoader(def({ plugins: ["noteardown"] }));
@@ -782,18 +783,20 @@ function goodRegistrarPlugin(id: string, action: string): string {
   return `
 export const state = { setupCalled: false, teardownCalled: false };
 export const calls = [];
-let unsub;
-export default {
-  manifest: { id: ${JSON.stringify(id)}, version: "1" },
-  async setup(ctx) {
-    calls.push(ctx);
-    unsub = ctx.actions.register(${JSON.stringify(action)}, async () => "ok");
-    state.setupCalled = true;
-  },
-  async teardown() {
-    if (typeof unsub === "function") unsub();
-    state.teardownCalled = true;
-  },
+export default () => {
+  let unsub; // per-instance closure: each agent's instance owns its own Unsub
+  return {
+    manifest: { id: ${JSON.stringify(id)}, version: "1" },
+    async setup(ctx) {
+      calls.push(ctx);
+      unsub = ctx.actions.register(${JSON.stringify(action)}, async () => "ok");
+      state.setupCalled = true;
+    },
+    async teardown() {
+      if (typeof unsub === "function") unsub();
+      state.teardownCalled = true;
+    },
+  };
 };
 `;
 }
@@ -813,10 +816,10 @@ function providerPlugin(opts: { id: string; provides?: string[]; requires?: stri
   const reqLit = requires ? `, requires: ${JSON.stringify(requires)}` : "";
   return `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: ${JSON.stringify(id)}, version: "1"${provLit}${reqLit} },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `;
 }
 
@@ -984,10 +987,10 @@ test("requires (action, ordered): provider sorts first and registers the action 
     "a-provider",
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "a-provider", version: "1" },
   async setup(ctx) { calls.push(ctx); ctx.actions.register("svc.ready", async () => "ok"); },
-};
+});
 `,
   );
   writePlugin(publicPluginDir, "b-consumer", providerPlugin({ id: "b-consumer", requires: ["svc.ready"] }));
@@ -1037,10 +1040,10 @@ test("index.js fallback: a plugin dir containing only index.js loads successfull
     path.join(pdir, "index.js"),
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "jsonly", version: "1" },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `,
     "utf8",
   );
@@ -1050,4 +1053,98 @@ export default {
 
   const mod = await import(pathToFileURL(path.join(pdir, "index.js")).href);
   assert.equal(mod.calls.length, 1, "the index.js plugin's setup ran exactly once");
+});
+
+// ===========================================================================
+// EXT-2 — The FACTORY contract (contracts/plugin PluginFactory) + per-Agent
+//          instantiation (R6): plugins share CODE, never live state.
+// ===========================================================================
+
+test("factory contract: a LEGACY object default export (not a factory) => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "legacy",
+    `export default { manifest: { id: "legacy", version: "1" }, async setup(_ctx) {} };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["legacy"] }));
+  await assert.rejects(
+    loader.load(),
+    PluginLoadError,
+    "an object default export is not a factory and must be rejected",
+  );
+});
+
+test("factory contract: a factory that THROWS during construction => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "boomfactory",
+    `export default () => { throw new Error("construction exploded"); };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["boomfactory"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("R6: two agents loading the SAME public plugin get independent instances (shared code, shared dataDir, never shared state)", async () => {
+  // A factory whose per-instance state is observable through a module-level
+  // `instances` array: one entry per factory call, mutated only by that call's
+  // own instance.
+  writePlugin(
+    publicPluginDir,
+    "solo",
+    `
+export const instances = [];
+export default () => {
+  const inst = { agentId: null, dataDir: null, torndown: false };
+  instances.push(inst);
+  let unsub;
+  return {
+    manifest: { id: "solo", version: "1" },
+    async setup(ctx) {
+      inst.agentId = ctx.agentId;
+      inst.dataDir = ctx.dataDir;
+      unsub = ctx.actions.register("solo.act", async () => "ok");
+    },
+    async teardown() {
+      if (typeof unsub === "function") unsub();
+      inst.torndown = true;
+    },
+  };
+};
+`,
+  );
+
+  // Two distinct agents, each with its own event-system (makeLoader builds one
+  // per call), both loading the one public "solo".
+  const a = makeLoader(def({ id: "agA", plugins: ["solo"] }));
+  const b = makeLoader(def({ id: "agB", plugins: ["solo"] }));
+  await a.loader.load();
+  await assert.doesNotReject(
+    b.loader.load(),
+    "a second agent must load the same public plugin without instance collision",
+  );
+
+  const mod = await importPlugin(publicPluginDir, "solo");
+  assert.equal(mod.instances.length, 2, "the factory ran once PER AGENT (two instances)");
+  const [ia, ib] = mod.instances;
+  assert.equal(ia.agentId, "agA", "instance 1 was set up with agent A's context");
+  assert.equal(ib.agentId, "agB", "instance 2 was set up with agent B's context");
+  // The shared-data exception still holds: SAME dataDir for both agents.
+  assert.equal(
+    ia.dataDir,
+    ib.dataDir,
+    "public plugins still SHARE dataDir (the explicit shared-knowledge semantics)",
+  );
+  // Each instance registered on ITS OWN bus.
+  assert.equal(a.sys.actions.has("solo.act"), true, "agent A's bus has A's action");
+  assert.equal(b.sys.actions.has("solo.act"), true, "agent B's bus has B's action");
+
+  // Teardown isolation: tearing agent A down must not touch agent B.
+  await a.loader.teardown();
+  assert.equal(ia.torndown, true, "A's instance was torn down");
+  assert.equal(ib.torndown, false, "B's instance must be untouched by A's teardown");
+  assert.equal(a.sys.actions.has("solo.act"), false, "A's action left A's bus");
+  assert.equal(b.sys.actions.has("solo.act"), true, "B's action survives A's teardown");
+
+  await b.loader.teardown();
+  assert.equal(ib.torndown, true, "B's instance tears down independently");
 });
