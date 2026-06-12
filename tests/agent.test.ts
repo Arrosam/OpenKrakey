@@ -588,3 +588,48 @@ try {
   );
   assert.equal(result.cycleOk, true, "a later start()/stop() pair must settle without rejecting");
 });
+
+// ===========================================================================
+// EXT — print-sink threading: createAgentInstance deps gains `print` and
+// forwards it to the loader, so a plugin's ctx.print (its starting message)
+// lands in whatever console the composition root (boot) wired in.
+// ===========================================================================
+
+test("deps.print: a plugin's ctx.print during setup reaches the injected sink verbatim", async () => {
+  writePublicPlugin(
+    "greeter",
+    `
+export default () => ({
+  manifest: { id: "greeter", version: "1" },
+  setup(ctx) { ctx.print("greeter is awake"); },
+});
+`,
+  );
+  const prints: string[] = [];
+  const agent = make(
+    bareDef("printy", { intervalMs: 10_000, plugins: ["greeter"] }),
+    baseDeps({ print: (t: string) => prints.push(t) }),
+  );
+
+  await agent.start();
+  assert.deepEqual(prints, ["greeter is awake"], "the sink received the exact text");
+  await agent.stop();
+});
+
+test("deps.print omitted: a printing plugin still starts (default sink; no throw)", async () => {
+  writePublicPlugin(
+    "greeter-d",
+    `
+export default () => ({
+  manifest: { id: "greeter-d", version: "1" },
+  setup(ctx) { ctx.print("default sink"); },
+});
+`,
+  );
+  const agent = make(
+    bareDef("printy-d", { intervalMs: 10_000, plugins: ["greeter-d"] }),
+    baseDeps(),
+  );
+  await assert.doesNotReject(() => agent.start());
+  await agent.stop();
+});
