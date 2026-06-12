@@ -155,7 +155,13 @@ export function createLoader(deps: LoaderDeps): Loader {
     }
   }
 
-  /** Dynamic-import a plugin: prefer index.ts, fall back to index.js. */
+  /**
+   * Dynamic-import a plugin (prefer index.ts, fall back to index.js) and
+   * INSTANTIATE it: the default export is a PluginFactory called once per
+   * Agent (ESM caches the module, so shared code never yields shared state —
+   * R6). A non-factory default, a throwing factory, or a malformed instance
+   * all reject with PluginLoadError.
+   */
   async function importPlugin(id: string, pluginDir: string): Promise<Plugin> {
     const tsEntry = path.join(pluginDir, "index.ts");
     const jsEntry = path.join(pluginDir, "index.js");
@@ -175,14 +181,27 @@ export function createLoader(deps: LoaderDeps): Loader {
       throw new PluginLoadError("failed to import plugin '" + id + "': " + err);
     }
 
-    const plugin = mod.default as Plugin;
+    const factory = mod.default;
+    if (typeof factory !== "function") {
+      throw new PluginLoadError(
+        "plugin '" + id + "' must default-export a factory (() => Plugin), got " + typeof factory,
+      );
+    }
+
+    let plugin: Plugin;
+    try {
+      plugin = (factory as () => Plugin)();
+    } catch (err) {
+      throw new PluginLoadError("plugin '" + id + "' factory threw during construction: " + err);
+    }
+
     if (
       !plugin ||
       typeof plugin !== "object" ||
       typeof plugin.manifest !== "object" ||
       typeof plugin.setup !== "function"
     ) {
-      throw new PluginLoadError("plugin '" + id + "' has no valid default export");
+      throw new PluginLoadError("plugin '" + id + "' factory did not return a valid Plugin");
     }
     return plugin;
   }
