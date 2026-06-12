@@ -160,7 +160,8 @@ function makeCtx(t: { after(fn: () => void): void }, opts: {
     getBlock: store.getBlock,
     removeBlock: store.removeBlock,
     listBlocks: store.listBlocks,
-    log: () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: () => {},
   };
   return { ctx, events: sys.events, actions: sys.actions };
 }
