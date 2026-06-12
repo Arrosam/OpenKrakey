@@ -119,7 +119,10 @@ const ctx = {
   getBlock: store.getBlock,
   removeBlock: store.removeBlock,
   listBlocks: store.listBlocks,
-  log: () => {},
+  log: { info: () => {}, warn: () => {}, error: () => {} },
+  // Mirrors the loader's DEFAULT print sink: the clean user-facing line goes to
+  // stdout — which is exactly where the parent asserts the greeting appears.
+  print: (text) => { process.stdout.write(text + "\\n"); },
 };
 
 // Stub clock.fire_now: prints FIRED whenever invoked (input must wake the beat).
