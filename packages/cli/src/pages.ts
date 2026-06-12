@@ -146,13 +146,15 @@ const selectProviderType = (
     }),
   );
 
-/** Model id prompt with the provider's format example. */
+/**
+ * Model id prompt with the provider's format example. Empty means "go back"
+ * (returns "" — the caller keeps its current value or aborts its flow).
+ */
 const askModel = (info: ProviderInfo | undefined, current: string): Promise<string> =>
   ask(() =>
     input({
-      message: `model id — as your provider names it (e.g. ${info?.modelExample ?? "gpt-4o"})`,
+      message: `model id — as your provider names it (e.g. ${info?.modelExample ?? "gpt-4o"}; leave empty to go back)`,
       default: current,
-      validate: (r) => (r.trim().length > 0 ? true : "model id must not be empty"),
     }),
   ).then((v) => v.trim());
 
@@ -258,13 +260,10 @@ export async function runInteractiveLoop(
       if (action === "add") {
         const key = (
           await ask(() =>
-            input({
-              message: "new key name",
-              validate: (r) =>
-                r.trim().length > 0 ? true : "key must not be empty",
-            }),
+            input({ message: "new key name (leave empty to go back)" }),
           )
         ).trim();
+        if (key === "") continue;
         const valueRaw = await ask(() =>
           input({ message: `value for "${key}" (JSON)`, default: '""' }),
         );
@@ -489,43 +488,54 @@ export async function runInteractiveLoop(
       const id = (
         await ask(() =>
           input({
-            message: "agent name — used as its folder under agents/ (letters, digits, . _ -)",
-            validate: validateId,
+            message:
+              "agent name — used as its folder under agents/ (letters, digits, . _ -; leave empty to go back)",
+            validate: (r) => (r.trim() === "" ? true : validateId(r)),
           }),
         )
       ).trim();
+      if (id === "") return "agents";
       await guard(() => cli.createAgent(id), undefined);
       return "agents";
     }
 
-    // Selected an existing agent id → detail.
-    const action = await ask(() =>
-      select<"edit" | "delete" | "back">({
-        message: `Agent "${choice}"`,
-        choices: [
-          { name: "Edit", value: "edit" },
-          { name: red("Delete config"), value: "delete" },
-          { name: BACK, value: "back" },
-        ],
-        loop: false,
-      }),
-    );
-
-    if (action === "edit") {
-      await agentEditor(choice);
-    } else if (action === "delete") {
-      const yes = await ask(() =>
-        confirm({
-          message: `Delete config for "${choice}"? (data kept)`,
-          default: false,
+    // Selected an existing agent id → detail. Deleting uses the same two-step
+    // arm-and-confirm as AI services: first ENTER arms, second ENTER deletes,
+    // any other selection disarms.
+    let armedDelete = false;
+    for (;;) {
+      const action = await ask(() =>
+        select<"edit" | "delete" | "back">({
+          message: `Agent "${choice}"`,
+          choices: [
+            { name: "Edit", value: "edit" },
+            {
+              name: armedDelete
+                ? red(bold(`Press ENTER again to DELETE "${choice}" (config only — data kept)`))
+                : red("Delete config"),
+              value: "delete",
+            },
+            { name: BACK, value: "back" },
+          ],
+          default: armedDelete ? "delete" : undefined,
+          loop: false,
         }),
       );
-      if (yes) {
+
+      if (action === "delete") {
+        if (!armedDelete) {
+          armedDelete = true;
+          continue;
+        }
         await guard(() => cli.removeAgent(choice), undefined);
         out(success(`Removed config for "${choice}".`));
+        return "agents";
       }
+      if (action === "edit") {
+        await agentEditor(choice);
+      }
+      return "agents";
     }
-    return "agents";
   }
 
   async function defaultPage(): Promise<Page> {
@@ -718,7 +728,8 @@ export async function runInteractiveLoop(
           clampToProvider();
         }
       } else if (field === "model") {
-        draft.model = await askModel(info, draft.model);
+        const m = await askModel(info, draft.model);
+        if (m !== "") draft.model = m; // empty = go back, keep the current id
       } else if (field === "baseURL") {
         const v = await askBaseURL(info, draft.baseURL ?? "");
         draft.baseURL = v;
@@ -790,16 +801,17 @@ export async function runInteractiveLoop(
         await ask(() =>
           input({
             message:
-              "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local)",
+              "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local; leave empty to go back)",
             validate: (r) => {
               const v = r.trim();
-              if (v.length === 0) return "name must not be empty";
+              if (v.length === 0) return true; // empty = go back
               if (cfg.communicators[v]) return `"${v}" already exists`;
               return true;
             },
           }),
         )
       ).trim();
+      if (name === "") return "providers";
     } else {
       name = choice;
     }
@@ -849,17 +861,25 @@ export async function runInteractiveLoop(
       await ask(() =>
         input({
           message:
-            "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local)",
+            "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local; leave empty to cancel)",
           validate: (r) => {
             const v = r.trim();
-            if (v.length === 0) return "name must not be empty";
+            if (v.length === 0) return true; // empty = cancel setup
             if (cfg.communicators[v]) return `"${v}" already exists`;
             return true;
           },
         }),
       )
     ).trim();
+    if (connName === "") {
+      out(dim("(cancelled — nothing saved)"));
+      return "landing";
+    }
     const model = await askModel(info, "");
+    if (model === "") {
+      out(dim("(cancelled — nothing saved)"));
+      return "landing";
+    }
     const baseURL = await askBaseURL(info, "");
     const apiKey = await ask(() =>
       password({
@@ -899,11 +919,15 @@ export async function runInteractiveLoop(
       await ask(() =>
         input({
           message:
-            "agent name — used as its folder under agents/ (letters, digits, . _ -; e.g. krakey)",
-          validate: validateId,
+            "agent name — used as its folder under agents/ (letters, digits, . _ -; e.g. krakey; leave empty to skip)",
+          validate: (r) => (r.trim() === "" ? true : validateId(r)),
         }),
       )
     ).trim();
+    if (agentId === "") {
+      out(dim(`(agent creation skipped — the AI service "${connName}" was saved)`));
+      return "landing";
+    }
 
     // createAgent copies the Default Setting; seed a sensible one if absent
     // (every available public plugin, 30 s heartbeat). A corrupt default aborts.
@@ -930,14 +954,17 @@ export async function runInteractiveLoop(
     }, false);
     if (!created) return "landing";
 
-    const persona = await ask(() =>
-      input({
-        message: "persona — the agent's system prompt (how it should behave)",
-        default: "You are Krakey, an autonomous agent. Be concise and helpful.",
-      }),
-    );
+    const persona = (
+      await ask(() =>
+        input({
+          message: "persona — the agent's system prompt (how it should behave; empty keeps the default)",
+          default: "You are Krakey, an autonomous agent. Be concise and helpful.",
+        }),
+      )
+    ).trim();
 
-    // Point the new agent at the connection we just made, and set its persona.
+    // Point the new agent at the connection we just made, and set its persona
+    // (an emptied-out persona keeps the plugin's default).
     await guard(async () => {
       const agentDef = await cli.readAgent(agentId);
       const config = { ...(agentDef.config ?? {}) };
@@ -945,10 +972,12 @@ export async function runInteractiveLoop(
         ...((config["llm-core"] as Record<string, unknown>) ?? {}),
         communicator: connName,
       };
-      config["persona"] = {
-        ...((config["persona"] as Record<string, unknown>) ?? {}),
-        text: persona,
-      };
+      if (persona !== "") {
+        config["persona"] = {
+          ...((config["persona"] as Record<string, unknown>) ?? {}),
+          text: persona,
+        };
+      }
       await cli.writeAgent(agentId, { ...agentDef, config });
     }, undefined);
 
