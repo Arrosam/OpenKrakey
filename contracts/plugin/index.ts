@@ -56,7 +56,24 @@ export interface PluginContext {
   removeBlock(id: string): boolean;
   listBlocks(): Array<{ id: string; priority: number }>;
 
-  log(msg: string): void;
+  // ---- console output (v1.1 — was `log(msg): void`) ----
+  /**
+   * DIAGNOSTIC logger, tagged with this plugin's id. Every line goes to the
+   * host console AND is pushed on this Agent's own bus as a `log.entry` event
+   * (shared/actions Events.LOG) so channel plugins can mirror it.
+   */
+  readonly log: {
+    info(msg: string): void;
+    warn(msg: string): void;
+    error(msg: string): void;
+  };
+  /**
+   * The plugin's clean USER-FACING console line — delivered verbatim, never
+   * wrapped in level/diagnostic prefixes. Called during `setup` it is the
+   * plugin's STARTING MESSAGE: it lands in the startup report of whichever
+   * console ran the program. Also pushed as a `log.entry` with level "print".
+   */
+  print(text: string): void;
 }
 
 export interface Plugin {
