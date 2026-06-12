@@ -424,7 +424,7 @@ function recorderPlugin(id: string, setupDelayMs = 0): string {
   return `
 export const seen = [];      // event names, in arrival order
 export const startIds = [];  // agentId from each agent.start payload
-export default {
+export default () => ({
   manifest: { id: ${JSON.stringify(id)}, version: "1" },
   async setup(ctx) {
     ctx.events.on("agent.start", (p) => {
@@ -434,7 +434,7 @@ export default {
     ctx.events.on("clock.tick", () => { seen.push("clock.tick"); });
     ${delay}
   },
-};
+});
 `;
 }
 
