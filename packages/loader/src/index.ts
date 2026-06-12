@@ -44,7 +44,7 @@ export function createLoader(deps: LoaderDeps): Loader {
   }
 
   async function load(): Promise<void> {
-    // 0. VALIDATE every declared plugin id BEFORE any filesystem copy or import.
+    // 0. VALIDATE every declared plugin id BEFORE any filesystem access or import.
     for (const id of deps.def.privatePlugins ?? []) {
       validateId(id);
     }
@@ -52,54 +52,68 @@ export function createLoader(deps: LoaderDeps): Loader {
       validateId(id);
     }
 
-    // 1. COPY declared independents into the agent's private plugins folder.
-    //    Code is copied; the source's accumulated top-level data/ is not.
-    for (const id of deps.def.privatePlugins ?? []) {
-      const src = path.join(deps.publicPluginDir, id);
-      const dst = path.join(deps.agentDir, "plugins", id);
-      if (fs.existsSync(dst)) {
-        // Already present — preserve the agent's private data.
-        continue;
-      }
-      if (fs.existsSync(src)) {
-        const srcDataDir = path.join(src, "data");
-        fs.cpSync(src, dst, {
-          recursive: true,
-          filter: (s) => s !== srcDataDir,
-        });
-      } else {
-        throw new PluginLoadError("private plugin source not found: " + id);
-      }
-    }
-
-    // 2. RESOLVE plugin dirs (pluginId -> absolute code dir).
-    //    Private folder is scanned first (sorted by name for determinism) so it
-    //    overrides same-id public; declared public plugins keep their order after.
-    const resolved = new Map<string, string>();
-
+    // 1. RESOLVE each plugin's CODE dir + DATA dir. Plugins are NEVER copied:
+    //    declared independents load their code straight from public_plugin/ (so
+    //    the code's relative imports keep resolving — the PluginFactory already
+    //    gives each Agent its own instance), and "independent" only redirects the
+    //    dataDir to the agent-private folder. Code precedence per id:
+    //      custom code in agents/<id>/plugins/<pid>/  >  public_plugin/<pid>/
+    //    Data location per id:
+    //      custom-folder OR declared independent  -> agents/<id>/plugins/<pid>/data
+    //      plain public                            -> public_plugin/<pid>/data (shared)
     const privateDir = path.join(deps.agentDir, "plugins");
+    // A private-folder subdir counts as a CODE override only if it actually
+    // holds a plugin entry — a bare `<pid>/data/` (an independent plugin's
+    // agent-private data) must NOT be mistaken for custom code.
+    const hasEntry = (dir: string): boolean =>
+      fs.existsSync(path.join(dir, "index.ts")) || fs.existsSync(path.join(dir, "index.js"));
+    const customIds = new Set<string>();
     if (fs.existsSync(privateDir)) {
-      const entries = fs
-        .readdirSync(privateDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-      for (const entry of entries) {
-        resolved.set(entry.name, path.join(privateDir, entry.name));
+      for (const entry of fs.readdirSync(privateDir, { withFileTypes: true })) {
+        if (entry.isDirectory() && hasEntry(path.join(privateDir, entry.name))) {
+          customIds.add(entry.name);
+        }
       }
     }
+    const independentIds = new Set(deps.def.privatePlugins ?? []);
 
+    const resolveOne = (id: string): { codeDir: string; dataDir: string } => {
+      if (customIds.has(id)) {
+        const dir = path.join(privateDir, id);
+        return { codeDir: dir, dataDir: path.join(dir, "data") };
+      }
+      if (independentIds.has(id)) {
+        const src = path.join(deps.publicPluginDir, id);
+        if (!fs.existsSync(src)) {
+          throw new PluginLoadError("private plugin source not found: " + id);
+        }
+        return { codeDir: src, dataDir: path.join(privateDir, id, "data") };
+      }
+      const src = path.join(deps.publicPluginDir, id);
+      return { codeDir: src, dataDir: path.join(src, "data") };
+    };
+
+    // Load ORDER (deterministic): declared `plugins` first, in array order (so a
+    // plugin can rely on an earlier one's setup-time action — see `requires`),
+    // then any declared independents not in `plugins`, then any custom
+    // private-folder plugins declared nowhere (sorted).
+    const resolved = new Map<string, { codeDir: string; dataDir: string }>();
     for (const id of deps.def.plugins ?? []) {
-      if (!resolved.has(id)) {
-        resolved.set(id, path.join(deps.publicPluginDir, id));
-      }
+      if (!resolved.has(id)) resolved.set(id, resolveOne(id));
+    }
+    for (const id of deps.def.privatePlugins ?? []) {
+      if (!resolved.has(id)) resolved.set(id, resolveOne(id));
+    }
+    for (const id of [...customIds].sort()) {
+      if (!resolved.has(id)) resolved.set(id, resolveOne(id));
     }
 
-    // 3. PASS 1 — resolve + import + validate every plugin's default export,
-    //    collecting the full load set before any setup runs.
-    const loadSet: Array<{ id: string; plugin: Plugin; dir: string }> = [];
-    for (const [id, pluginDir] of resolved) {
-      const plugin = await importPlugin(id, pluginDir);
-      loadSet.push({ id, plugin, dir: pluginDir });
+    // 2. PASS 1 — import + validate every plugin (one instance per Agent via its
+    //    factory), collecting the full load set before any setup runs.
+    const loadSet: Array<{ id: string; plugin: Plugin; dataDir: string }> = [];
+    for (const [id, { codeDir, dataDir }] of resolved) {
+      const plugin = await importPlugin(id, codeDir);
+      loadSet.push({ id, plugin, dataDir });
     }
 
     // The set of ids + provided capabilities, independent of load order.
@@ -116,7 +130,7 @@ export function createLoader(deps: LoaderDeps): Loader {
     //    setup) tears down the plugins already set up before rethrowing.
     //    Pass 1 needs no rollback — nothing is set up yet.
     try {
-      for (const { id, plugin, dir } of loadSet) {
+      for (const { id, plugin, dataDir } of loadSet) {
         // a. Verify declared requirements. An entry with a dot is an ACTION name
         //    checked against the actionbus at THIS plugin's setup time (order-
         //    dependent); any other entry must be a plugin id or provided
@@ -136,7 +150,7 @@ export function createLoader(deps: LoaderDeps): Loader {
           events: deps.events.events,
           actions: deps.events.actions,
           config: deps.def.config?.[id] ?? {},
-          dataDir: path.join(dir, "data"),
+          dataDir,
           llm: deps.library,
           setBlock: (b) => deps.orchestrator.setBlock(b),
           getBlock: (bid) => deps.orchestrator.getBlock(bid),
