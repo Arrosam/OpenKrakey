@@ -65,3 +65,12 @@ export interface Plugin {
   setup(ctx: PluginContext): void | Promise<void>;
   teardown?(): void | Promise<void>;
 }
+
+/**
+ * What a plugin module DEFAULT-EXPORTS: a factory the loader calls ONCE PER
+ * AGENT. ESM caches the module (code is shared), but every Agent gets its own
+ * Plugin instance from this call — so keep ALL mutable state inside the
+ * factory's closure (R6: instances never share live state) and keep the
+ * factory itself side-effect free (construction is not setup).
+ */
+export type PluginFactory = () => Plugin;
