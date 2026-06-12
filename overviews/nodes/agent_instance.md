@@ -39,3 +39,4 @@ done
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: implemented — clock default from config, receives global llm library, emits `agent.start`.
 - 2026-06-11: bug-fix wave — `agent.start` now emitted after loader.load() (was emitted before any plugin could subscribe, dead on arrival); stop()-during-in-flight-start() re-checked after load (no more "stopped" agent with a live timer).
+- 2026-06-13: deps.print (plugin starting-message sink) threaded through to the loader.

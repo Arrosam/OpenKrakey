@@ -31,3 +31,4 @@ independent-isolated), `provides`/`requires`, and the CLOCK_* rhythm actions.
 
 ## Change log
 - 2026-06-13: all six plugins flipped to the PluginFactory shape (per-Agent instances); data-carrying plugins (history, notes) are privatePlugins in the default setting so each agent owns its memory/notes.
+- 2026-06-13: plugin contract v1.1 adoption — console-channel greets via ctx.print; llm-core/notes/toolbox warn via ctx.log.warn.

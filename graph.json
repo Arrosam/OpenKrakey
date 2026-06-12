@@ -75,7 +75,7 @@
     "loader": {
       "zone": "core",
       "path": "packages/loader",
-      "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, inject llm library, register (setup) into event-system, teardown.",
+      "description": "Per-Agent plugin lifecycle: load private(override)+public (independents are no-copy: code from public_plugin/, dataDir redirected agent-private), build v1.1 PluginContext (leveled log + print + log.entry push), inject llm library, register (setup) into event-system, teardown.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -332,6 +332,11 @@
     "config": {
       "path": "shared/config",
       "description": "OpenKrakeyConfig / DefaultAgentSetting / LLMConfig types + path constants.",
+      "status": "done"
+    },
+    "theme": {
+      "path": "shared/theme",
+      "description": "Krakey brand primitives (mint/dim/bold/red painters, ✦ glyph, ✔/✖ verdict lines) shared by every console surface (cli, boot startup report); degrades plain on non-TTY/NO_COLOR.",
       "status": "done"
     }
   }
