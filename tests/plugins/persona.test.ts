@@ -127,7 +127,8 @@ function makeCtx(config: unknown, t: { after(fn: () => void): void }) {
     listBlocks(): Array<{ id: string; priority: number }> {
       return [...store.values()].map((b) => ({ id: b.id, priority: b.priority }));
     },
-    log: () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: () => {},
   };
   return { ctx, store, dataDir, sys };
 }
