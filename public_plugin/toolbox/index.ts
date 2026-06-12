@@ -7,8 +7,11 @@
  * `clock.set_default_interval`) — so the LLM calling them IS the self-pacing loop,
  * with no glue code here. We register a handler ONLY for `time.now`; the orchestrator
  * owns the clock.* actions.
+ *
+ * The default export is a PluginFactory — the loader calls it once per Agent, so
+ * the Unsub lives in this closure, never in shared module scope.
  */
-import type { Plugin, PluginContext } from "../../contracts/plugin";
+import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { ToolDef } from "../../contracts/llm";
 import type { Unsub } from "../../contracts/event-system";
 import { Actions } from "../../shared/actions";
@@ -20,52 +23,54 @@ const MS_SCHEMA = {
   required: ["ms"],
 } as const;
 
-let unsubTimeNow: Unsub | undefined;
+const createToolbox: PluginFactory = (): Plugin => {
+  let unsubTimeNow: Unsub | undefined;
 
-const toolbox: Plugin = {
-  manifest: { id: "toolbox", version: "0.1.0", requires: ["llm.register_tool"] },
+  return {
+    manifest: { id: "toolbox", version: "0.1.0", requires: ["llm.register_tool"] },
 
-  async setup(ctx: PluginContext) {
-    // `time.now` — our own action. Params ignored; one timestamp capture so the two
-    // fields always agree.
-    unsubTimeNow = ctx.actions.register("time.now", async () => {
-      const now = Date.now();
-      return { iso: new Date(now).toISOString(), epochMs: now };
-    });
+    async setup(ctx: PluginContext) {
+      // `time.now` — our own action. Params ignored; one timestamp capture so the two
+      // fields always agree.
+      unsubTimeNow = ctx.actions.register("time.now", async () => {
+        const now = Date.now();
+        return { iso: new Date(now).toISOString(), epochMs: now };
+      });
 
-    const defs: ToolDef[] = [
-      {
-        name: "time.now",
-        description: "Get the current date and time.",
-        parameters: { type: "object", properties: {} },
-      },
-      {
-        name: Actions.CLOCK_SET_INTERVAL,
-        description:
-          "Re-time ONLY the current beat: fire the next think sooner or later, once, in `ms` milliseconds. Does not change the steady pace.",
-        parameters: MS_SCHEMA,
-      },
-      {
-        name: Actions.CLOCK_SET_DEFAULT_INTERVAL,
-        description:
-          "Set the agent's steady thinking pace, in milliseconds — the default interval every beat uses from now on.",
-        parameters: MS_SCHEMA,
-      },
-    ];
+      const defs: ToolDef[] = [
+        {
+          name: "time.now",
+          description: "Get the current date and time.",
+          parameters: { type: "object", properties: {} },
+        },
+        {
+          name: Actions.CLOCK_SET_INTERVAL,
+          description:
+            "Re-time ONLY the current beat: fire the next think sooner or later, once, in `ms` milliseconds. Does not change the steady pace.",
+          parameters: MS_SCHEMA,
+        },
+        {
+          name: Actions.CLOCK_SET_DEFAULT_INTERVAL,
+          description:
+            "Set the agent's steady thinking pace, in milliseconds — the default interval every beat uses from now on.",
+          parameters: MS_SCHEMA,
+        },
+      ];
 
-    for (const def of defs) {
-      try {
-        await ctx.actions.invoke("llm.register_tool", def);
-      } catch (err) {
-        ctx.log(`toolbox: failed to register tool "${def.name}": ${String(err)}`);
+      for (const def of defs) {
+        try {
+          await ctx.actions.invoke("llm.register_tool", def);
+        } catch (err) {
+          ctx.log(`toolbox: failed to register tool "${def.name}": ${String(err)}`);
+        }
       }
-    }
-  },
+    },
 
-  teardown() {
-    unsubTimeNow?.();
-    unsubTimeNow = undefined;
-  },
+    teardown() {
+      unsubTimeNow?.();
+      unsubTimeNow = undefined;
+    },
+  };
 };
 
-export default toolbox;
+export default createToolbox;
