@@ -1,12 +1,15 @@
 /**
  * cli — the interactive shell. The ONLY module (besides bin.ts) that imports
- * `@inquirer/prompts`. Everything stateful-fs goes through the pure `Cli` core.
+ * `@inquirer/prompts` (via ./theme). Everything stateful-fs goes through the
+ * pure `Cli` core.
  *
- * Control flow: a `while` loop over a current-page name. Each page is a local
- * async function that performs prompts + cli ops and returns the NEXT page name
- * (or "quit"). A Ctrl+C / ExitPromptError anywhere is funnelled to Quit via a
- * private QuitSignal; expected CliErrors are printed and the loop continues;
- * anything else bubbles out.
+ * Control flow: a loop over a current-page name. Each page is a local async
+ * function that performs prompts + cli ops and returns the NEXT page name (or
+ * "quit"). Every select menu carries an explicit exit entry (Back / Cancel /
+ * Done / Quit), and Ctrl+C anywhere DROPS the current action — unsaved edits
+ * are abandoned and the loop returns to the main menu; Ctrl+C at the main menu
+ * quits. Expected CliErrors are printed and the loop continues; anything else
+ * bubbles out.
  */
 import {
   STAR,
@@ -47,7 +50,11 @@ export type InitialPage = "landing" | "agents" | "default" | "providers";
 /** Internal page space: the entry pages plus the wizard and "quit". */
 type Page = InitialPage | "wizard" | "quit";
 
-/** Raised when the user hits Ctrl+C (inquirer's ExitPromptError) — means Quit. */
+/**
+ * Raised when the user hits Ctrl+C (inquirer's ExitPromptError) — means "drop
+ * what I'm doing": the main loop abandons the current page and returns to the
+ * main menu (and quits when already there).
+ */
 class QuitSignal {}
 
 const isExitPromptError = (err: unknown): boolean =>
@@ -115,15 +122,25 @@ const pluginChoice = (id: string, checked: boolean) => ({
   checked,
 });
 
-/** Pick a provider TYPE (the wire format) from the catalogue — never free text. */
-const selectProviderType = (current?: string): Promise<ProviderInfo> =>
+/**
+ * Pick a provider TYPE (the wire format) from the catalogue — never free text.
+ * The last entry cancels (returns null); callers keep their current value or
+ * abort their flow.
+ */
+const selectProviderType = (
+  current: string | undefined,
+  cancelLabel: string,
+): Promise<ProviderInfo | null> =>
   ask(() =>
-    select<ProviderInfo>({
+    select<ProviderInfo | null>({
       message: "provider type — the wire format your endpoint speaks",
-      choices: KNOWN_PROVIDERS.map((p) => ({
-        name: `${p.label} — ${p.summary}`,
-        value: p,
-      })),
+      choices: [
+        ...KNOWN_PROVIDERS.map((p) => ({
+          name: `${p.label} — ${p.summary}`,
+          value: p as ProviderInfo | null,
+        })),
+        { name: dim(cancelLabel), value: null },
+      ],
       default: providerInfo(current),
       loop: false,
     }),
@@ -574,10 +591,13 @@ export async function runInteractiveLoop(
     };
 
     // The provider TYPE drives everything else (allowed capabilities, URL and
-    // model format hints) — for a new connection, pick it first.
+    // model format hints) — for a new connection, pick it first; cancelling
+    // there drops the whole edit.
     let info = providerInfo(existing.provider);
     if (isNew || info === undefined) {
-      info = await selectProviderType(existing.provider);
+      const picked = await selectProviderType(existing.provider, "← Cancel");
+      if (picked === null) return false;
+      info = picked;
     }
 
     const draft = {
@@ -691,9 +711,12 @@ export async function runInteractiveLoop(
       }
 
       if (field === "provider") {
-        info = await selectProviderType(draft.provider);
-        draft.provider = info.id;
-        clampToProvider();
+        const picked = await selectProviderType(draft.provider, "← Keep current type");
+        if (picked !== null) {
+          info = picked;
+          draft.provider = info.id;
+          clampToProvider();
+        }
       } else if (field === "model") {
         draft.model = await askModel(info, draft.model);
       } else if (field === "baseURL") {
@@ -814,13 +837,14 @@ export async function runInteractiveLoop(
     out(
       heading(
         "Guided setup",
-        "Connect an AI service, then create an agent that uses it. Ctrl+C leaves at any point.",
+        "Connect an AI service, then create an agent that uses it. Ctrl+C drops you back to the menu at any point.",
       ),
     );
     out(step("Step 1 of 2 — the AI service"));
 
     // 1. The AI service.
-    const info = await selectProviderType(undefined);
+    const info = await selectProviderType(undefined, "← Cancel setup");
+    if (info === null) return "landing";
     const connName = (
       await ask(() =>
         input({
@@ -956,15 +980,22 @@ export async function runInteractiveLoop(
   };
 
   let page: Page = initialPage;
-  try {
-    while (page !== "quit") {
+  while (page !== "quit") {
+    try {
       page = await run(page);
+    } catch (err) {
+      if (err instanceof QuitSignal) {
+        // Ctrl+C: at the main menu it quits; anywhere else it drops the
+        // current action (unsaved edits abandoned) back to the main menu.
+        if (page === "landing") {
+          out("");
+          return;
+        }
+        out(dim("(cancelled — nothing saved)"));
+        page = "landing";
+        continue;
+      }
+      throw err;
     }
-  } catch (err) {
-    if (err instanceof QuitSignal) {
-      out("");
-      return;
-    }
-    throw err;
   }
 }
