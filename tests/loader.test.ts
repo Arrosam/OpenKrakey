@@ -193,8 +193,19 @@ async function importPlugin(dir: string, id: string): Promise<any> {
   return import(pathToFileURL(file).href);
 }
 
-/** Build a loader for a given AgentDefinition wired to this test's sandbox. */
-function makeLoader(def: AgentDefinition, orchestrator = stubOrchestrator()) {
+/**
+ * Build a loader for a given AgentDefinition wired to this test's sandbox.
+ * `io` lets a test CAPTURE the loader's Logger lines and `print` sink output
+ * (both optional — defaults swallow logs and omit the print sink entirely).
+ */
+function makeLoader(
+  def: AgentDefinition,
+  orchestrator = stubOrchestrator(),
+  io?: {
+    log?: { info(m: string): void; warn(m: string): void; error(m: string): void };
+    print?: (text: string) => void;
+  },
+) {
   const sys = createEventSystem();
   const loader = createLoader({
     agentId: def.id,
@@ -204,7 +215,8 @@ function makeLoader(def: AgentDefinition, orchestrator = stubOrchestrator()) {
     library,
     publicPluginDir,
     agentDir,
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: io?.log ?? { info: () => {}, warn: () => {}, error: () => {} },
+    ...(io?.print ? { print: io.print } : {}),
   });
   return { loader, sys, orchestrator };
 }
@@ -356,7 +368,13 @@ test("public load: ctx exposes the full PluginContext block-op + log surface", a
   assert.equal(typeof ctx.getBlock, "function");
   assert.equal(typeof ctx.removeBlock, "function");
   assert.equal(typeof ctx.listBlocks, "function");
-  assert.equal(typeof ctx.log, "function");
+  // contracts/plugin v1.1: log is a LEVELED logger, print is the plugin's
+  // clean user-facing line (its "starting message" during setup).
+  assert.equal(typeof ctx.log, "object", "ctx.log must be a leveled logger object");
+  assert.equal(typeof ctx.log.info, "function");
+  assert.equal(typeof ctx.log.warn, "function");
+  assert.equal(typeof ctx.log.error, "function");
+  assert.equal(typeof ctx.print, "function");
 });
 
 test("public load: two declared public plugins both load, each with its own ctx", async () => {
@@ -1201,4 +1219,167 @@ export default () => {
 
   await b.loader.teardown();
   assert.equal(ib.torndown, true, "B's instance tears down independently");
+});
+
+// ===========================================================================
+// EXT — plugin console output (contracts/plugin v1.1):
+//   - ctx.log is a LEVELED logger { info, warn, error }: lines go to the
+//     loader's Logger tagged with the plugin id;
+//   - ctx.print(text) is the plugin's clean USER-FACING line (during setup it
+//     is the plugin's "starting message"): routed VERBATIM to the LoaderDeps
+//     `print` sink (default: stdout), never wrapped in diagnostic prefixes;
+//   - every log/print is ALSO pushed on the agent's own bus as a `log.entry`
+//     Notify<{ level, pluginId, text }> so channel plugins can mirror it.
+// ===========================================================================
+
+test("ctx.log.warn routes to the loader Logger's warn, tagged with the plugin id", async () => {
+  const warns: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.warn("W1");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await loader.load();
+
+  assert.equal(warns.length, 1, "exactly one warn line");
+  assert.ok(warns[0].includes("W1"), "the message text survives");
+  assert.ok(warns[0].includes("p1"), "the line is attributable to the plugin");
+});
+
+test("ctx.log.info and ctx.log.error route to the matching Logger levels", async () => {
+  const infos: string[] = [];
+  const errors: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.info("I1"); ctx.log.error("E1");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: (m) => infos.push(m), warn: () => {}, error: (m) => errors.push(m) },
+  });
+  await loader.load();
+
+  assert.ok(infos.some((m) => m.includes("I1")), "info went to Logger.info");
+  assert.ok(errors.some((m) => m.includes("E1")), "error went to Logger.error");
+});
+
+test("ctx.print routes the EXACT text to the print sink — no prefixes, no levels", async () => {
+  const prints: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("Web chat: http://localhost:7717");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    print: (t) => prints.push(t),
+  });
+  await loader.load();
+
+  assert.deepEqual(
+    prints,
+    ["Web chat: http://localhost:7717"],
+    "print must deliver the text verbatim to the sink",
+  );
+});
+
+test("ctx.print with NO print sink configured still works (default sink; no throw)", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("starting message");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await assert.doesNotReject(loader.load(), "the default print sink must be safe");
+});
+
+test("every ctx.log call is pushed on the agent's bus as a log.entry Notify", async () => {
+  const { Events } = await import("../shared/actions");
+  assert.equal((Events as any).LOG, "log.entry", "Events.LOG must name the log.entry event");
+
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.warn("pushed-W");` }),
+  );
+  const orch = stubOrchestrator();
+  const { loader, sys } = makeLoader(def({ plugins: ["p1"] }), orch);
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+  await loader.load();
+
+  const hit = seen.find((p) => p?.data?.text === "pushed-W");
+  assert.ok(hit, "the warn line was pushed as a log.entry event");
+  assert.equal(typeof hit.at, "number", "Notify envelope: at is a timestamp");
+  assert.equal(hit.data.level, "warn", "payload carries the level");
+  assert.equal(hit.data.pluginId, "p1", "payload carries the plugin id");
+});
+
+test("ctx.print is pushed as a log.entry with level 'print'", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("hello-print");` }),
+  );
+  const orch = stubOrchestrator();
+  const { loader, sys } = makeLoader(def({ plugins: ["p1"] }), orch, { print: () => {} });
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+  await loader.load();
+
+  const hit = seen.find((p) => p?.data?.text === "hello-print");
+  assert.ok(hit, "the print was pushed as a log.entry event");
+  assert.equal(hit.data.level, "print", "prints carry level 'print'");
+  assert.equal(hit.data.pluginId, "p1", "payload carries the plugin id");
+});
+
+test("log.entry stays on the OWN agent's bus: agent B sees none of agent A's entries", async () => {
+  writePlugin(
+    publicPluginDir,
+    "chatty",
+    observablePlugin({ id: "chatty", setupBody: `ctx.log.info("from-" + ctx.agentId);` }),
+  );
+  const agentDirA = path.join(tmp, "agents", "agA");
+  const agentDirB = path.join(tmp, "agents", "agB");
+  fs.mkdirSync(agentDirA, { recursive: true });
+  fs.mkdirSync(agentDirB, { recursive: true });
+
+  const make = (id: string, dir: string) => {
+    const sys = createEventSystem();
+    const loader = createLoader({
+      agentId: id,
+      def: { id, intervalMs: 1000, plugins: ["chatty"] },
+      events: sys,
+      orchestrator: stubOrchestrator(),
+      library,
+      publicPluginDir,
+      agentDir: dir,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+    return { sys, loader };
+  };
+
+  const a = make("agA", agentDirA);
+  const b = make("agB", agentDirB);
+  const seenA: any[] = [];
+  const seenB: any[] = [];
+  a.sys.events.on("log.entry", (p) => seenA.push(p));
+  b.sys.events.on("log.entry", (p) => seenB.push(p));
+
+  await a.loader.load();
+  assert.equal(seenA.filter((p) => p?.data?.text === "from-agA").length, 1, "A saw its entry");
+  assert.equal(seenB.length, 0, "B's bus is silent while only A loads (R6)");
+
+  await b.loader.load();
+  assert.equal(seenB.filter((p) => p?.data?.text === "from-agB").length, 1, "B saw its own");
+  assert.equal(
+    seenB.some((p) => p?.data?.text === "from-agA"),
+    false,
+    "A's entries never leak onto B's bus",
+  );
+
+  await a.loader.teardown();
+  await b.loader.teardown();
 });
