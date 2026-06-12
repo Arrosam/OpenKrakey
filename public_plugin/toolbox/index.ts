@@ -61,7 +61,7 @@ const createToolbox: PluginFactory = (): Plugin => {
         try {
           await ctx.actions.invoke("llm.register_tool", def);
         } catch (err) {
-          ctx.log(`toolbox: failed to register tool "${def.name}": ${String(err)}`);
+          ctx.log.warn(`toolbox: failed to register tool "${def.name}": ${String(err)}`);
         }
       }
     },

@@ -148,7 +148,8 @@ function makeHarness(opts?: { config?: unknown; agentId?: string; omitRegisterTo
     getBlock: store.getBlock,
     removeBlock: store.removeBlock,
     listBlocks: store.listBlocks,
-    log: () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: () => {},
   };
 
   return {
