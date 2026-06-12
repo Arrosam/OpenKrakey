@@ -19,6 +19,7 @@ import type { AgentDefinition } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
 import { DependencyError, PluginLoadError } from "../../../shared/errors";
 import { type Logger, consoleLogger, tagged } from "../../../shared/logging";
+import { Events } from "../../../shared/actions";
 
 export interface LoaderDeps {
   agentId: string;
@@ -29,11 +30,30 @@ export interface LoaderDeps {
   publicPluginDir: string;
   agentDir: string;
   log?: Logger;
+  /**
+   * Sink for plugin ctx.print lines (clean user-facing text, e.g. a plugin's
+   * starting message). The composition root wires this into the console that
+   * ran the program; defaults to plain stdout.
+   */
+  print?: (text: string) => void;
 }
 
 export function createLoader(deps: LoaderDeps): Loader {
   const log = tagged(deps.log ?? consoleLogger, "[loader:" + deps.agentId + "]");
+  const printSink = deps.print ?? ((text: string) => console.log(text));
   const loaded: Array<{ plugin: Plugin; ctx: PluginContext }> = [];
+
+  /** Mirror one plugin console line onto this Agent's own bus (Events.LOG). */
+  const pushLogEntry = (
+    level: "info" | "warn" | "error" | "print",
+    pluginId: string,
+    text: string,
+  ): void => {
+    deps.events.events.emit(Events.LOG, {
+      at: Date.now(),
+      data: { level, pluginId, text },
+    });
+  };
 
   /** A simple plugin name: no path separators, no `.`/`..`. */
   const VALID_ID = /^[A-Za-z0-9._-]+$/;
@@ -156,7 +176,27 @@ export function createLoader(deps: LoaderDeps): Loader {
           getBlock: (bid) => deps.orchestrator.getBlock(bid),
           removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
           listBlocks: () => deps.orchestrator.listBlocks(),
-          log: (msg) => log.info("[" + id + "] " + msg),
+          // Diagnostics go to the host Logger tagged with the plugin id; the
+          // user-facing print goes VERBATIM to the print sink. Both are also
+          // pushed on this Agent's bus as log.entry so channels can mirror them.
+          log: {
+            info: (msg) => {
+              log.info("[" + id + "] " + msg);
+              pushLogEntry("info", id, msg);
+            },
+            warn: (msg) => {
+              log.warn("[" + id + "] " + msg);
+              pushLogEntry("warn", id, msg);
+            },
+            error: (msg) => {
+              log.error("[" + id + "] " + msg);
+              pushLogEntry("error", id, msg);
+            },
+          },
+          print: (text) => {
+            printSink(text);
+            pushLogEntry("print", id, text);
+          },
         };
 
         // c. Register the plugin.
