@@ -479,64 +479,112 @@ test("override: the overriding private plugin's dataDir follows the PRIVATE loca
 });
 
 // ===========================================================================
-// Behavior 5 — privatePlugins are COPIED into the agent, then loaded
+// Behavior 5 — privatePlugins: NO code copy. The code stays in public_plugin/
+// (relative imports keep resolving; the factory already gives each Agent its
+// own instance); "independent" means an agent-private dataDir under
+// agents/<id>/plugins/<pid>/data.
 // ===========================================================================
 
-test("privatePlugins copy: a declared independent is copied to agents/<id>/plugins/<id> and loaded", async () => {
+test("privatePlugins: code is NOT copied — loaded from public_plugin/ with an agent-private dataDir", async () => {
   writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
   const dest = path.join(agentDir, "plugins", "p2");
-  assert.equal(fs.existsSync(dest), false, "precondition: no private copy yet");
 
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  assert.equal(fs.existsSync(dest), true, "load() must COPY the independent into the agent");
   assert.equal(
     fs.existsSync(path.join(dest, "index.ts")),
-    true,
-    "the copied plugin's module must be present at the destination",
+    false,
+    "load() must NOT copy the plugin code into the agent",
   );
 
-  // And it must have been LOADED (from the copied/private location).
-  const copied = await importPlugin(path.join(agentDir, "plugins"), "p2");
-  assert.equal(copied.calls.length, 1, "the copied independent must be loaded (setup ran)");
+  // Loaded from the PUBLIC location...
+  const mod = await importPlugin(publicPluginDir, "p2");
+  assert.equal(mod.calls.length, 1, "the declared independent must be loaded (setup ran)");
+  // ...but with the agent-private dataDir.
   assert.equal(
-    copied.calls[0].dataDir,
+    mod.calls[0].dataDir,
     path.join(agentDir, "plugins", "p2", "data"),
-    "an independent's dataDir is agent-isolated",
+    "an independent's dataDir is agent-isolated under agents/<id>/plugins/<pid>/data",
   );
 });
 
-test("privatePlugins copy: pre-existing destination is NOT overwritten (skip if present)", async () => {
-  // Public source has marker SRC; pre-create the private copy with a different
-  // body + a sentinel file that must survive (proving the copy was SKIPPED).
+test("privatePlugins: a REAL repo plugin (with relative imports) loads as a declared independent", async () => {
+  // Regression for the copy-era failure: copied code's `../../contracts/...`
+  // imports resolved against the agent folder and crashed every start. With no
+  // copy, the real persona plugin must load from the repo's public_plugin/.
+  const repoPublic = path.resolve("public_plugin");
+  const orchestrator = stubOrchestrator();
+  const sys = createEventSystem();
+  const loader = createLoader({
+    agentId: "ag1",
+    def: { id: "ag1", intervalMs: 1000, plugins: [], privatePlugins: ["persona"] },
+    events: sys,
+    orchestrator,
+    library,
+    publicPluginDir: repoPublic,
+    agentDir,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  await assert.doesNotReject(loader.load(), "the real persona plugin must load when declared private");
+  assert.ok(orchestrator.blocks.has("persona"), "persona registered its block via the real code");
+  await loader.teardown();
+});
+
+test("privatePlugins: custom code already in agents/<id>/plugins/ still overrides (its data stays beside the code)", async () => {
+  // Public source has marker SRC; the agent carries CUSTOM code for the same id.
   writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
   const privDir = path.join(agentDir, "plugins");
-  writePlugin(privDir, "p2", observablePlugin({ id: "p2", marker: "PREEXISTING" }));
+  writePlugin(privDir, "p2", observablePlugin({ id: "p2", marker: "CUSTOM" }));
   const sentinel = path.join(privDir, "p2", "SENTINEL.txt");
   fs.writeFileSync(sentinel, "keep-me", "utf8");
 
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  assert.equal(fs.existsSync(sentinel), true, "an existing private copy must be left intact (skip copy)");
-  // The PRE-EXISTING module is the one that loads (not the public source).
+  assert.equal(fs.existsSync(sentinel), true, "the custom private code must be left intact");
   const priv = await importPlugin(privDir, "p2");
-  assert.equal(priv.MARKER, "PREEXISTING", "the already-present private copy must be the one loaded");
-  assert.equal(priv.calls.length, 1, "the pre-existing private copy is loaded");
+  assert.equal(priv.MARKER, "CUSTOM", "the custom private-folder code is the one loaded");
+  assert.equal(priv.calls.length, 1, "the custom private code is loaded");
+  assert.equal(
+    priv.calls[0].dataDir,
+    path.join(privDir, "p2", "data"),
+    "custom private code keeps its data beside the code",
+  );
 });
 
-test("privatePlugins copy: missing public source => load() rejects with PluginLoadError", async () => {
+test("privatePlugins: a pre-existing agent-private data/ folder does NOT shadow the public code (re-load is stable)", async () => {
+  // Regression: an independent's dataDir is agents/<id>/plugins/<pid>/data, so
+  // after one load the folder agents/<id>/plugins/<pid>/ exists holding only
+  // data/ — it must NOT be mistaken for custom code on the next load.
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "PUBLIC" }));
+  const dataOnly = path.join(agentDir, "plugins", "p2", "data");
+  fs.mkdirSync(dataOnly, { recursive: true });
+  fs.writeFileSync(path.join(dataOnly, "state.txt"), "kept", "utf8");
+
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
+  await assert.doesNotReject(
+    loader.load(),
+    "a data-only private folder must not be treated as a (codeless) plugin",
+  );
+
+  const mod = await importPlugin(publicPluginDir, "p2");
+  assert.equal(mod.MARKER, "PUBLIC", "the public code is loaded (the data folder is not code)");
+  assert.equal(fs.existsSync(path.join(dataOnly, "state.txt")), true, "pre-existing data survives");
+});
+
+test("privatePlugins: missing public source => load() rejects with PluginLoadError", async () => {
   // Declare an independent whose public source does NOT exist.
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
   await assert.rejects(loader.load(), PluginLoadError);
 });
 
-test("privatePlugins copy: missing source leaves no partial copy behind", async () => {
+test("privatePlugins: missing source leaves nothing behind in the agent folder", async () => {
   const dest = path.join(agentDir, "plugins", "ghost");
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
   await assert.rejects(loader.load(), PluginLoadError);
-  assert.equal(fs.existsSync(dest), false, "a failed copy must not leave a destination dir");
+  assert.equal(fs.existsSync(dest), false, "a failed load must not create a destination dir");
 });
 
 // ===========================================================================
@@ -1007,25 +1055,31 @@ export default () => ({
 
 // ===========================================================================
 // EXT-5 — Independent copy is CODE-ONLY: the source's accumulated data/ is NOT
-//          copied into the agent's private copy.
+//          visible to a declared independent (agent-private dataDir).
 // ===========================================================================
 
-test("independent copy: data/ is excluded — code is copied but source-accumulated data is not", async () => {
-  // Public source has both code (index.ts) and an accumulated data/ file.
-  writePlugin(publicPluginDir, "store", observablePlugin({ id: "store" }));
-  const srcDataDir = path.join(publicPluginDir, "store", "data");
+test("data isolation: a declared independent does NOT see the public plugin's accumulated data", async () => {
+  // The public source has accumulated shared data; the agent-private dataDir
+  // must start EMPTY (no copy, no sharing) — the whole point of "independent".
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2" }));
+  const srcDataDir = path.join(publicPluginDir, "p2", "data");
   fs.mkdirSync(srcDataDir, { recursive: true });
   fs.writeFileSync(path.join(srcDataDir, "seed.txt"), "accumulated", "utf8");
 
-  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["store"] }));
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  const dest = path.join(agentDir, "plugins", "store");
-  assert.equal(fs.existsSync(path.join(dest, "index.ts")), true, "the plugin CODE must be copied");
+  const mod = await importPlugin(publicPluginDir, "p2");
+  const dataDir = mod.calls[0].dataDir;
   assert.equal(
-    fs.existsSync(path.join(dest, "data", "seed.txt")),
+    dataDir,
+    path.join(agentDir, "plugins", "p2", "data"),
+    "the independent's dataDir is the agent's own",
+  );
+  assert.equal(
+    fs.existsSync(path.join(dataDir, "seed.txt")),
     false,
-    "the source's accumulated data/ must NOT be copied into the independent copy",
+    "the public plugin's accumulated data must NOT leak into the private dataDir",
   );
 });
 
