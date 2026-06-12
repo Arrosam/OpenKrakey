@@ -28,3 +28,6 @@ independent-isolated), `provides`/`requires`, and the CLOCK_* rhythm actions.
 | console-channel | stdin → input.message + fire_now wake; prints output.message; greets on agent.start |
 | notes | note.save/read/list actions over dataDir files, registered as LLM tools |
 | toolbox | time.now + ToolDefs for the orchestrator's clock rhythm actions (LLM self-pacing) |
+
+## Change log
+- 2026-06-13: all six plugins flipped to the PluginFactory shape (per-Agent instances); data-carrying plugins (history, notes) are privatePlugins in the default setting so each agent owns its memory/notes.
