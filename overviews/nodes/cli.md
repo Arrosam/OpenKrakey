@@ -45,3 +45,4 @@ pending
 - 2026-06-12: brand theming — theme.ts (mint #2FD69C palette + pre-themed prompt wrappers, star prefix); styled guided-setup headings/steps/success lines; soft-red error lines; emoji replaced with the star glyph; plain-text degrade on NO_COLOR/non-TTY.
 - 2026-06-12: semantic action colors — mint affirmative / red destructive / dim navigation across every select menu.
 - 2026-06-12: two-step arm-and-confirm delete for AI services (double-ENTER; any other selection disarms).
+- 2026-06-12: drop-anywhere exits — Ctrl+C abandons the current action to the main menu (quits only at the menu); explicit cancel entry on the provider-type select; every menu has an exit entry.
