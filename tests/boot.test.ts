@@ -507,3 +507,148 @@ test("startupHints: nothing configured at all -> only the no-agents hint (provid
   assert.equal(hints.length, 1, "one hint, not two");
   assert.match(hints[0], /agent/i, "and it is the no-agents hint");
 });
+
+// ===========================================================================
+// EXT — STARTUP REPORT: whichever console runs the start command gets a clear
+// story: a starting line per agent, a started/FAILED verdict (failure carries
+// the reason), and each plugin's own starting message (ctx.print) indented
+// under its agent. Pins:
+//   - run() gains opts.report (a line sink) and opts.publicPluginDir/agentsDir
+//     pass-through (so a test sandbox can supply real plugins);
+//   - pure helpers startBanner() / summaryLine(started, total) format the
+//     frame main() prints around run().
+// Resolved defensively: red on a missing export, never an import crash.
+// ===========================================================================
+
+const startBanner: any = (bootModule as any).startBanner;
+const summaryLine: any = (bootModule as any).summaryLine;
+
+/** A plugin whose only job is to ctx.print one starting message during setup. */
+function announcerPlugin(id: string, text: string): string {
+  return `
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  setup(ctx) { ctx.print(${JSON.stringify(text)}); },
+});
+`;
+}
+
+/** Write a public plugin into THIS test's temp public_plugin dir. */
+function writeTmpPublicPlugin(id: string, body: string): string {
+  const pdir = path.join(tmp, "public_plugin", id);
+  fs.mkdirSync(pdir, { recursive: true });
+  const file = path.join(pdir, "index.ts");
+  fs.writeFileSync(file, body, "utf8");
+  return pdir;
+}
+
+test("startBanner: exported, and the banner says the program is starting", () => {
+  assert.equal(typeof startBanner, "function", "startBanner not implemented yet");
+  const line = startBanner();
+  assert.equal(typeof line, "string");
+  assert.match(line, /starting/i, "the banner must read as a starting message");
+});
+
+test("summaryLine: carries started/total counts (2/3) and how to stop", () => {
+  assert.equal(typeof summaryLine, "function", "summaryLine not implemented yet");
+  const line = summaryLine(2, 3);
+  assert.ok(line.includes("2/3"), "the summary must show started/total: " + line);
+  assert.match(line, /ctrl\+c/i, "the summary must say how to stop: " + line);
+});
+
+test("summaryLine: an all-fail batch still formats (0/2) — the verdict is visible", () => {
+  assert.equal(typeof summaryLine, "function", "summaryLine not implemented yet");
+  assert.ok(summaryLine(0, 2).includes("0/2"));
+});
+
+test("run report: a good agent yields a starting line then a started verdict (both naming it)", async () => {
+  const lines: string[] = [];
+  const handles = trackAll(
+    await run([bareDef("hero")], { library: stubLibrary(), report: (l: string) => lines.push(l) } as any),
+  );
+  assert.equal(handles.length, 1);
+
+  const startingIdx = lines.findIndex((l) => /starting/i.test(l) && l.includes("hero"));
+  const startedIdx = lines.findIndex((l) => /started/i.test(l) && l.includes("hero"));
+  assert.notEqual(startingIdx, -1, "a starting line names the agent: " + JSON.stringify(lines));
+  assert.notEqual(startedIdx, -1, "a started verdict names the agent: " + JSON.stringify(lines));
+  assert.ok(startingIdx < startedIdx, "starting comes before the verdict");
+});
+
+test("run report: a failing agent yields a FAILED verdict carrying the id AND the reason", async () => {
+  const bad: AgentDefinition = {
+    id: "broken",
+    intervalMs: 10000,
+    plugins: ["definitely-not-a-real-plugin"],
+    privatePlugins: [],
+    config: {},
+  };
+  const lines: string[] = [];
+  trackAll(await run([bad], { library: stubLibrary(), report: (l: string) => lines.push(l) } as any));
+
+  const failed = lines.find((l) => /fail/i.test(l) && l.includes("broken"));
+  assert.ok(failed, "a FAILED line names the agent: " + JSON.stringify(lines));
+  assert.ok(
+    failed!.includes("definitely-not-a-real-plugin"),
+    "the FAILED line must carry the reason (the offending plugin): " + failed,
+  );
+});
+
+test("run report: mixed batch -> exactly one started verdict and one FAILED verdict", async () => {
+  const bad: AgentDefinition = {
+    id: "broken",
+    intervalMs: 10000,
+    plugins: ["definitely-not-a-real-plugin"],
+    privatePlugins: [],
+    config: {},
+  };
+  const lines: string[] = [];
+  const handles = trackAll(
+    await run([bad, bareDef("survivor")], {
+      library: stubLibrary(),
+      report: (l: string) => lines.push(l),
+    } as any),
+  );
+  assert.equal(handles.length, 1);
+  assert.equal(lines.filter((l) => /started/i.test(l)).length, 1, JSON.stringify(lines));
+  assert.equal(lines.filter((l) => /fail/i.test(l)).length, 1, JSON.stringify(lines));
+});
+
+test("run report: a plugin's ctx.print starting message appears INDENTED under its agent", async () => {
+  writeTmpPublicPlugin("announcer", announcerPlugin("announcer", "Web chat ready at :7717"));
+  const def: AgentDefinition = {
+    id: "webby",
+    intervalMs: 10000,
+    plugins: ["announcer"],
+    privatePlugins: [],
+    config: {},
+  };
+  const lines: string[] = [];
+  const handles = trackAll(
+    await run([def], {
+      library: stubLibrary(),
+      report: (l: string) => lines.push(l),
+      publicPluginDir: path.join(tmp, "public_plugin"),
+      agentsDir: agentsDirPath(),
+    } as any),
+  );
+  assert.equal(handles.length, 1, "the announcer agent started: " + JSON.stringify(lines));
+
+  const printIdx = lines.findIndex((l) => l.includes("Web chat ready at :7717"));
+  assert.notEqual(printIdx, -1, "the plugin's starting message reached the report");
+  assert.match(lines[printIdx], /^\s+/, "the plugin line is indented under its agent");
+
+  const startingIdx = lines.findIndex((l) => /starting/i.test(l) && l.includes("webby"));
+  const startedIdx = lines.findIndex((l) => /started/i.test(l) && l.includes("webby"));
+  assert.ok(
+    startingIdx !== -1 && startingIdx < printIdx,
+    "the agent's starting line precedes the plugin message",
+  );
+  assert.ok(printIdx < startedIdx, "the started verdict closes the agent's block");
+});
+
+test("run report: omitted report sink changes nothing (back-compat)", async () => {
+  const handles = trackAll(await run([bareDef("quiet")], { library: stubLibrary() }));
+  assert.equal(handles.length, 1);
+  await assert.doesNotReject(() => handles[0].stop());
+});
