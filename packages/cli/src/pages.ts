@@ -940,8 +940,16 @@ export async function runInteractiveLoop(
       }
       if (err instanceof CliError) {
         const available = await guard(() => cli.listAvailablePlugins(), []);
+        // Data-carrying plugins default to independent copies so each agent
+        // gets its own memory/notes (shared code, private data — R6).
+        const privateByDefault = available.filter((p) => p === "history" || p === "notes");
         await guard(async () => {
-          await cli.writeDefault({ intervalMs: 30000, plugins: available, config: {} });
+          await cli.writeDefault({
+            intervalMs: 30000,
+            plugins: available,
+            ...(privateByDefault.length > 0 ? { privatePlugins: privateByDefault } : {}),
+            config: {},
+          });
         }, undefined);
       } else {
         throw err;
