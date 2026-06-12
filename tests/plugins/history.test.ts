@@ -121,7 +121,8 @@ function makeCtx(opts: { config?: unknown; dataDir?: string } = {}) {
     getBlock: store.getBlock,
     removeBlock: store.removeBlock,
     listBlocks: store.listBlocks,
-    log: () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: () => {},
   };
   return { sys, store, ctx, dataDir, events: sys.events };
 }
