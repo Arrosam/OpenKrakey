@@ -27,8 +27,12 @@ const mod: any = await import("../../public_plugin/notes/index.ts").then(
 );
 
 function loadPlugin(): Plugin {
-  const p: Plugin = (mod && (mod.default ?? mod.plugin ?? mod.notes)) as Plugin;
-  assert.ok(p, "plugin not implemented yet (public_plugin/notes/index.ts)");
+  assert.equal(
+    typeof mod?.default,
+    "function",
+    "plugin not implemented yet — the default export must be a PluginFactory (public_plugin/notes/index.ts)",
+  );
+  const p: Plugin = (mod.default as () => Plugin)(); // one fresh per-Agent instance
   return p;
 }
 
