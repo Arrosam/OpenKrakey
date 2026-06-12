@@ -76,7 +76,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
       const error = config.communicator
         ? `llm-core: communicator "${config.communicator}" is missing or cannot chat`
         : "llm-core: no chat-capable communicator is available";
-      ctx!.log(`warning: ${error}`);
+      ctx!.log.warn(error);
       emitReturn({ id, at: Date.now(), ok: false, error });
       return;
     }
