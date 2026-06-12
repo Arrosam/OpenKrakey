@@ -51,8 +51,12 @@ const mod: any = await import("../../public_plugin/toolbox/index.ts").then(
 /** Resolve the plugin object (default export, or the module itself as fallback). */
 function loadPlugin(): any {
   assert.ok(mod, "plugin not implemented yet (public_plugin/toolbox/index.ts missing or failed to import)");
-  const plugin = mod.default ?? mod.plugin ?? mod;
-  assert.ok(plugin, "plugin module present but no default export");
+  assert.equal(
+    typeof mod?.default,
+    "function",
+    "toolbox plugin not implemented yet — the default export must be a PluginFactory",
+  );
+  const plugin = mod.default(); // one fresh per-Agent instance
   assert.equal(typeof plugin.setup, "function", "plugin.setup must be a function");
   assert.ok(plugin.manifest, "plugin.manifest must be present");
   return plugin;
