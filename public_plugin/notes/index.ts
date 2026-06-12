@@ -120,7 +120,7 @@ const createNotes: PluginFactory = (): Plugin => {
         try {
           await ctx.actions.invoke("llm.register_tool", def);
         } catch (err) {
-          ctx.log(`notes: could not register tool ${def.name}: ${String(err)}`);
+          ctx.log.warn(`notes: could not register tool ${def.name}: ${String(err)}`);
         }
       }
     },
