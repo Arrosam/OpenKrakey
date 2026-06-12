@@ -30,7 +30,7 @@
 ```bash
 npm install
 cp config/llm.example.json config/llm.json   # 填入你的 API key（或用 "${ENV_VAR}" 引用环境变量）
-npm run cli                                   # → Agents → ➕ Create new（以 Default 为模板，含全部 MVP 插件）
+npm run cli                                   # → ✦ Guided setup：选服务、填模型/端点/密钥、起 agent，一路引导
 npm start                                     # 启动所有 agents/*/config.json —— 直接在终端对话
 ```
 
