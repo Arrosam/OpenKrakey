@@ -39,8 +39,12 @@ const mod: any = await import("../../public_plugin/history/index.ts").then(
 
 /** The plugin under test, or a clean assertion failure if not implemented. */
 function loadPlugin(): Plugin {
-  assert.ok(mod?.default, "history plugin not implemented yet (no default export)");
-  const p = mod.default as Plugin;
+  assert.equal(
+    typeof mod?.default,
+    "function",
+    "history plugin not implemented yet — the default export must be a PluginFactory",
+  );
+  const p = (mod.default as () => Plugin)(); // one fresh per-Agent instance
   assert.equal(typeof p.setup, "function", "plugin must expose setup()");
   return p;
 }
