@@ -28,3 +28,4 @@ locked
 ## Change log
 - 2026-06-11: provides is now real — a requires entry may name a plugin id OR a provided capability of the same load set.
 - 2026-06-13: default export is a PluginFactory (() => Plugin), called once per Agent by the loader; keep all mutable state in the factory closure, construction side-effect free.
+- 2026-06-13: v1.1 — ctx.log is a leveled logger {info,warn,error}; new ctx.print(text) = the plugin's clean user-facing line (during setup: its starting message); both also pushed on the agent's bus as log.entry (Events.LOG).

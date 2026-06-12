@@ -27,3 +27,4 @@ done
 ## Change log
 - 2026-06-11: node specced (Phase-1 MVP wave).
 - 2026-06-11: implemented (Phase-1 MVP wave) — edge tests + e2e loop green.
+- 2026-06-13: greeting emitted via ctx.print so it lands in the startup report (was a raw stdout write).
