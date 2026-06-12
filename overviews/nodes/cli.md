@@ -46,3 +46,4 @@ pending
 - 2026-06-12: semantic action colors — mint affirmative / red destructive / dim navigation across every select menu.
 - 2026-06-12: two-step arm-and-confirm delete for AI services (double-ENTER; any other selection disarms).
 - 2026-06-12: drop-anywhere exits — Ctrl+C abandons the current action to the main menu (quits only at the menu); explicit cancel entry on the provider-type select; every menu has an exit entry.
+- 2026-06-12: empty input = go back on all text fields (hints inline); agent delete unified to the double-ENTER arm pattern.
