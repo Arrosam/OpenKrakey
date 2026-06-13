@@ -19,9 +19,31 @@ import { createLoader } from "../../loader/src";
 
 import type { Agent, AgentDefinition } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
+import type { EventBus } from "../../../contracts/event-system";
 import { PATHS, agentPaths } from "../../../shared/config";
 import { Events } from "../../../shared/actions";
 import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
+
+/**
+ * Bridge a CORE-INTERNAL logger onto this Agent's eventbus: every line still goes
+ * to `base` (console unchanged) AND is mirrored as a `log.entry` event tagged with
+ * a `core:<module>` source, so a debug/observer plugin can see core diagnostics.
+ * The mirror is best-effort — it must never throw into the core logger call.
+ */
+function busLogger(base: Logger, bus: EventBus, source: string): Logger {
+  const mirror = (level: "info" | "warn" | "error", text: string) => {
+    try {
+      bus.emit(Events.LOG, { at: Date.now(), data: { level, pluginId: source, text } });
+    } catch {
+      /* a logging mirror must never break the caller */
+    }
+  };
+  return {
+    info: (m) => { base.info(m); mirror("info", m); },
+    warn: (m) => { base.warn(m); mirror("warn", m); },
+    error: (m) => { base.error(m); mirror("error", m); },
+  };
+}
 
 /**
  * Build (but do not start) one Agent from its definition. The full per-Agent set
@@ -53,7 +75,12 @@ export function createAgentInstance(
   // The per-Agent independent set, constructed once.
   const clock = createClock({ defaultIntervalMs: def.intervalMs });
   const events = createEventSystem();
-  const orchestrator = createOrchestrator({ events, clock, log });
+  // Mirror each core module's diagnostic logger onto this Agent's eventbus as
+  // `log.entry` (tagged `core:<module>`), keeping `log` as the base so console
+  // output is unchanged.
+  const orchLog = busLogger(log, events.events, "core:orchestrator");
+  const loaderLog = busLogger(log, events.events, "core:loader");
+  const orchestrator = createOrchestrator({ events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
     def,
@@ -62,7 +89,7 @@ export function createAgentInstance(
     library,
     publicPluginDir,
     agentDir,
-    log,
+    log: loaderLog,
     print: deps?.print,
   });
 
