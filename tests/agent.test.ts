@@ -633,3 +633,299 @@ export default () => ({
   await assert.doesNotReject(() => agent.start());
   await agent.stop();
 });
+
+// ===========================================================================
+// EXT — CORE LOG BRIDGE: agent_instance hands the per-Agent core modules
+// (orchestrator + loader) a BUS-BRIDGING Logger, so every diagnostic line a
+// core module emits via its injected Logger (info/warn/error) is ALSO published
+// on THAT Agent's eventbus as a `log.entry` event (shared/actions Events.LOG),
+// exactly like a plugin's ctx.log.* — but tagged with a `core:<module>` source
+// in the payload's `pluginId` field ("core:orchestrator" / "core:loader").
+//
+// No new event name, no contract change: log.entry's pluginId is a plain string.
+// Console output is unchanged; plugin logs keep their plugin-id tag (regression).
+//
+// Black-box at the agent boundary: we only drive start()/stop(). To OBSERVE
+// what reaches the bus we inject plugins (written as module SOURCE strings —
+// they cannot import the test's constants, so event names are literal) that
+// subscribe to "log.entry" in setup and append every entry's
+// {level, pluginId, text} to an exported, module-level array. ESM caches by
+// resolved URL, so the test re-imports the SAME file the loader imported and
+// reads the array back. We do NOT couple to the exact core message wording.
+// ===========================================================================
+
+/**
+ * A plugin that, in setup, (a) subscribes to "log.entry" and pushes every
+ * entry's {level, pluginId, text} into the exported `logs` array, and (b)
+ * registers a context block (via ctx.setBlock) whose render() THROWS. The
+ * orchestrator renders each block in isolation during a beat; a throwing
+ * render() is caught and logged as a WARNING by the orchestrator's (now
+ * bus-bridged) logger — the deterministic, spec-level trigger for a core log.
+ */
+function throwingRenderRecorderPlugin(id: string, blockId = "boom"): string {
+  return `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+    ctx.setBlock({
+      id: ${JSON.stringify(blockId)},
+      priority: 100,
+      render() { throw new Error("render-boom"); },
+    });
+  },
+});
+`;
+}
+
+/**
+ * A pure recorder plugin: subscribes to "log.entry" and records every entry's
+ * {level, pluginId, text}. Registers NO block and logs nothing itself, so on a
+ * clean beat it must observe NO `core:*` entry (negative / regression probe).
+ */
+function logRecorderPlugin(id: string): string {
+  return `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+  },
+});
+`;
+}
+
+// ---- Cover 1 + 2: a core diagnostic reaches the bus, tagged core:orchestrator
+
+test("core-log: a throwing render() makes the orchestrator emit a log.entry tagged pluginId === 'core:orchestrator', level 'warn', non-empty text", async () => {
+  writePublicPlugin("rec-core-warn", throwingRenderRecorderPlugin("rec-core-warn"));
+  const agent = make(
+    // small interval so a beat actually fires and renders the throwing block
+    bareDef("core-warn", { intervalMs: 25, plugins: ["rec-core-warn"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-warn");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:orchestrator"),
+    1500,
+  );
+  await agent.stop();
+
+  const core = mod.logs.filter((l: any) => l.pluginId === "core:orchestrator");
+  assert.ok(
+    core.length >= 1,
+    "the orchestrator's diagnostic must reach the bus as a log.entry tagged core:orchestrator",
+  );
+  // At least one such entry must be a WARNING with real text (don't pin wording).
+  const warn = core.find((l: any) => l.level === "warn");
+  assert.ok(warn, "the caught throwing-render must be logged at level 'warn'");
+  assert.equal(typeof warn.text, "string", "core log text must be a string");
+  assert.ok(warn.text.length > 0, "core log text must be non-empty");
+});
+
+test("core-log: the orchestrator entry's pluginId is the SOURCE TAG 'core:orchestrator' (starts with 'core:')", async () => {
+  writePublicPlugin("rec-core-tag", throwingRenderRecorderPlugin("rec-core-tag"));
+  const agent = make(
+    bareDef("core-tag", { intervalMs: 25, plugins: ["rec-core-tag"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-tag");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:orchestrator"),
+    1500,
+  );
+  await agent.stop();
+
+  const core = mod.logs.filter(
+    (l: any) => typeof l.pluginId === "string" && l.pluginId.startsWith("core:"),
+  );
+  assert.ok(core.length >= 1, "at least one core-tagged log.entry must have been observed");
+  // Every core-tagged entry seen here must be the orchestrator (it is the only
+  // core module that logs on this path) — and must NOT collide with a plugin id.
+  for (const l of core) {
+    assert.equal(
+      l.pluginId,
+      "core:orchestrator",
+      "a core log.entry from the orchestrator path must be tagged exactly 'core:orchestrator'",
+    );
+    assert.notEqual(
+      l.pluginId,
+      "rec-core-tag",
+      "a core log must NOT be tagged with the observing plugin's id",
+    );
+  }
+});
+
+// ---- Cover 3: plugin logs still work / are NOT mis-tagged (regression)
+
+test("plugin-log regression: a plugin's ctx.log.info emits log.entry tagged with the PLUGIN id, never a core: tag", async () => {
+  // Emitter: logs once in setup. Recorder (separate plugin) captures the bus.
+  writePublicPlugin(
+    "emitter-info",
+    `
+export default () => ({
+  manifest: { id: "emitter-info", version: "1" },
+  setup(ctx) { ctx.log.info("hi"); },
+});
+`,
+  );
+  writePublicPlugin("rec-plugin-info", logRecorderPlugin("rec-plugin-info"));
+  // Recorder FIRST so it is subscribed before the emitter's setup runs (the
+  // loader sets plugins up in declared order).
+  const agent = make(
+    bareDef("plug-info", {
+      intervalMs: 10_000,
+      plugins: ["rec-plugin-info", "emitter-info"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-plugin-info");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.text === "hi"),
+    1500,
+  );
+  await agent.stop();
+
+  const hi = mod.logs.filter((l: any) => l.text === "hi");
+  assert.ok(hi.length >= 1, "the plugin's ctx.log.info line must reach the bus as a log.entry");
+  for (const l of hi) {
+    assert.equal(l.pluginId, "emitter-info", "a plugin log.entry must be tagged with the plugin's id");
+    assert.equal(l.level, "info", "ctx.log.info must carry level 'info'");
+    assert.ok(
+      typeof l.pluginId === "string" && !l.pluginId.startsWith("core:"),
+      "a plugin log MUST NOT be mis-tagged with a core: source",
+    );
+  }
+});
+
+test("plugin-log regression: a plugin's ctx.print emits log.entry level 'print' tagged with the plugin id (not core:)", async () => {
+  writePublicPlugin(
+    "emitter-print",
+    `
+export default () => ({
+  manifest: { id: "emitter-print", version: "1" },
+  setup(ctx) { ctx.print("awake"); },
+});
+`,
+  );
+  writePublicPlugin("rec-plugin-print", logRecorderPlugin("rec-plugin-print"));
+  const agent = make(
+    bareDef("plug-print", {
+      intervalMs: 10_000,
+      plugins: ["rec-plugin-print", "emitter-print"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-plugin-print");
+  await waitUntil(() => mod.logs.some((l: any) => l.text === "awake"), 1500);
+  await agent.stop();
+
+  const awake = mod.logs.filter((l: any) => l.text === "awake");
+  assert.ok(awake.length >= 1, "ctx.print must reach the bus as a log.entry");
+  for (const l of awake) {
+    assert.equal(l.pluginId, "emitter-print", "ctx.print's log.entry must carry the plugin id");
+    assert.equal(l.level, "print", "ctx.print must carry level 'print'");
+    assert.ok(
+      !l.pluginId.startsWith("core:"),
+      "ctx.print must NOT be tagged with a core: source",
+    );
+  }
+});
+
+// ---- Cover 4: R3 not broken — a clean bare beat invents NO core:* logs
+
+test("R3 + no-spurious-core: a recorder-only agent (no throwing block, nothing logging) runs clean beats and records ZERO core:* log.entry", async () => {
+  writePublicPlugin("rec-clean", logRecorderPlugin("rec-clean"));
+  const agent = make(
+    // small interval so a beat or two actually fires during the window
+    bareDef("clean-beat", { intervalMs: 25, plugins: ["rec-clean"] }),
+    baseDeps(),
+  );
+
+  await assert.doesNotReject(() => agent.start(), "a recorder-only agent must start cleanly");
+  const mod = await importPublicPlugin("rec-clean");
+  // Let a beat or two pass so the orchestrator definitely ran a clean beat.
+  await waitUntil(() => false, 200);
+  await assert.doesNotReject(() => agent.stop(), "and stop cleanly");
+
+  const core = mod.logs.filter(
+    (l: any) => typeof l.pluginId === "string" && l.pluginId.startsWith("core:"),
+  );
+  assert.deepEqual(
+    core,
+    [],
+    "the bridge must NOT invent spurious core:* log.entry on a clean beat",
+  );
+});
+
+// ---- Cover 5: a core:loader entry on the plugin error path (teardown throws)
+//
+// The loader contract documents that teardown tears every loaded plugin down
+// with ISOLATED errors, and the NEW behavior says the loader logs on a plugin
+// error path via its bus-bridged Logger. A plugin whose teardown() throws is a
+// contract-level (not implementation-coupled) error path, inducible during
+// agent.stop(). Determinism note: load order is the declared order, teardown is
+// REVERSE order — so we load the RECORDER first (tears down LAST) and the
+// THROWER second (tears down FIRST). When the thrower's teardown throws, the
+// recorder is still set up and its "log.entry" listener captures the loader's
+// core:loader error. We assert ONLY pluginId + level + non-empty text.
+
+test("core-log: a plugin whose teardown() throws makes the loader emit a log.entry tagged 'core:loader', level 'error', during stop()", async () => {
+  writePublicPlugin("rec-core-loader", logRecorderPlugin("rec-core-loader"));
+  writePublicPlugin(
+    "thrower-teardown",
+    `
+export default () => ({
+  manifest: { id: "thrower-teardown", version: "1" },
+  setup(ctx) { /* nothing — no block, no log */ },
+  teardown() { throw new Error("teardown-boom"); },
+});
+`,
+  );
+  // Recorder first (teardown LAST), thrower second (teardown FIRST).
+  const agent = make(
+    bareDef("core-loader", {
+      intervalMs: 10_000,
+      plugins: ["rec-core-loader", "thrower-teardown"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-loader");
+  // stop() drives teardown; an isolated teardown error must NOT reject stop().
+  await assert.doesNotReject(
+    () => agent.stop(),
+    "an isolated teardown error must be caught (loader teardown is isolated), not rejected",
+  );
+  // The loader's diagnostic for that caught error must have reached the bus.
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:loader"),
+    1500,
+  );
+
+  const loaderLogs = mod.logs.filter((l: any) => l.pluginId === "core:loader");
+  assert.ok(
+    loaderLogs.length >= 1,
+    "the loader's teardown-error diagnostic must reach the bus tagged core:loader",
+  );
+  const err = loaderLogs.find((l: any) => l.level === "error");
+  assert.ok(err, "the loader must log the caught teardown error at level 'error'");
+  assert.equal(typeof err.text, "string");
+  assert.ok(err.text.length > 0, "the core:loader error log must carry non-empty text");
+});
