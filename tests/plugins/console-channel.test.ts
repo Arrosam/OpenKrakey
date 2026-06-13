@@ -109,7 +109,7 @@ const llm = {
 const dataDir = process.env.KRAKEY_DATADIR;
 
 const ctx = {
-  agentId: process.env.KRAKEY_AGENT || "child-agent",
+  agentId: process.env.KRAKEY_AGENT || "krakey",
   events: sys.events,
   actions: sys.actions,
   config: {},
@@ -160,7 +160,7 @@ async function runStep(step) {
   if (step === "greet") {
     sys.events.emit(${JSON.stringify(Events.AGENT_START)}, {
       at: Date.now(),
-      data: { agentId: process.env.KRAKEY_AGENT || "child-agent" },
+      data: { agentId: process.env.KRAKEY_AGENT || "krakey" },
     });
     // Greeting is synchronous (plugin writes to stdout in its handler).
     return;
@@ -212,6 +212,99 @@ if (!steps.includes("teardown")) process.exit(0);
 `;
 
 // --------------------------------------------------------------------------
+// MULTI-AGENT harness: builds N per-Agent instances of the SAME plugin in ONE
+// process (each with its OWN event-system + ctx + agentId), exactly as boot
+// runs N agents in one process. This is the surface for the stdin-hub fix:
+//  - process.stdin is a process singleton, so N instances MUST share one
+//    readline (no fan-out): one typed line reaches exactly ONE agent.
+//  - KRAKEY_AGENTS (comma list, default "alice,bob") = the agent ids, in
+//    REGISTRATION order (first = the default "active" target).
+//  - GOT_INPUT markers are tagged with the receiving agent: GOT_INPUT:<id>:<json>.
+//  - FIRED markers are tagged too: FIRED:<id>.
+//  - Steps come from KRAKEY_MULTI_STEPS, ";"-separated, each "op|arg":
+//      wait|<n>     wait until <n> TOTAL input.message events have landed
+//      out|<id>:<t> emit OUTPUT_MESSAGE{text:t} on agent <id>'s OWN bus
+//      down|<id>    await that agent's plugin.teardown(); print TORE_DOWN:<id>
+//  Parent feeds stdin lines on its usual schedule; the hub routes each line.
+// --------------------------------------------------------------------------
+const CHILD_MULTI = `
+import { createEventSystem } from ${JSON.stringify(EVENT_SYSTEM_URL)};
+function emit(s) { process.stdout.write(s + "\\n"); }
+
+const AGENTS = (process.env.KRAKEY_AGENTS || "alice,bob").split(",").filter(Boolean);
+const totals = { n: 0 };
+const instances = {};
+
+function makeCtx(agentId) {
+  const sys = createEventSystem();
+  const blocks = new Map();
+  sys.actions.register(${JSON.stringify(Actions.CLOCK_FIRE_NOW)}, async () => { emit("FIRED:" + agentId); });
+  sys.events.on(${JSON.stringify(Events.INPUT_MESSAGE)}, (p) => {
+    totals.n++; emit("GOT_INPUT:" + agentId + ":" + JSON.stringify(p));
+  });
+  return {
+    sys,
+    ctx: {
+      agentId,
+      events: sys.events,
+      actions: sys.actions,
+      config: {},
+      dataDir: process.env.KRAKEY_DATADIR,
+      llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
+      setBlock: (b) => { blocks.set(b.id, b); },
+      getBlock: (id) => blocks.get(id),
+      removeBlock: (id) => blocks.delete(id),
+      listBlocks: () => [...blocks.values()].map((b) => ({ id: b.id, priority: b.priority })),
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+      print: (t) => { process.stdout.write(t + "\\n"); },
+    },
+  };
+}
+
+const mod = await import(${JSON.stringify(PLUGIN_URL)}).then((m) => m, () => null);
+if (!mod || typeof mod.default !== "function") { emit("NOT_IMPLEMENTED"); process.exit(0); }
+
+for (const a of AGENTS) {
+  const { sys, ctx } = makeCtx(a);
+  const plugin = mod.default();          // one per-Agent instance, sharing the module hub
+  await plugin.setup(ctx);
+  instances[a] = { plugin, sys };
+}
+emit("SETUP_DONE");
+
+function waitInputs(n) {
+  return new Promise((res) => {
+    const deadline = Date.now() + 4000;
+    const tick = () => { if (totals.n >= n || Date.now() > deadline) return res(); setTimeout(tick, 10); };
+    tick();
+  });
+}
+
+const steps = (process.env.KRAKEY_MULTI_STEPS || "").split(";").filter(Boolean);
+for (const step of steps) {
+  const bar = step.indexOf("|");
+  const op = bar === -1 ? step : step.slice(0, bar);
+  const arg = bar === -1 ? "" : step.slice(bar + 1);
+  if (op === "wait") {
+    await waitInputs(parseInt(arg || "0", 10));
+  } else if (op === "out") {
+    const colon = arg.indexOf(":");
+    const id = arg.slice(0, colon);
+    const text = arg.slice(colon + 1);
+    instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
+  } else if (op === "down") {
+    if (instances[arg] && typeof instances[arg].plugin.teardown === "function") await instances[arg].plugin.teardown();
+    emit("TORE_DOWN:" + arg);
+  }
+}
+emit("DONE");
+// Same guard as the single harness: only rely on a natural (hub-closed) exit
+// when a teardown step ran; otherwise force-exit so still-attached agents don't
+// hold stdin open and time the child out.
+if (!steps.some((s) => s.startsWith("down"))) process.exit(0);
+`;
+
+// --------------------------------------------------------------------------
 // Parent-side spawn helper. Writes the child script, spawns it with piped stdio,
 // optionally feeds stdin lines on a schedule, and collects stdout/stderr until
 // the child exits (or a hard timeout). Returns the captured streams + lines.
@@ -238,6 +331,8 @@ function runChild(opts: {
   timeoutMs?: number;
   /** keep stdin OPEN after writing (don't end it) — used to test teardown closes it. */
   keepStdinOpen?: boolean;
+  /** the child harness source to run (defaults to the single-agent CHILD). */
+  script?: string;
 }): Promise<RunResult> {
   const {
     steps,
@@ -247,6 +342,7 @@ function runChild(opts: {
     stdinStartDelayMs = 300,
     timeoutMs = 15_000,
     keepStdinOpen = false,
+    script = CHILD,
   } = opts;
 
   const dataDir = fs.mkdtempSync(path.join(TMP, "data-"));
@@ -254,7 +350,7 @@ function runChild(opts: {
     fs.mkdtempSync(path.join(TMP, "child-")),
     "harness.mts",
   );
-  fs.writeFileSync(scriptPath, CHILD, "utf8");
+  fs.writeFileSync(scriptPath, script, "utf8");
 
   return new Promise<RunResult>((resolve) => {
     const child = spawn(
@@ -700,8 +796,9 @@ test("end-to-end: greet, then a stdin line emits input.message + fires the beat,
   assert.equal(payloads[0].data.text, "user says hi");
   assert.equal(payloads[0].data.channel, "console");
   assert.ok(r.lines.some((l) => l.startsWith("FIRED")), "the input woke the beat (fire_now)");
-  // output
-  assert.ok(/\[krakey\][^\n]*E2E-REPLY/.test(r.stdout), "the reply rendered with the [krakey] prefix");
+  // output — the prefix is the agent's REAL id (not a hardcoded "krakey"); here
+  // the agent is "e2e-agent", so the reply must render as "[e2e-agent] …".
+  assert.ok(/\[e2e-agent\][^\n]*E2E-REPLY/.test(r.stdout), "the reply rendered with the agent's own id prefix");
 });
 
 // ===========================================================================
@@ -718,4 +815,150 @@ test("manifest: the plugin exposes a manifest with a non-empty id (and a version
   assert.equal(typeof manifest.id, "string", "manifest.id must be a string");
   assert.ok(manifest.id.length > 0, "manifest.id must be non-empty");
   assert.equal(typeof manifest.version, "string", "manifest.version must be a string");
+});
+
+// ===========================================================================
+// Scenario 8 — output attribution: the stdout prefix is the agent's REAL id,
+// not a hardcoded "krakey" (fixes the latent hardcoded-name bug). A single
+// agent named "solo" must render "[solo] …".
+// ===========================================================================
+
+test("output attribution: a single agent's prefix is its OWN id (not a hardcoded 'krakey')", async () => {
+  const r = await runChild({
+    steps: ["output"],
+    env: { KRAKEY_AGENT: "solo", KRAKEY_OUT: JSON.stringify(["MINE-1"]) },
+  });
+  assertImplemented(r);
+  assert.ok(/\[solo\][^\n]*MINE-1/.test(r.stdout), "prefix must be the agent's id '[solo]': " + r.stdout);
+  assert.ok(!r.stdout.includes("[krakey]"), "must NOT fall back to a hardcoded [krakey] prefix");
+});
+
+// ===========================================================================
+// Scenario 9 — MULTI-AGENT stdin hub (the fix). N console-channel instances in
+// ONE process share a single readline over the one process.stdin. Helpers parse
+// the agent-tagged markers the multi-harness prints.
+// ===========================================================================
+
+/** Parse GOT_INPUT:<agentId>:<json> markers into { agent, payload } records. */
+function taggedInputs(r: RunResult): Array<{ agent: string; payload: any }> {
+  return r.lines
+    .filter((l) => l.startsWith("GOT_INPUT:"))
+    .map((l) => {
+      const rest = l.slice("GOT_INPUT:".length);
+      const colon = rest.indexOf(":");
+      return { agent: rest.slice(0, colon), payload: JSON.parse(rest.slice(colon + 1)) };
+    });
+}
+
+/** Run the multi-agent harness. */
+function runMulti(opts: {
+  agents: string[];
+  multiSteps: string[];
+  stdin?: string[];
+  env?: Record<string, string>;
+  keepStdinOpen?: boolean;
+  timeoutMs?: number;
+}): Promise<RunResult> {
+  return runChild({
+    script: CHILD_MULTI,
+    steps: [],
+    env: {
+      KRAKEY_AGENTS: opts.agents.join(","),
+      KRAKEY_MULTI_STEPS: opts.multiSteps.join(";"),
+      ...(opts.env ?? {}),
+    },
+    stdin: opts.stdin,
+    keepStdinOpen: opts.keepStdinOpen,
+    timeoutMs: opts.timeoutMs,
+  });
+}
+
+test("multi: ONE typed line reaches exactly ONE agent — no fan-out to all (the bug)", async () => {
+  // Two agents share stdin. The pre-hub bug attached N readline interfaces and
+  // BROADCAST every line, so this produced 2 input.message events. The fix must
+  // route a bare line to exactly one agent (the active default = first registered).
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["wait|1"],
+    stdin: ["hello there"],
+  });
+  assertImplemented(r);
+  const got = taggedInputs(r);
+  assert.equal(got.length, 1, "exactly ONE agent received the line (no fan-out): " + JSON.stringify(got));
+  assert.equal(got[0].agent, "alice", "the active default is the first-registered agent");
+  assert.equal(got[0].payload.data.text, "hello there", "text delivered verbatim");
+});
+
+test("multi: '@<id> msg' addresses the message to that agent (and strips the @id)", async () => {
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["wait|1"],
+    stdin: ["@bob ping bob"],
+  });
+  assertImplemented(r);
+  const got = taggedInputs(r);
+  assert.equal(got.length, 1, "exactly one delivery");
+  assert.equal(got[0].agent, "bob", "addressed line went to bob");
+  assert.equal(got[0].payload.data.text, "ping bob", "the '@bob ' prefix is consumed, not part of the message");
+});
+
+test("multi: bare '@<id>' switches the active agent; the next bare line goes there", async () => {
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["wait|1"],
+    stdin: ["@bob", "now active"],
+  });
+  assertImplemented(r);
+  const got = taggedInputs(r);
+  // "@bob" alone delivers nothing (switch only); only "now active" is delivered.
+  assert.equal(got.length, 1, "the bare @bob switch produces no input.message: " + JSON.stringify(got));
+  assert.equal(got[0].agent, "bob", "after switching, the next line targets bob");
+  assert.equal(got[0].payload.data.text, "now active");
+});
+
+test("multi: an unknown '@id' is not delivered; the available agents are listed", async () => {
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["wait|1"],
+    stdin: ["@ghost hi", "real line"],
+  });
+  assertImplemented(r);
+  const got = taggedInputs(r);
+  assert.equal(got.length, 1, "the unknown-id line is dropped; only the real line lands");
+  assert.equal(got[0].payload.data.text, "real line");
+  // The hub should have echoed the roster so the user can correct the id.
+  assert.ok(r.stdout.includes("ghost"), "the unknown id is named back to the user");
+  assert.ok(r.stdout.includes("alice") && r.stdout.includes("bob"), "available agents are listed");
+});
+
+test("multi: output is attributed per agent — each reply carries its own [id] prefix", async () => {
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["out|alice:FROM-ALICE", "out|bob:FROM-BOB"],
+  });
+  assertImplemented(r);
+  assert.ok(/\[alice\][^\n]*FROM-ALICE/.test(r.stdout), "alice's reply is tagged [alice]: " + r.stdout);
+  assert.ok(/\[bob\][^\n]*FROM-BOB/.test(r.stdout), "bob's reply is tagged [bob]: " + r.stdout);
+});
+
+test("multi: independent refcounted teardown — one agent leaving keeps stdin open for the survivor", async () => {
+  // Tear alice down FIRST; bob stays. A line typed afterward must still be
+  // received (stdin stays open while ≥1 agent is attached) and route to bob (the
+  // surviving/active agent). Then bob tears down → refcount hits 0 → the hub
+  // closes stdin → the child exits naturally (no hang / no SIGKILL).
+  const r = await runMulti({
+    agents: ["alice", "bob"],
+    multiSteps: ["down|alice", "wait|1", "down|bob"],
+    stdin: ["after alice left"],
+    keepStdinOpen: false,
+    timeoutMs: 10_000,
+  });
+  assertImplemented(r);
+  const got = taggedInputs(r);
+  assert.equal(got.length, 1, "the survivor received the post-teardown line");
+  assert.equal(got[0].agent, "bob", "the line routed to the surviving agent");
+  assert.equal(got[0].payload.data.text, "after alice left");
+  assert.ok(r.lines.includes("TORE_DOWN:alice"), "alice tore down");
+  assert.ok(r.lines.includes("TORE_DOWN:bob"), "bob tore down");
+  assert.equal(r.timedOut, false, "with all agents gone the hub released stdin — child exited, no hang");
 });
