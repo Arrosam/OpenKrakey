@@ -18,16 +18,28 @@
  * (-> input.message + fire_now on that agent's bus; 404 unknown, 400 empty) ·
  * GET /api/agents/:id/stream (SSE: greeting, then that agent's output + statuses).
  *
+ * Security: the server binds LOOPBACK by default (config.web.host, default
+ * 127.0.0.1 — not all interfaces, so it is not LAN-reachable) and every /api/*
+ * route requires a per-process SESSION TOKEN (random, or config.web.token). The
+ * token is printed once with the URL — only the console that ran the program sees
+ * it, so a random local process never learns it. GET / serves the page (no
+ * secrets) and, when opened with the valid ?token=, sets an HttpOnly cookie so the
+ * page's same-origin fetch/SSE authenticate automatically (no token in API URLs).
+ * A token may also be presented via ?token= or `Authorization: Bearer`.
+ *
  * The default export is a PluginFactory — the loader calls it once per Agent; only
  * the hub (a process resource) is module-level.
  */
 import * as http from "node:http";
+import * as crypto from "node:crypto";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { LLMResponse } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
 import { PAGE_HTML } from "./page";
 
 const DEFAULT_PORT = 7717;
+const DEFAULT_HOST = "127.0.0.1";
+const COOKIE_NAME = "krakey_token";
 
 interface AgentReg {
   agentId: string;
@@ -45,6 +57,8 @@ interface AgentReg {
 let server: http.Server | undefined;
 const regs = new Map<string, AgentReg>();
 let msgSeq = 0;
+/** The per-process session token gating every /api route (set when the server starts). */
+let token = "";
 
 function sseSend(res: http.ServerResponse, event: unknown): void {
   try {
@@ -65,14 +79,60 @@ function agentRoute(pathname: string): { id: string; tail: "message" | "stream" 
   return { id: decodeURIComponent(m[1]), tail: m[2] as "message" | "stream" };
 }
 
-function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const pathname = (req.url || "/").split("?")[0];
-  const method = req.method || "GET";
+/** The token presented on a request: ?token=, `Authorization: Bearer`, or the cookie. */
+function presentedToken(req: http.IncomingMessage, search: string): string | undefined {
+  const q = new URLSearchParams(search).get("token");
+  if (q) return q;
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  const cookie = req.headers["cookie"];
+  if (typeof cookie === "string") {
+    for (const part of cookie.split(";")) {
+      const i = part.indexOf("=");
+      if (i !== -1 && part.slice(0, i).trim() === COOKIE_NAME) return part.slice(i + 1).trim();
+    }
+  }
+  return undefined;
+}
 
+/** Constant-time check that the presented token matches the session token. */
+function tokenOk(presented: string | undefined): boolean {
+  if (!token) return true; // no token configured — open (should not happen in practice)
+  if (typeof presented !== "string" || presented.length !== token.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(token));
+  } catch {
+    return false;
+  }
+}
+
+function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const url = req.url || "/";
+  const qIdx = url.indexOf("?");
+  const pathname = qIdx === -1 ? url : url.slice(0, qIdx);
+  const search = qIdx === -1 ? "" : url.slice(qIdx);
+  const method = req.method || "GET";
+  const presented = presentedToken(req, search);
+
+  // The page itself holds no secrets, so it is served WITHOUT a token. When it is
+  // opened with the valid token (the URL printed to the console), set an HttpOnly
+  // cookie so the page's same-origin API calls authenticate without a token in
+  // every URL.
   if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+    if (token && tokenOk(presented)) {
+      res.setHeader("set-cookie", COOKIE_NAME + "=" + token + "; HttpOnly; SameSite=Strict; Path=/");
+    }
     res.statusCode = 200;
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.end(PAGE_HTML);
+    return;
+  }
+
+  // Everything else is the API — gated by the session token.
+  if (!tokenOk(presented)) {
+    res.statusCode = 401;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "unauthorized" }));
     return;
   }
 
@@ -145,20 +205,28 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
  * (works for an ephemeral port 0). A bind clash degrades (server dropped) and
  * still resolves so startup never hangs.
  */
-function ensureServer(port: number, print: (line: string) => void): Promise<void> {
+function ensureServer(
+  port: number,
+  host: string,
+  tokenValue: string,
+  print: (line: string) => void,
+): Promise<void> {
   if (server) return Promise.resolve();
+  token = tokenValue; // process-level: set once, by the first agent to start the server
   return new Promise<void>((resolve) => {
     const s = http.createServer(handle);
     server = s;
     s.on("error", (err) => {
       if (server === s) server = undefined;
-      print("✖ Web chat: could not bind port " + port + " — " + err);
+      print("✖ Web chat: could not bind " + host + ":" + port + " — " + err);
       resolve();
     });
-    s.listen(port, () => {
+    s.listen(port, host, () => {
       const addr = s.address();
       const bound = addr && typeof addr === "object" ? addr.port : port;
-      print("✦ Web chat: http://localhost:" + bound);
+      // A loopback-reachable host for the printed URL (0.0.0.0/:: aren't dialable).
+      const display = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+      print("✦ Web chat: http://" + display + ":" + bound + "/?token=" + token);
       resolve();
     });
   });
@@ -186,8 +254,14 @@ const createWeb: PluginFactory = (): Plugin => {
     manifest: { id: "web", version: "0.1.0" },
 
     async setup(ctx: PluginContext): Promise<void> {
-      const cfg = (ctx.config ?? {}) as { port?: number };
+      const cfg = (ctx.config ?? {}) as { port?: number; host?: string; token?: string };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
+      const host = typeof cfg.host === "string" && cfg.host ? cfg.host : DEFAULT_HOST;
+      // A fresh random token per process unless one is pinned in config.
+      const tk =
+        typeof cfg.token === "string" && cfg.token
+          ? cfg.token
+          : crypto.randomBytes(24).toString("base64url");
 
       const r: AgentReg = {
         agentId: ctx.agentId,
@@ -227,7 +301,7 @@ const createWeb: PluginFactory = (): Plugin => {
       unsubs = [offOutput, offReturn];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
-      await ensureServer(port, (line) => ctx.print(line));
+      await ensureServer(port, host, tk, (line) => ctx.print(line));
     },
 
     teardown(): void {
