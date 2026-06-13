@@ -91,7 +91,7 @@ loop and asserting they surface in `/snapshot` and `/stream`, correlated by `cor
 isolation (R6).
 
 ## Status
-pending
+done
 
 ## Change log
 - 2026-06-14: node created — read-only browser debug/analysis dashboard; own refcounted loopback+token
