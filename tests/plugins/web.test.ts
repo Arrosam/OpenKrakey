@@ -340,6 +340,25 @@ test("web: GET / serves an HTML chat page", async () => {
   }
 });
 
+test("web: the chat page uses Bootstrap Icons (not unicode glyphs) and wires browser notifications", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const html = await fetch(base(c) + "/").then((r) => r.text());
+    assert.match(html, /bootstrap-icons/, "the Bootstrap Icons stylesheet must be loaded");
+    assert.match(html, /\bbi-send/, "the send control must use a Bootstrap icon (bi-send*)");
+    assert.match(html, /\bbi-check-all\b/, "the read tick must use the bi-check-all icon");
+    assert.match(html, /\bbi-check\b/, "the sent tick must use the bi-check icon");
+    assert.ok(
+      !/&#8593;|&#10003;/.test(html),
+      "no raw unicode arrow/check glyphs should remain in the page",
+    );
+    assert.match(html, /Notification/, "the page must wire the browser Notifications API for replies");
+  } finally {
+    await c.close();
+  }
+});
+
 // ===========================================================================
 // Scenario 2 — POST a message routes input.message + fire_now to EXACTLY that
 // agent's bus (not another's), and returns { id, status:"sent" }
