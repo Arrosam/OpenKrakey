@@ -2,11 +2,11 @@
  * E2E — the crown-jewel MVP integration test.
  *
  * A REAL `agent_instance` runs the REAL `public_plugin/` code (llm-core, persona,
- * history, console-channel, notes, toolbox) against a LOCAL stub LLM server, driven
- * through the console channel. This is the full Phase-1 loop end-to-end:
+ * history, web, notes, toolbox) against a LOCAL stub LLM server, driven through the
+ * WEB channel over HTTP. This is the full Phase-1 loop end-to-end:
  *
- *   stdin line
- *     -> console-channel: input.message Notify + clock.fire_now
+ *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
+ *     -> web: input.message Notify (channel "web") + clock.fire_now
  *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona 10000+
  *        on top, history 100 with the folded input) -> llm.request
  *     -> llm-core: chat({ messages:[{role:"user", content: context.text}], tools })
@@ -14,7 +14,7 @@
  *        the tool -> tool.result -> history folds "assistant -> tool" + "tool -> {…}"
  *     -> LATER beat: context now carries the tool result -> chat #2+ -> "E2E-FINAL-REPLY"
  *     -> llm.return (ok + content) -> llm-core emits output.message
- *     -> console-channel prints "\n[krakey] E2E-FINAL-REPLY\n" to stdout
+ *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser
  *
  * The contracts that pin the wire shapes:
  *   - shared/actions: Events.* + the Notify/Request/Reply envelopes, Actions.CLOCK_*
@@ -22,19 +22,17 @@
  *   - contracts/agent: AgentDefinition { id, intervalMs, plugins, config }
  *   - the plugin overviews (overviews/nodes/*.md) for each plugin's behavior
  *
- * RED-STATE rule: the six plugins under public_plugin/ DO NOT EXIST yet. With an
- * empty publicPluginDir-equivalent (the real public_plugin/ dir is empty), the
- * loader has nothing to load: no llm-core means no llm.request listener, no
- * console-channel means no greeting/stdin wiring, no output.message printer.
- * So until the plugins land, the server receives < 2 requests and stdout lacks the
- * markers — every assertion FAILS on an assertion, and nothing HANGS:
+ * RED-STATE rule: if the web plugin (or the others) is absent the loader has nothing
+ * to wire — the web server never binds, the stub server sees < 2 requests, and the
+ * SSE stream never delivers the reply. Every assertion FAILS on an assertion, and
+ * nothing HANGS:
  *   - the stub server is always closed in a finally,
  *   - every wait has a hard deadline,
- *   - the child always force-exits (process.exit(0)) after a fixed run window.
+ *   - the child always force-exits after a fixed window, and the parent SIGKILLs it.
  *
  * The agent_instance + llm-gateway nodes ARE implemented (status: done), so the
- * harness imports them directly (harness-only imports are allowed; they are not
- * the plugins under test).
+ * harness imports them directly (harness-only imports are allowed; they are not the
+ * plugins under test).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -48,16 +46,8 @@ import { spawn } from "node:child_process";
 const REPO_ROOT = path.resolve(".");
 
 // ---------------------------------------------------------------------------
-// Stub OpenAI chat-completions server.
-//
-// Implements POST /v1/chat/completions (the openai-completion adapter targets
-// `${baseURL}/chat/completions`, and we hand it baseURL = "<url>/v1"). It records
-// every request body and answers:
-//   - call #1  -> a tool_calls message asking for time.now (finish_reason
-//                 "tool_calls"); content is null so NO output.message yet.
-//   - call #2+ -> a plain assistant message "E2E-FINAL-REPLY" (finish_reason
-//                 "stop") so the reply can travel llm.return -> output.message ->
-//                 console stdout.
+// Stub OpenAI chat-completions server (unchanged): call #1 -> time.now tool_call,
+// call #2+ -> "E2E-FINAL-REPLY".
 // ---------------------------------------------------------------------------
 
 interface StubServer {
@@ -131,8 +121,6 @@ async function startStubServer(): Promise<StubServer> {
     requests,
     close: () =>
       new Promise<void>((resolve) => {
-        // Drop keep-alive sockets so close() resolves promptly even if the child
-        // left a connection open.
         try {
           (server as any).closeAllConnections?.();
         } catch {
@@ -144,9 +132,9 @@ async function startStubServer(): Promise<StubServer> {
 }
 
 // ---------------------------------------------------------------------------
-// The child driver script (.mts so ESM top-level await works in a temp dir with
-// no package.json). It boots a REAL agent against the stub server, then force
-// exits after ~4s of run time so a never-arriving reply can never hang the test.
+// The child driver: boots a REAL agent (web on an ephemeral port) against the stub
+// server, prints the bound URL ("PRINT:✦ Web chat: http://localhost:<port>"), and
+// stays alive for the parent to drive over HTTP. Force-exits after a fixed window.
 // ---------------------------------------------------------------------------
 
 function childScript(serverUrl: string, agentsDir: string, publicPluginDir: string): string {
@@ -176,10 +164,11 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "history", "console-channel", "notes", "toolbox"],
+    plugins: ["llm-core", "persona", "history", "web", "notes", "toolbox"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
+      web: { port: 0 },
     },
   };
 
@@ -187,21 +176,19 @@ async function main() {
     library,
     publicPluginDir: ${JSON.stringify(publicPluginDir)},
     agentsDir: ${JSON.stringify(agentsDir)},
+    print: (t) => { console.log("PRINT:" + t); },
   });
 
   await agent.start();
 
-  // Run for a fixed window, then force-exit no matter what (a missing reply must
-  // never hang the parent). We do NOT depend on a graceful stop().
+  // Stay alive for the parent to drive over HTTP, then force-exit no matter what.
   setTimeout(() => {
     try { agent.stop(); } catch {}
     process.exit(0);
-  }, 4000);
+  }, 15000);
 }
 
 main().catch((err) => {
-  // Any bring-up failure (plugins not implemented, bad contract usage, …) lands
-  // here as a clean, assertable signal — never a hang.
   console.log("BOOT_ERROR:" + (err && err.stack ? err.stack : String(err)));
   process.exit(0);
 });
@@ -209,85 +196,123 @@ main().catch((err) => {
 }
 
 // ---------------------------------------------------------------------------
-// Run the whole e2e scenario once: start server, spawn child, type a line, collect
-// stdout, wait for exit. Returns the collected artifacts for assertion.
+// Run the whole e2e scenario once: start server, spawn child, read the bound port,
+// open the agent's SSE stream, POST a message, collect streamed output until the
+// final reply or a deadline. Returns the collected artifacts for assertion.
 // ---------------------------------------------------------------------------
 
 interface E2EResult {
   stdout: string;
   stderr: string;
-  exited: boolean;
+  portBound: boolean;
   bootError: boolean;
+  sseOutputs: string[];
   requests: any[];
+}
+
+/** Read SSE from an agent stream into `out`; resolve when `pred` holds or deadline. */
+async function collectSSE(
+  port: number,
+  id: string,
+  out: string[],
+  pred: (texts: string[]) => boolean,
+  ms: number,
+): Promise<void> {
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(), ms);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/agents/${id}/stream`, { signal: ac.signal });
+    if (!res.body) return;
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dl = chunk.split("\n").find((l) => l.startsWith("data:"));
+        if (dl) {
+          try {
+            const ev = JSON.parse(dl.slice(5).trim());
+            if (ev && ev.type === "output" && typeof ev.text === "string") out.push(ev.text);
+          } catch {
+            /* skip */
+          }
+        }
+      }
+      if (pred(out)) break;
+    }
+  } catch {
+    /* aborted / connection closed */
+  } finally {
+    clearTimeout(deadline);
+    ac.abort();
+  }
 }
 
 async function runE2E(): Promise<E2EResult> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-e2e-"));
   const agentsDir = path.join(tmp, "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
-  // The REAL repo public_plugin/ dir holds the plugins under test.
   const publicPluginDir = path.join(REPO_ROOT, "public_plugin");
 
   const server = await startStubServer();
   const scriptPath = path.join(tmp, "e2e-child.mts");
-  fs.writeFileSync(
-    scriptPath,
-    childScript(server.url, agentsDir, publicPluginDir),
-    "utf8",
-  );
+  fs.writeFileSync(scriptPath, childScript(server.url, agentsDir, publicPluginDir), "utf8");
 
   let stdout = "";
   let stderr = "";
-  let exited = false;
+  let port = 0;
+  const sseOutputs: string[] = [];
+
+  const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
+    cwd: REPO_ROOT,
+    env: process.env,
+  });
+  child.stdout.on("data", (d) => (stdout += d.toString()));
+  child.stderr.on("data", (d) => (stderr += d.toString()));
 
   try {
-    const child = spawn(
-      process.execPath,
-      ["--import", "tsx", scriptPath],
-      { cwd: REPO_ROOT, env: process.env },
-    );
-
-    child.stdout.on("data", (d) => {
-      stdout += d.toString();
-    });
-    child.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
-
-    // Feed one console line after the channel has had a moment to wire stdin.
-    const typer = setTimeout(() => {
-      try {
-        child.stdin.write("hello krakey\n");
-      } catch {
-        /* child may already be gone */
+    // 1. Wait for the web server to print its bound URL (or a boot error).
+    const portDeadline = Date.now() + 12_000;
+    while (Date.now() < portDeadline) {
+      if (stdout.includes("BOOT_ERROR")) break;
+      const m = /PRINT:[^\n]*http:\/\/[^\s:]+:(\d+)/.exec(stdout);
+      if (m) {
+        port = parseInt(m[1], 10);
+        break;
       }
-    }, 300);
+      await new Promise((r) => setTimeout(r, 25));
+    }
 
-    // Hard deadline so a hung child cannot hang the suite: kill it, then resolve.
-    const exitCode: number | null = await new Promise((resolve) => {
-      const deadline = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already dead */
-        }
-        resolve(null);
-      }, 25_000);
-
-      child.on("exit", (code) => {
-        clearTimeout(deadline);
-        clearTimeout(typer);
-        exited = true;
-        resolve(code);
-      });
-      child.on("error", () => {
-        clearTimeout(deadline);
-        clearTimeout(typer);
-        resolve(null);
-      });
-    });
-    void exitCode;
+    // 2. Drive the loop over HTTP: open the stream FIRST (so we miss nothing),
+    //    then POST the message; collect until the final reply or a deadline.
+    if (port > 0) {
+      const collected = collectSSE(
+        port,
+        "e2e-agent",
+        sseOutputs,
+        (texts) => texts.some((t) => t.includes("E2E-FINAL-REPLY")),
+        15_000,
+      );
+      await new Promise((r) => setTimeout(r, 150)); // let the stream attach
+      await fetch(`http://127.0.0.1:${port}/api/agents/e2e-agent/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "hello krakey" }),
+      }).catch(() => {});
+      await collected;
+    }
   } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
     await server.close();
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -299,15 +324,14 @@ async function runE2E(): Promise<E2EResult> {
   return {
     stdout,
     stderr,
-    exited,
+    portBound: port > 0,
     bootError: stdout.includes("BOOT_ERROR"),
+    sseOutputs,
     requests: server.requests,
   };
 }
 
-// A single shared run drives all five assertions (the loop is expensive to boot;
-// one run, many independent checks). Guarded so a thrown setup error surfaces as a
-// clean assertion in each test rather than crashing the file.
+// A single shared run drives all assertions (the loop is expensive to boot).
 let RESULT: E2EResult | null = null;
 let RUN_ERROR: unknown = null;
 try {
@@ -329,9 +353,7 @@ function firstMessageText(reqBody: any): string {
   const c = m0.content;
   if (typeof c === "string") return c;
   if (Array.isArray(c)) {
-    return c
-      .map((p: any) => (typeof p === "string" ? p : p?.text ?? ""))
-      .join("\n");
+    return c.map((p: any) => (typeof p === "string" ? p : p?.text ?? "")).join("\n");
   }
   return "";
 }
@@ -340,30 +362,25 @@ function firstMessageText(reqBody: any): string {
 function toolNames(reqBody: any): string[] {
   const tools = reqBody?.tools;
   if (!Array.isArray(tools)) return [];
-  return tools
-    .map((t: any) => t?.function?.name ?? t?.name)
-    .filter((n: any) => typeof n === "string");
+  return tools.map((t: any) => t?.function?.name ?? t?.name).filter((n: any) => typeof n === "string");
 }
 
 // ===========================================================================
-// Assertion 1 — boot health: no BOOT_ERROR, child exits within the timeout.
+// Assertion 1 — boot health: no BOOT_ERROR, and the web server bound a port.
 // ===========================================================================
 
-test("e2e/1: the agent boots cleanly (no BOOT_ERROR) and the child exits within the timeout", () => {
+test("e2e/1: the agent boots cleanly (no BOOT_ERROR) and the web server binds a port", () => {
   const r = result();
   assert.equal(
     r.bootError,
     false,
     "agent bring-up emitted BOOT_ERROR (plugins missing or contract misuse):\n" + r.stdout + "\n--stderr--\n" + r.stderr,
   );
-  assert.equal(r.exited, true, "the child process must exit within the deadline (no hang)");
+  assert.equal(r.portBound, true, "the web plugin must bind + print its server URL");
 });
 
 // ===========================================================================
 // Assertion 2 — the loop turns over: the stub server saw >= 2 chat requests.
-//
-// Two requests means a full sub-loop completed: beat #1 produced a tool call, the
-// tool was dispatched, and a later beat issued a second request carrying the result.
 // ===========================================================================
 
 test("e2e/2: the stub LLM server received >= 2 chat requests (the beat loop turned over)", () => {
@@ -394,20 +411,13 @@ test("e2e/3: request #1 carries the persona block + the folded user line, plus t
     /hello krakey/,
     "messages[0].content must contain the folded user input (history block)",
   );
-
-  // Stable-prefix convention: the persona block sits ABOVE the history line.
   assert.ok(
     text.indexOf("PERSONA-MARK") < text.indexOf("hello krakey"),
     "persona (priority 10000+) must be rendered above the history input line (priority 100)",
   );
 
   const names = toolNames(r.requests[0]);
-  for (const expected of [
-    "time.now",
-    "clock.set_interval",
-    "clock.set_default_interval",
-    "note.save",
-  ]) {
+  for (const expected of ["time.now", "clock.set_interval", "clock.set_default_interval", "note.save"]) {
     assert.ok(
       names.includes(expected),
       "tools[] must include the def '" + expected + "'; saw [" + names.join(", ") + "]",
@@ -417,23 +427,18 @@ test("e2e/3: request #1 carries the persona block + the folded user line, plus t
 
 // ===========================================================================
 // Assertion 4 — tool-result folding: SOME later request's context shows the
-// time.now result line history recorded ("time.now" + the iso/epoch payload).
+// time.now result line history recorded.
 // ===========================================================================
 
 test("e2e/4: a later request's context shows the time.now tool result folded back in", () => {
   const r = result();
   assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the folded tool result");
 
-  // history records tool.result as `tool time.now -> <JSON data>` where data is
-  // { iso, epochMs }. The folded line therefore mentions "time.now" AND an
-  // iso/epoch payload fragment (an ISO timestamp digit-run or the epochMs key).
   const folded = r.requests.slice(1).some((req) => {
     const text = firstMessageText(req);
     const mentionsTool = text.includes("time.now");
     const mentionsPayload =
-      /"?iso"?\s*[:=]/.test(text) || // an "iso": field from the result JSON
-      /epochMs/.test(text) || // the epochMs key
-      /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text); // a literal ISO timestamp
+      /"?iso"?\s*[:=]/.test(text) || /epochMs/.test(text) || /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text);
     return mentionsTool && mentionsPayload;
   });
   assert.ok(
@@ -443,15 +448,14 @@ test("e2e/4: a later request's context shows the time.now tool result folded bac
 });
 
 // ===========================================================================
-// Assertion 5 — the reply reaches the user: stdout carries "E2E-FINAL-REPLY"
-// (it travelled llm.return -> output.message -> console-channel stdout).
+// Assertion 5 — the reply reaches the browser: the agent's SSE stream delivered
+// an output event carrying "E2E-FINAL-REPLY" (llm.return -> output.message -> web SSE).
 // ===========================================================================
 
-test("e2e/5: the final reply travels llm.return -> output.message -> console stdout", () => {
+test("e2e/5: the final reply travels llm.return -> output.message -> web SSE stream", () => {
   const r = result();
-  assert.match(
-    r.stdout,
-    /E2E-FINAL-REPLY/,
-    "console stdout must contain the assistant reply printed by console-channel:\n" + r.stdout,
+  assert.ok(
+    r.sseOutputs.some((t) => t.includes("E2E-FINAL-REPLY")),
+    "the web SSE stream must deliver the assistant reply; got events:\n" + JSON.stringify(r.sseOutputs),
   );
 });
