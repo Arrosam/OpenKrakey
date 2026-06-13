@@ -138,20 +138,29 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
   res.end("not found");
 }
 
-/** Start the one server if it isn't up yet; print its URL via the agent's sink. */
-function ensureServer(port: number, print: (line: string) => void): void {
-  if (server) return;
-  const s = http.createServer(handle);
-  server = s;
-  s.on("error", () => {
-    // A port clash (e.g. two agents, second with a different port) must not crash
-    // startup — degrade: the first server stays, this attempt is dropped.
-    if (server === s) server = undefined;
-  });
-  s.listen(port, () => {
-    const addr = s.address();
-    const bound = addr && typeof addr === "object" ? addr.port : port;
-    print("✦ Web chat: http://localhost:" + bound);
+/**
+ * Start the one server if it isn't up yet, and resolve once it is LISTENING — so
+ * an `await`ing setup announces the URL synchronously within the agent's startup
+ * block (not from a later async callback). The URL carries the real bound port
+ * (works for an ephemeral port 0). A bind clash degrades (server dropped) and
+ * still resolves so startup never hangs.
+ */
+function ensureServer(port: number, print: (line: string) => void): Promise<void> {
+  if (server) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const s = http.createServer(handle);
+    server = s;
+    s.on("error", (err) => {
+      if (server === s) server = undefined;
+      print("✖ Web chat: could not bind port " + port + " — " + err);
+      resolve();
+    });
+    s.listen(port, () => {
+      const addr = s.address();
+      const bound = addr && typeof addr === "object" ? addr.port : port;
+      print("✦ Web chat: http://localhost:" + bound);
+      resolve();
+    });
   });
 }
 
@@ -176,7 +185,7 @@ const createWeb: PluginFactory = (): Plugin => {
   return {
     manifest: { id: "web", version: "0.1.0" },
 
-    setup(ctx: PluginContext): void {
+    async setup(ctx: PluginContext): Promise<void> {
       const cfg = (ctx.config ?? {}) as { port?: number };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
 
@@ -216,7 +225,9 @@ const createWeb: PluginFactory = (): Plugin => {
       });
 
       unsubs = [offOutput, offReturn];
-      ensureServer(port, (line) => ctx.print(line));
+      // Await the bind so the URL is announced within this agent's startup block
+      // (the startup report indents it under the agent), with the real bound port.
+      await ensureServer(port, (line) => ctx.print(line));
     },
 
     teardown(): void {
