@@ -33,7 +33,10 @@ dynamic-`import` the module's default `Plugin` (invalid/unloadable → `PluginLo
 `dataDir = <pluginDir>/data`, `llm = library`, block ops → orchestrator, log) → `await setup`; track in
 load order. `teardown()`: reverse order, each `teardown?()` error-isolated (one failure never blocks
 the rest), then clear. A bare agent (empty plugins) resolves to nothing and returns cleanly. The loader
-does NOT run the beat.
+does NOT run the beat. The loader also mirrors its OWN diagnostic lines (e.g. a teardown-failure error)
+onto the bus as `log.entry` tagged `pluginId: "core:loader"` via the same `pushLogEntry` helper it uses
+for plugin lines — so core-loader diagnostics are observable WITHOUT bus-bridging its injected logger
+(which would double-emit every plugin `ctx.log` line it echoes to the console).
 
 ## Status
 done
@@ -45,3 +48,4 @@ done
 - 2026-06-13: PluginFactory instantiation — the default export is a factory called once per Agent (R6: shared code, never shared live state; tsx ignores import-URL queries, so construction is the mechanism); legacy object defaults reject.
 - 2026-06-13: independents are no longer code-copied — code loads from public_plugin/ (copying broke its relative imports); "independent" only redirects dataDir to agents/<id>/plugins/<pid>/data; a bare data/ folder is never mistaken for custom code.
 - 2026-06-13: builds plugin-contract v1.1 ctx — leveled ctx.log + ctx.print (verbatim to the injectable LoaderDeps.print sink, default stdout); every log/print also pushed on the agent's bus as log.entry.
+- 2026-06-14: the loader now also mirrors its OWN diagnostics (the teardown-failure error) onto the bus as log.entry tagged `core:loader` via pushLogEntry. This replaces bus-bridging the injected logger at agent_instance, which had duplicated every plugin ctx.log line on the bus as core:loader (the loader reuses that logger to echo plugin lines to the console).
