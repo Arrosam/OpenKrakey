@@ -46,3 +46,4 @@ done
 ## Change log
 - 2026-06-13: node created — browser chat channel replacing the terminal channel; refcounted http hub,
   per-agent SSE isolation (R6), sent/read delivery status (read on llm.return), dependency-free page.
+- 2026-06-13: setup() awaits the server bind so the URL is announced inside the agent startup block (was an async listen callback landing after the run summary); real bound port; bind clash prints a ✖ note and degrades.
