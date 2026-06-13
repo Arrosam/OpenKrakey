@@ -1383,3 +1383,51 @@ test("log.entry stays on the OWN agent's bus: agent B sees none of agent A's ent
   await a.loader.teardown();
   await b.loader.teardown();
 });
+
+// ===========================================================================
+// EXT — the loader mirrors its OWN diagnostics onto the bus as log.entry,
+//   tagged pluginId "core:loader" (same bus-mirroring it does for plugin
+//   ctx.log.* lines, which carry the plugin's id). Inducible diagnostic: when a
+//   loaded plugin's teardown() THROWS during loader.teardown(), the loader
+//   catches it (isolated — teardown must not reject) and logs an ERROR; that
+//   error line is now ALSO emitted on the bus as a log.entry with
+//   { level: "error", pluginId: "core:loader" } and a non-empty text.
+// ===========================================================================
+
+test("loader self-diagnostic: a throwing plugin teardown is mirrored on the bus as a core:loader error log.entry (teardown still resolves)", async () => {
+  // A plugin whose teardown() throws — the inducible loader diagnostic.
+  writePlugin(
+    publicPluginDir,
+    "boomtd",
+    observablePlugin({ id: "boomtd", throwOnTeardown: true }),
+  );
+
+  const { loader, sys } = makeLoader(def({ plugins: ["boomtd"] }));
+
+  // Subscribe to log.entry on the SAME bus handed to the loader.
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+
+  await loader.load();
+
+  // teardown() must isolate the plugin's throw (not reject)...
+  await assert.doesNotReject(
+    loader.teardown(),
+    "teardown() must isolate a plugin's throwing teardown and resolve",
+  );
+
+  // ...and the loader's OWN error diagnostic must be mirrored on the bus,
+  // attributed to the core source "core:loader" (not the plugin id), at error
+  // level, with a non-empty text. (Assert on pluginId + level + non-empty text;
+  // do NOT couple to the exact diagnostic wording.)
+  const hit = seen.find(
+    (p) => p?.data?.pluginId === "core:loader" && p?.data?.level === "error",
+  );
+  assert.ok(
+    hit,
+    "the loader's own teardown-failure ERROR must be emitted on the bus as a core:loader log.entry",
+  );
+  assert.equal(typeof hit.at, "number", "Notify envelope: at is a timestamp");
+  assert.equal(typeof hit.data.text, "string", "the entry carries text");
+  assert.ok(hit.data.text.length > 0, "the diagnostic text must be non-empty");
+});
