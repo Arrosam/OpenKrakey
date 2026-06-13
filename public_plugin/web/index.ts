@@ -47,8 +47,15 @@ interface AgentReg {
   deliver: (text: string, msgId: number) => void;
   /** Open SSE responses streaming THIS agent's output + statuses. */
   clients: Set<http.ServerResponse>;
-  /** Message ids appended to the queue but not yet processed (sent, awaiting read). */
+  /** Message ids appended to the queue, not yet carried by an LLM request. */
   pending: number[];
+  /**
+   * requestId -> message ids carried by THAT request's composed context, awaiting
+   * THAT request's return. A beat ends at llm.request (returns can overlap and
+   * arrive out of order), so a message is only `read` when the return of the
+   * request that actually included it arrives — not any earlier outstanding one.
+   */
+  inFlight: Map<string, number[]>;
   /** The one-line greeting sent to a client on connect. */
   greeting: string;
 }
@@ -277,6 +284,7 @@ const createWeb: PluginFactory = (): Plugin => {
         },
         clients: new Set(),
         pending: [],
+        inFlight: new Map(),
         greeting: "agent '" + ctx.agentId + "' is awake — type to talk.",
       };
       reg = r;
@@ -288,17 +296,29 @@ const createWeb: PluginFactory = (): Plugin => {
         if (typeof text === "string") broadcast(r, { type: "output", text });
       });
 
-      // A completed beat (llm.return) means every queued message has now been
-      // processed → flip the pending ones to "read".
-      const offReturn = ctx.events.on(Events.LLM_RETURN, (payload) => {
-        const reply = payload as Reply<LLMResponse> | undefined;
-        if (!reply) return;
-        const done = r.pending;
+      // A new request snapshots the messages now in its composed context: those
+      // pending messages are carried by THIS request and become its responsibility
+      // (so an EARLIER outstanding request's return can't claim them).
+      const offRequest = ctx.events.on(Events.LLM_REQUEST, (payload) => {
+        const reqId = (payload as EventPayloads["llm.request"] | undefined)?.id;
+        if (typeof reqId !== "string" || r.pending.length === 0) return;
+        const prior = r.inFlight.get(reqId) ?? [];
+        r.inFlight.set(reqId, prior.concat(r.pending));
         r.pending = [];
+      });
+
+      // A request's return means the beat that carried its messages completed →
+      // flip exactly those messages to "read" (not any still-pending ones).
+      const offReturn = ctx.events.on(Events.LLM_RETURN, (payload) => {
+        const reqId = (payload as Reply<LLMResponse> | undefined)?.id;
+        if (typeof reqId !== "string") return;
+        const done = r.inFlight.get(reqId);
+        if (!done) return;
+        r.inFlight.delete(reqId);
         for (const id of done) broadcast(r, { type: "status", id, status: "read" });
       });
 
-      unsubs = [offOutput, offReturn];
+      unsubs = [offOutput, offRequest, offReturn];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
       await ensureServer(port, host, tk, (line) => ctx.print(line));
