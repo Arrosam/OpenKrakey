@@ -22,6 +22,7 @@ import { PATHS, agentPaths } from "../../../shared/config";
 import type { LLMConfig } from "../../../shared/config";
 import { consoleLogger } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
+import { STAR, dim, failure, mint, success } from "../../../shared/theme";
 
 /**
  * Read every `agents/<id>/config.json` under `agentsDir` into an AgentDefinition.
@@ -65,22 +66,59 @@ export function loadLLMConfig(llmPath: string): LLMConfig {
   }
 }
 
+/** The startup report's opening line. */
+export function startBanner(): string {
+  return mint(STAR) + " OpenKrakey starting…";
+}
+
+/**
+ * The startup report's closing verdict: how many of the configured agents are
+ * actually running, and how to stop. An all-fail batch renders as a failure.
+ */
+export function summaryLine(started: number, total: number): string {
+  const counts = started + "/" + total;
+  if (total > 0 && started === 0) {
+    return failure("no agents running (" + counts + ") — see the failures above. Ctrl+C to exit.");
+  }
+  return mint(STAR) + " " + counts + " agent(s) running — Ctrl+C to stop.";
+}
+
 /**
  * Construct and start an Agent per definition, returning the handles that started
  * successfully. A failure to construct/start one agent is logged and skipped so
  * the remaining agents still come up.
+ *
+ * `report`, when given, receives the human-readable STARTUP REPORT line by
+ * line: per agent a starting line, then that agent's plugin starting messages
+ * (ctx.print, indented), then a started / FAILED-with-reason verdict.
  */
 export async function run(
   defs: AgentDefinition[],
-  opts?: { library?: CommunicatorLibrary; log?: Logger },
+  opts?: {
+    library?: CommunicatorLibrary;
+    log?: Logger;
+    report?: (line: string) => void;
+    publicPluginDir?: string;
+    agentsDir?: string;
+  },
 ): Promise<AgentHandle[]> {
+  const report = opts?.report;
   const handles: AgentHandle[] = [];
   for (const def of defs) {
+    report?.(dim(STAR + " agent '" + def.id + "' starting…"));
     let agent: AgentHandle | undefined;
     try {
-      agent = createAgentInstance(def, { library: opts?.library, log: opts?.log });
+      agent = createAgentInstance(def, {
+        library: opts?.library,
+        log: opts?.log,
+        publicPluginDir: opts?.publicPluginDir,
+        agentsDir: opts?.agentsDir,
+        // Plugin starting messages land indented under their agent's line.
+        print: report ? (text) => report("    " + text) : undefined,
+      });
       await agent.start();
       handles.push(agent);
+      report?.(success("agent '" + def.id + "' started"));
     } catch (err) {
       // If the handle was created but start() failed, tear it down so plugins
       // that loaded before the failure release their resources. Swallow any
@@ -93,13 +131,36 @@ export async function run(
         }
       }
       (opts?.log ?? consoleLogger).error("failed to start agent '" + def.id + "': " + err);
+      report?.(failure("agent '" + def.id + "' FAILED: " + err));
     }
   }
   return handles;
 }
 
+/**
+ * Friendly pre-flight hints for startup: tell a new user the NEXT step instead
+ * of leaving them with silence. No agents → point at the cli; agents without
+ * any configured AI service → warn that they can't reply (moot without agents,
+ * so at most one hint is ever returned).
+ */
+export function startupHints(
+  defs: AgentDefinition[],
+  library: CommunicatorLibrary,
+): string[] {
+  if (defs.length === 0) {
+    return ["No agents yet — run `npm run cli` to set one up (guided setup will walk you through it)."];
+  }
+  if (library.list().length === 0) {
+    return [
+      "Warning: no AI service (LLM provider) is configured, so your agents cannot reply — run `npm run cli` and add one under \"AI services\".",
+    ];
+  }
+  return [];
+}
+
 /** Process entry point: wire everything, start agents, wait for Ctrl+C. */
 async function main(): Promise<void> {
+  console.log(startBanner());
   const defs = loadAgentConfigs(PATHS.agentsDir);
   const llmConfig = loadLLMConfig(PATHS.llmPath);
 
@@ -123,13 +184,25 @@ async function main(): Promise<void> {
     };
   }
 
+  for (const hint of startupHints(defs, library)) {
+    console.log(hint);
+  }
   if (defs.length === 0) {
-    console.log("No agent configs found under " + PATHS.agentsDir + ". Nothing to start.");
     return;
   }
 
-  const handles = await run(defs, { library, log: consoleLogger });
-  console.log("Started " + handles.length + " agent(s). Ctrl+C to stop.");
+  const handles = await run(defs, {
+    library,
+    log: consoleLogger,
+    report: (line) => console.log(line),
+  });
+  console.log(summaryLine(handles.length, defs.length));
+  if (handles.length === 0) {
+    // Every configured agent failed: the report above says why; exit non-zero
+    // (nothing is running, so don't sit waiting for Ctrl+C).
+    process.exitCode = 1;
+    return;
+  }
 
   process.on("SIGINT", () => {
     console.log("\nShutting down...");

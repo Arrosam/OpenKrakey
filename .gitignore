@@ -153,3 +153,13 @@ agents/
 
 # generated architecture graph (run `npm run arch:graph`)
 docs/arch-graph.html
+
+# graphify knowledge-graph output (run `/graphify`) — generated, not source
+graphify-out/
+
+# Plugin runtime data (public = shared at runtime, never framework source)
+public_plugin/*/data/
+
+# The live Default Plugin Setting — user-editable local state (template ships
+# as config/agent.default.example.json; the cli's guided setup seeds it too)
+config/agent.default.json

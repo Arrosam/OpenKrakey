@@ -1,31 +1,60 @@
 /**
  * cli — the interactive shell. The ONLY module (besides bin.ts) that imports
- * `@inquirer/prompts`. Everything stateful-fs goes through the pure `Cli` core.
+ * `@inquirer/prompts` (via ./theme). Everything stateful-fs goes through the
+ * pure `Cli` core.
  *
- * Control flow: a `while` loop over a current-page name. Each page is a local
- * async function that performs prompts + cli ops and returns the NEXT page name
- * (or "quit"). A Ctrl+C / ExitPromptError anywhere is funnelled to Quit via a
- * private QuitSignal; expected CliErrors are printed and the loop continues;
- * anything else bubbles out.
+ * Control flow: a loop over a current-page name. Each page is a local async
+ * function that performs prompts + cli ops and returns the NEXT page name (or
+ * "quit"). Every select menu carries an explicit exit entry (Back / Cancel /
+ * Done / Quit), and Ctrl+C anywhere DROPS the current action — unsaved edits
+ * are abandoned and the loop returns to the main menu; Ctrl+C at the main menu
+ * quits. Expected CliErrors are printed and the loop continues; anything else
+ * bubbles out.
  */
-import { checkbox, confirm, input, password, select } from "@inquirer/prompts";
+import {
+  STAR,
+  bold,
+  checkbox,
+  confirm,
+  dim,
+  failure,
+  heading,
+  input,
+  mint,
+  password,
+  red,
+  select,
+  step,
+  success,
+} from "./theme";
 
 import type { AgentDefinition } from "../../../contracts/agent";
+import type { Capability, Modality } from "../../../contracts/llm";
 import type {
   CommunicatorDef,
   DefaultAgentSetting,
   LLMConfig,
+  ProviderInfo,
+} from "../../../shared/config";
+import {
+  CAPABILITY_LABELS,
+  KNOWN_PROVIDERS,
+  MODALITY_LABELS,
 } from "../../../shared/config";
 
-import { CliError, CliParseError, type Cli } from "./index";
+import { CliError, CliParseError, normalizeBaseURL, type Cli } from "./index";
 import { KRAKEY_LOGO } from "./logo";
 
 export type InitialPage = "landing" | "agents" | "default" | "providers";
 
-/** Internal page space: the entry pages plus "quit". */
-type Page = InitialPage | "quit";
+/** Internal page space: the entry pages plus the wizard and "quit". */
+type Page = InitialPage | "wizard" | "quit";
 
-/** Raised when the user hits Ctrl+C (inquirer's ExitPromptError) — means Quit. */
+/**
+ * Raised when the user hits Ctrl+C (inquirer's ExitPromptError) — means "drop
+ * what I'm doing": the main loop abandons the current page and returns to the
+ * main menu (and quits when already there).
+ */
 class QuitSignal {}
 
 const isExitPromptError = (err: unknown): boolean =>
@@ -43,16 +72,20 @@ async function ask<T>(run: () => Promise<T>): Promise<T> {
 
 type Out = (msg: string) => void;
 
-const BACK = "← Back";
-const CREATE_NEW = "➕ Create new";
-const ADD = "➕ Add";
-const DONE = "Done";
+// Shared action labels, color-coded by intent: mint = constructive/affirmative,
+// red = destructive (or loses your edits), dim = plain navigation. Whole names
+// are painted (never substrings) so the focused-row highlight stays readable.
+const BACK = dim("← Back");
+const CREATE_NEW = mint("+ Create new");
+const ADD_SERVICE = mint("+ Add a new AI service");
+const DONE = mint("Done");
 
-/** Reusable id validator for agent ids: non-empty, no spaces or slashes. */
+/** Reusable id validator for agent ids: non-empty, no spaces/slashes/dot-dirs. */
 function validateId(raw: string): true | string {
   const v = raw.trim();
-  if (v.length === 0) return "id must not be empty";
-  if (/[\s/\\]/.test(v)) return "id must not contain spaces or slashes";
+  if (v.length === 0) return "name must not be empty";
+  if (v === "." || v === "..") return "name must not be '.' or '..'";
+  if (/[\s/\\]/.test(v)) return "name must not contain spaces or slashes";
   return true;
 }
 
@@ -63,6 +96,119 @@ function parsePositiveInt(raw: string): number | undefined {
   const n = Number(v);
   return n > 0 ? n : undefined;
 }
+
+// ── Provider-catalogue helpers (selects + format hints from shared/config) ───
+
+/** Catalogue entry for a provider id; undefined for an unknown/legacy id. */
+const providerInfo = (id: string | undefined): ProviderInfo | undefined =>
+  KNOWN_PROVIDERS.find((p) => p.id === id);
+
+/** Natural-language label for a provider id (falls back to the raw id). */
+const providerLabel = (id: string | undefined): string =>
+  providerInfo(id)?.label ?? (id || "(not set)");
+
+/** One-line UI descriptions for the known plugins (bare id for unknown ones). */
+const PLUGIN_SUMMARIES: Record<string, string> = {
+  "llm-core": "talks to the AI service (required for replies)",
+  persona: "the agent's identity / system prompt",
+  history: "conversation memory, persists across restarts",
+  notes: "lets the agent save and read named notes",
+  toolbox: "clock tools — read the time, set its own pace",
+  web: "chat with the agent from your browser",
+};
+const pluginChoice = (id: string, checked: boolean) => ({
+  name: PLUGIN_SUMMARIES[id] ? `${id} — ${PLUGIN_SUMMARIES[id]}` : id,
+  value: id,
+  checked,
+});
+
+/**
+ * Pick a provider TYPE (the wire format) from the catalogue — never free text.
+ * The last entry cancels (returns null); callers keep their current value or
+ * abort their flow.
+ */
+const selectProviderType = (
+  current: string | undefined,
+  cancelLabel: string,
+): Promise<ProviderInfo | null> =>
+  ask(() =>
+    select<ProviderInfo | null>({
+      message: "provider type — the wire format your endpoint speaks",
+      choices: [
+        ...KNOWN_PROVIDERS.map((p) => ({
+          name: `${p.label} — ${p.summary}`,
+          value: p as ProviderInfo | null,
+        })),
+        { name: dim(cancelLabel), value: null },
+      ],
+      default: providerInfo(current),
+      loop: false,
+    }),
+  );
+
+/**
+ * Model id prompt with the provider's format example. Empty means "go back"
+ * (returns "" — the caller keeps its current value or aborts its flow).
+ */
+const askModel = (info: ProviderInfo | undefined, current: string): Promise<string> =>
+  ask(() =>
+    input({
+      message: `model id — as your provider names it (e.g. ${info?.modelExample ?? "gpt-4o"}; leave empty to go back)`,
+      default: current,
+    }),
+  ).then((v) => v.trim());
+
+/** Endpoint URL prompt with the provider's format hint; normalized on entry. */
+const askBaseURL = (
+  info: ProviderInfo | undefined,
+  current: string,
+): Promise<string | undefined> =>
+  ask(() =>
+    input({
+      message: `endpoint URL — ${info?.baseURLHint ?? "leave blank for the provider default"} (e.g. ${info?.baseURLExample ?? "https://api.example.com/v1"})`,
+      default: current,
+    }),
+  ).then(normalizeBaseURL);
+
+/** Capability checkbox limited to what the chosen provider type can serve. */
+const askCapabilities = (
+  info: ProviderInfo,
+  current: Capability[],
+): Promise<Capability[]> =>
+  ask(() =>
+    checkbox<Capability>({
+      message: "used for — what this connection will serve",
+      choices: info.capabilities.map((c) => ({
+        name: CAPABILITY_LABELS[c],
+        value: c,
+        checked: current.includes(c),
+      })),
+      validate: (sel) => (sel.length > 0 ? true : "pick at least one"),
+      loop: false,
+    }),
+  );
+
+/** Modality checkbox limited to what the chosen provider type supports. */
+const askModalities = (
+  kind: "input" | "output",
+  allowed: Modality[],
+  current: Modality[],
+): Promise<Modality[]> =>
+  ask(() =>
+    checkbox<Modality>({
+      message:
+        kind === "input"
+          ? "input types — what the model accepts"
+          : "output types — what the model produces",
+      choices: allowed.map((m) => ({
+        name: MODALITY_LABELS[m],
+        value: m,
+        checked: current.includes(m),
+      })),
+      validate: (sel) => (sel.length > 0 ? true : "pick at least one"),
+      loop: false,
+    }),
+  );
 
 export async function runInteractiveLoop(
   cli: Cli,
@@ -75,7 +221,7 @@ export async function runInteractiveLoop(
       return await op();
     } catch (err) {
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         return fallback;
       }
       throw err;
@@ -96,13 +242,17 @@ export async function runInteractiveLoop(
           name: `${k}: ${JSON.stringify(cfg[k])}`,
           value: `edit:${k}`,
         })),
-        { name: "Add key", value: "add" },
-        { name: "Remove key", value: "remove" },
+        { name: mint("+ Add key"), value: "add" },
+        { name: red("Remove key"), value: "remove" },
         { name: DONE, value: "done" },
       ];
 
       const action = await ask(() =>
-        select({ message: "config", choices, loop: false }),
+        select({
+          message: "plugin settings — per-plugin JSON config, keyed by plugin id",
+          choices,
+          loop: false,
+        }),
       );
 
       if (action === "done") return cfg;
@@ -110,13 +260,10 @@ export async function runInteractiveLoop(
       if (action === "add") {
         const key = (
           await ask(() =>
-            input({
-              message: "new key name",
-              validate: (r) =>
-                r.trim().length > 0 ? true : "key must not be empty",
-            }),
+            input({ message: "new key name (leave empty to go back)" }),
           )
         ).trim();
+        if (key === "") continue;
         const valueRaw = await ask(() =>
           input({ message: `value for "${key}" (JSON)`, default: '""' }),
         );
@@ -183,21 +330,24 @@ export async function runInteractiveLoop(
         select({
           message: `${label} — pick a field`,
           choices: [
-            { name: `intervalMs: ${draft.intervalMs}`, value: "intervalMs" },
             {
-              name: `plugins: [${draft.plugins.join(", ")}]`,
+              name: `Heartbeat interval: ${draft.intervalMs} ms — how often the agent acts unprompted`,
+              value: "intervalMs",
+            },
+            {
+              name: `Plugins to load: [${draft.plugins.join(", ")}]`,
               value: "plugins",
             },
             {
-              name: `privatePlugins: [${(draft.privatePlugins ?? []).join(", ")}]`,
+              name: `Private plugin copies: [${(draft.privatePlugins ?? []).join(", ")}]`,
               value: "privatePlugins",
             },
             {
-              name: `config: ${Object.keys(draft.config ?? {}).length} key(s)`,
+              name: `Plugin settings: ${Object.keys(draft.config ?? {}).length} item(s)`,
               value: "config",
             },
-            { name: "Save & Back", value: "save" },
-            { name: "Discard & Back", value: "discard" },
+            { name: mint("Save & Back"), value: "save" },
+            { name: red("Discard & Back"), value: "discard" },
           ],
           loop: false,
         }),
@@ -209,12 +359,12 @@ export async function runInteractiveLoop(
       if (field === "intervalMs") {
         const raw = await ask(() =>
           input({
-            message: "intervalMs (positive integer)",
+            message: "heartbeat interval in milliseconds (e.g. 30000 = the agent thinks every 30 seconds)",
             default: String(draft.intervalMs),
             validate: (r) =>
               parsePositiveInt(r) !== undefined
                 ? true
-                : "must be a positive integer",
+                : "must be a positive whole number of milliseconds",
           }),
         );
         const n = parsePositiveInt(raw);
@@ -229,12 +379,10 @@ export async function runInteractiveLoop(
         }
         draft.plugins = await ask(() =>
           checkbox({
-            message: "public plugins to load",
-            choices: availablePlugins.map((p) => ({
-              name: p,
-              value: p,
-              checked: draft.plugins.includes(p),
-            })),
+            message: "plugins to load — what this agent can do",
+            choices: availablePlugins.map((p) =>
+              pluginChoice(p, draft.plugins.includes(p)),
+            ),
             loop: false,
           }),
         );
@@ -248,12 +396,11 @@ export async function runInteractiveLoop(
         }
         const picked = await ask(() =>
           checkbox({
-            message: "private plugins (independent copies)",
-            choices: availablePlugins.map((p) => ({
-              name: p,
-              value: p,
-              checked: (draft.privatePlugins ?? []).includes(p),
-            })),
+            message:
+              "private plugin copies — these get their own isolated data under this agent (instead of sharing the public plugin's data)",
+            choices: availablePlugins.map((p) =>
+              pluginChoice(p, (draft.privatePlugins ?? []).includes(p)),
+            ),
             loop: false,
           }),
         );
@@ -286,21 +433,35 @@ export async function runInteractiveLoop(
     const save = await editSettingFields(`Agent "${id}"`, draft, plugins);
     if (save) {
       await guard(() => cli.writeAgent(id, draft), undefined);
-      out(`Saved agent "${id}".`);
+      out(success(`Saved agent "${id}".`));
     }
   }
 
   // ── Pages ──────────────────────────────────────────────────────────────────
   async function landingPage(): Promise<Page> {
     out(KRAKEY_LOGO);
+    // Lead with the guided setup until something exists; afterwards it moves
+    // below the everyday entries. Either way it is just a menu item — skippable.
+    const agents = await guard(() => cli.listAgents(), []);
+    const services = await guard(() => cli.listCommunicators(), []);
+    const fresh = agents.length === 0 || services.length === 0;
+    const wizardEntry = {
+      name: fresh
+        ? `${STAR} Guided setup — connect an AI service and create your first agent`
+        : `${STAR} Guided setup — add another AI service + agent`,
+      value: "wizard" as Page,
+    };
+    const main: Array<{ name: string; value: Page }> = [
+      { name: "Agents — create and edit your agents", value: "agents" },
+      { name: "Default settings — the template new agents copy", value: "default" },
+      { name: "AI services — LLM providers, endpoints, API keys", value: "providers" },
+    ];
     return ask(() =>
       select<Page>({
         message: "OpenKrakey config",
         choices: [
-          { name: "Agents", value: "agents" },
-          { name: "Default setting", value: "default" },
-          { name: "LLM providers", value: "providers" },
-          { name: "Quit", value: "quit" },
+          ...(fresh ? [wizardEntry, ...main] : [...main, wizardEntry]),
+          { name: dim("Quit"), value: "quit" },
         ],
         loop: false,
       }),
@@ -325,40 +486,56 @@ export async function runInteractiveLoop(
 
     if (choice === "\0create") {
       const id = (
-        await ask(() => input({ message: "new agent id", validate: validateId }))
+        await ask(() =>
+          input({
+            message:
+              "agent name — used as its folder under agents/ (letters, digits, . _ -; leave empty to go back)",
+            validate: (r) => (r.trim() === "" ? true : validateId(r)),
+          }),
+        )
       ).trim();
+      if (id === "") return "agents";
       await guard(() => cli.createAgent(id), undefined);
       return "agents";
     }
 
-    // Selected an existing agent id → detail.
-    const action = await ask(() =>
-      select<"edit" | "delete" | "back">({
-        message: `Agent "${choice}"`,
-        choices: [
-          { name: "Edit", value: "edit" },
-          { name: "Delete config", value: "delete" },
-          { name: BACK, value: "back" },
-        ],
-        loop: false,
-      }),
-    );
-
-    if (action === "edit") {
-      await agentEditor(choice);
-    } else if (action === "delete") {
-      const yes = await ask(() =>
-        confirm({
-          message: `Delete config for "${choice}"? (data kept)`,
-          default: false,
+    // Selected an existing agent id → detail. Deleting uses the same two-step
+    // arm-and-confirm as AI services: first ENTER arms, second ENTER deletes,
+    // any other selection disarms.
+    let armedDelete = false;
+    for (;;) {
+      const action = await ask(() =>
+        select<"edit" | "delete" | "back">({
+          message: `Agent "${choice}"`,
+          choices: [
+            { name: "Edit", value: "edit" },
+            {
+              name: armedDelete
+                ? red(bold(`Press ENTER again to DELETE "${choice}" (config only — data kept)`))
+                : red("Delete config"),
+              value: "delete",
+            },
+            { name: BACK, value: "back" },
+          ],
+          default: armedDelete ? "delete" : undefined,
+          loop: false,
         }),
       );
-      if (yes) {
+
+      if (action === "delete") {
+        if (!armedDelete) {
+          armedDelete = true;
+          continue;
+        }
         await guard(() => cli.removeAgent(choice), undefined);
-        out(`Removed config for "${choice}".`);
+        out(success(`Removed config for "${choice}".`));
+        return "agents";
       }
+      if (action === "edit") {
+        await agentEditor(choice);
+      }
+      return "agents";
     }
-    return "agents";
   }
 
   async function defaultPage(): Promise<Page> {
@@ -369,11 +546,11 @@ export async function runInteractiveLoop(
       setting = await cli.readDefault();
     } catch (err) {
       if (err instanceof CliParseError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         setting = null;
       } else {
         throw err;
@@ -404,12 +581,12 @@ export async function runInteractiveLoop(
     const save = await editSettingFields("Default setting", draft, plugins);
     if (save) {
       await guard(() => cli.writeDefault(draft), undefined);
-      out("Saved default setting.");
+      out(success("Saved default settings."));
     }
     return "landing";
   }
 
-  // ── Providers (LLM communicators) ──────────────────────────────────────────
+  // ── AI services (LLM communicators) ─────────────────────────────────────────
   /** Edit one communicator def on `cfg` under `name`; returns true on Save. */
   async function communicatorEditor(
     cfg: LLMConfig,
@@ -417,48 +594,124 @@ export async function runInteractiveLoop(
     isNew: boolean,
   ): Promise<boolean> {
     // Seed the draft from the full existing def so fields we never edit
-    // (capabilities/input/output/temperature/maxTokens/…) survive a Save.
+    // (temperature/maxTokens/…) survive a Save.
     const existing: CommunicatorDef = cfg.communicators[name] ?? {
       provider: "",
       model: "",
     };
+
+    // The provider TYPE drives everything else (allowed capabilities, URL and
+    // model format hints) — for a new connection, pick it first; cancelling
+    // there drops the whole edit.
+    let info = providerInfo(existing.provider);
+    if (isNew || info === undefined) {
+      const picked = await selectProviderType(existing.provider, "← Cancel");
+      if (picked === null) return false;
+      info = picked;
+    }
+
     const draft = {
-      provider: existing.provider,
+      provider: info.id,
       model: existing.model,
       baseURL: existing.baseURL,
       apiKey: existing.apiKey,
+      capabilities: (existing.capabilities ?? info.defaultCapabilities) as Capability[],
+      input: (existing.input ?? ["text"]) as Modality[],
+      output: (existing.output ?? ["text"]) as Modality[],
     };
     // A blank baseURL only REMOVES the field when the user explicitly cleared it;
     // an untouched baseURL is preserved as-is.
     let baseURLCleared = false;
+    // Deleting is a two-step arm-and-confirm: the first ENTER arms (the entry
+    // turns into an explicit warning and keeps the cursor), the second ENTER
+    // deletes. Picking anything else disarms.
+    let armedDelete = false;
+
+    /** Keep selections legal after a provider-type change. */
+    const clampToProvider = () => {
+      const p = info!;
+      draft.capabilities = draft.capabilities.filter((c) => p.capabilities.includes(c));
+      if (draft.capabilities.length === 0) draft.capabilities = [...p.defaultCapabilities];
+      draft.input = draft.input.filter((m) => p.inputs.includes(m));
+      if (draft.input.length === 0) draft.input = ["text"];
+      draft.output = draft.output.filter((m) => p.outputs.includes(m));
+      if (draft.output.length === 0) draft.output = ["text"];
+    };
+    clampToProvider();
 
     for (;;) {
       const maskedKey =
-        draft.apiKey === undefined || draft.apiKey === "" ? "(unset)" : "***";
+        draft.apiKey === undefined || draft.apiKey === "" ? "(not set)" : "***";
       const field = await ask(() =>
         select({
-          message: isNew ? `New provider "${name}"` : `Provider "${name}"`,
+          message: isNew ? `New AI service "${name}"` : `AI service "${name}"`,
           choices: [
-            { name: `provider: ${draft.provider}`, value: "provider" },
-            { name: `model: ${draft.model}`, value: "model" },
-            { name: `baseURL: ${draft.baseURL ?? "(none)"}`, value: "baseURL" },
-            { name: `apiKey: ${maskedKey}`, value: "apiKey" },
-            { name: "Save", value: "save" },
+            { name: `Provider type: ${providerLabel(draft.provider)}`, value: "provider" },
+            { name: `Model: ${draft.model || "(not set)"}`, value: "model" },
+            {
+              name: `Endpoint URL: ${draft.baseURL ?? "(provider default)"}`,
+              value: "baseURL",
+            },
+            { name: `API key: ${maskedKey}`, value: "apiKey" },
+            {
+              name: `Used for: ${draft.capabilities.map((c) => CAPABILITY_LABELS[c]).join(", ")}`,
+              value: "capabilities",
+            },
+            {
+              name: `Input types: ${draft.input.map((m) => MODALITY_LABELS[m]).join(", ")}`,
+              value: "input",
+            },
+            {
+              name: `Output types: ${draft.output.map((m) => MODALITY_LABELS[m]).join(", ")}`,
+              value: "output",
+            },
+            { name: mint("Save"), value: "save" },
             // Delete only applies to an EXISTING communicator, not a new one.
-            ...(isNew ? [] : [{ name: "Delete", value: "delete" }]),
-            { name: "Cancel", value: "cancel" },
+            ...(isNew
+              ? []
+              : [
+                  {
+                    name: armedDelete
+                      ? red(bold(`Press ENTER again to DELETE "${name}"`))
+                      : red("Delete this service"),
+                    value: "delete",
+                  },
+                ]),
+            { name: dim("Cancel"), value: "cancel" },
           ],
+          // While armed, keep the cursor ON the delete entry so the second
+          // ENTER lands there — that is the whole double-enter contract.
+          default: armedDelete ? "delete" : undefined,
           loop: false,
         }),
       );
 
+      if (field === "delete") {
+        if (!armedDelete) {
+          armedDelete = true;
+          continue;
+        }
+        delete cfg.communicators[name];
+        if (cfg.default === name) delete cfg.default;
+        return true;
+      }
+      // Any other selection disarms a pending delete.
+      armedDelete = false;
+
       if (field === "cancel") return false;
 
       if (field === "save") {
+        if (draft.model.trim() === "") {
+          out("enter a model id before saving");
+          continue;
+        }
         const def: CommunicatorDef = {
           ...existing,
           provider: draft.provider,
           model: draft.model,
+          capabilities: [...draft.capabilities],
+          input: [...draft.input],
+          output: [...draft.output],
         };
         if (draft.baseURL) def.baseURL = draft.baseURL;
         else if (baseURLCleared) delete def.baseURL;
@@ -467,37 +720,34 @@ export async function runInteractiveLoop(
         return true;
       }
 
-      if (field === "delete") {
-        delete cfg.communicators[name];
-        if (cfg.default === name) delete cfg.default;
-        return true;
-      }
-
       if (field === "provider") {
-        draft.provider = (
-          await ask(() =>
-            input({ message: "provider id", default: draft.provider }),
-          )
-        ).trim();
+        const picked = await selectProviderType(draft.provider, "← Keep current type");
+        if (picked !== null) {
+          info = picked;
+          draft.provider = info.id;
+          clampToProvider();
+        }
       } else if (field === "model") {
-        draft.model = (
-          await ask(() => input({ message: "model", default: draft.model }))
-        ).trim();
+        const m = await askModel(info, draft.model);
+        if (m !== "") draft.model = m; // empty = go back, keep the current id
       } else if (field === "baseURL") {
-        const v = (
-          await ask(() =>
-            input({
-              message: "baseURL (blank for none)",
-              default: draft.baseURL ?? "",
-            }),
-          )
-        ).trim();
-        draft.baseURL = v === "" ? undefined : v;
-        baseURLCleared = v === "";
+        const v = await askBaseURL(info, draft.baseURL ?? "");
+        draft.baseURL = v;
+        baseURLCleared = v === undefined;
+      } else if (field === "capabilities") {
+        draft.capabilities = await askCapabilities(info, draft.capabilities);
+      } else if (field === "input") {
+        draft.input = await askModalities("input", info.inputs, draft.input);
+      } else if (field === "output") {
+        draft.output = await askModalities("output", info.outputs, draft.output);
       } else {
-        // apiKey — masked entry; never pre-fill; blank keeps the current.
+        // apiKey — masked entry; never pre-fill; blank keeps the current value.
         const v = await ask(() =>
-          password({ message: "apiKey (blank to keep current)", mask: true }),
+          password({
+            message:
+              "API key — stored locally in config/llm.json (gitignored); use ${ENV_VAR} to reference an environment variable; blank keeps the current value",
+            mask: true,
+          }),
         );
         if (v.trim() !== "") draft.apiKey = v;
       }
@@ -512,11 +762,11 @@ export async function runInteractiveLoop(
       cfg = await cli.readLLMConfig();
     } catch (err) {
       if (err instanceof CliParseError) {
-        out(err.message);
+        out(failure(err.message));
         return "landing";
       }
       if (err instanceof CliError) {
-        out(err.message);
+        out(failure(err.message));
         cfg = { communicators: {} };
       } else {
         throw err;
@@ -526,10 +776,16 @@ export async function runInteractiveLoop(
 
     const choice = await ask(() =>
       select<string>({
-        message: "LLM providers",
+        message: "AI services — the LLM connections your agents can use",
         choices: [
-          ...names.map((n) => ({ name: n, value: n })),
-          { name: ADD, value: "\0add" },
+          ...names.map((n) => {
+            const def = cfg.communicators[n];
+            return {
+              name: `${n} — ${providerLabel(def?.provider)} · ${def?.model || "(no model)"}`,
+              value: n,
+            };
+          }),
+          { name: ADD_SERVICE, value: "\0add" },
           { name: BACK, value: "\0back" },
         ],
         loop: false,
@@ -544,16 +800,18 @@ export async function runInteractiveLoop(
       name = (
         await ask(() =>
           input({
-            message: "communicator name",
+            message:
+              "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local; leave empty to go back)",
             validate: (r) => {
               const v = r.trim();
-              if (v.length === 0) return "name must not be empty";
-              if (cfg.communicators[v]) return "name already exists";
+              if (v.length === 0) return true; // empty = go back
+              if (cfg.communicators[v]) return `"${v}" already exists`;
               return true;
             },
           }),
         )
       ).trim();
+      if (name === "") return "providers";
     } else {
       name = choice;
     }
@@ -561,9 +819,183 @@ export async function runInteractiveLoop(
     const changed = await communicatorEditor(cfg, name, isNew);
     if (changed) {
       await guard(() => cli.writeLLMConfig(cfg), undefined);
-      out(`Saved providers.`);
+      out(success("Saved AI services."));
     }
     return "providers";
+  }
+
+  // ── Guided setup ─────────────────────────────────────────────────────────
+  /**
+   * One straight line from nothing to a talking agent: provider type →
+   * connection name → model → endpoint → key, then agent name → persona.
+   * Skippable by design (it is just a landing menu entry; Ctrl+C leaves like
+   * everywhere else). Every prompt states what the field is for and the
+   * expected format — no other hand-holding.
+   */
+  async function wizardPage(): Promise<Page> {
+    // Read the catalogue up front; a corrupt llm.json aborts (never overwritten).
+    let cfg: LLMConfig;
+    try {
+      cfg = await cli.readLLMConfig();
+    } catch (err) {
+      if (err instanceof CliError) {
+        out(failure(err.message));
+        return "landing";
+      }
+      throw err;
+    }
+
+    out("");
+    out(
+      heading(
+        "Guided setup",
+        "Connect an AI service, then create an agent that uses it. Ctrl+C drops you back to the menu at any point.",
+      ),
+    );
+    out(step("Step 1 of 2 — the AI service"));
+
+    // 1. The AI service.
+    const info = await selectProviderType(undefined, "← Cancel setup");
+    if (info === null) return "landing";
+    const connName = (
+      await ask(() =>
+        input({
+          message:
+            "connection name — a short name you'll refer to this service by (e.g. claude, gpt, local; leave empty to cancel)",
+          validate: (r) => {
+            const v = r.trim();
+            if (v.length === 0) return true; // empty = cancel setup
+            if (cfg.communicators[v]) return `"${v}" already exists`;
+            return true;
+          },
+        }),
+      )
+    ).trim();
+    if (connName === "") {
+      out(dim("(cancelled — nothing saved)"));
+      return "landing";
+    }
+    const model = await askModel(info, "");
+    if (model === "") {
+      out(dim("(cancelled — nothing saved)"));
+      return "landing";
+    }
+    const baseURL = await askBaseURL(info, "");
+    const apiKey = await ask(() =>
+      password({
+        message:
+          "API key — stored locally in config/llm.json (gitignored); use ${ENV_VAR} to reference an environment variable",
+        mask: true,
+        validate: (r) =>
+          r.trim().length > 0
+            ? true
+            : "a key is required — for keyless local servers enter anything (e.g. none)",
+      }),
+    );
+
+    const def: CommunicatorDef = {
+      provider: info.id,
+      model,
+      apiKey,
+      capabilities: [...info.defaultCapabilities],
+    };
+    if (baseURL) def.baseURL = baseURL;
+    cfg.communicators[connName] = def;
+    const wrote = await guard(async () => {
+      await cli.writeLLMConfig(cfg);
+      return true;
+    }, false);
+    if (!wrote) return "landing";
+    out(success(`Saved AI service "${connName}".`));
+
+    // 2. The agent.
+    out(step("Step 2 of 2 — your agent"));
+    const wantAgent = await ask(() =>
+      confirm({ message: "Create an agent that uses it now?", default: true }),
+    );
+    if (!wantAgent) return "landing";
+
+    const agentId = (
+      await ask(() =>
+        input({
+          message:
+            "agent name — used as its folder under agents/ (letters, digits, . _ -; e.g. krakey; leave empty to skip)",
+          validate: (r) => (r.trim() === "" ? true : validateId(r)),
+        }),
+      )
+    ).trim();
+    if (agentId === "") {
+      out(dim(`(agent creation skipped — the AI service "${connName}" was saved)`));
+      return "landing";
+    }
+
+    // createAgent copies the Default Setting; seed a sensible one if absent
+    // (every available public plugin, 30 s heartbeat). A corrupt default aborts.
+    try {
+      await cli.readDefault();
+    } catch (err) {
+      if (err instanceof CliParseError) {
+        out(failure(err.message));
+        return "landing";
+      }
+      if (err instanceof CliError) {
+        const available = await guard(() => cli.listAvailablePlugins(), []);
+        // Data-carrying plugins default to independent copies so each agent
+        // gets its own memory/notes (shared code, private data — R6).
+        const privateByDefault = available.filter((p) => p === "history" || p === "notes");
+        await guard(async () => {
+          await cli.writeDefault({
+            intervalMs: 30000,
+            plugins: available,
+            ...(privateByDefault.length > 0 ? { privatePlugins: privateByDefault } : {}),
+            config: {},
+          });
+        }, undefined);
+      } else {
+        throw err;
+      }
+    }
+
+    const created = await guard(async () => {
+      await cli.createAgent(agentId);
+      return true;
+    }, false);
+    if (!created) return "landing";
+
+    const persona = (
+      await ask(() =>
+        input({
+          message: "persona — the agent's system prompt (how it should behave; empty keeps the default)",
+          default: "You are Krakey, an autonomous agent. Be concise and helpful.",
+        }),
+      )
+    ).trim();
+
+    // Point the new agent at the connection we just made, and set its persona
+    // (an emptied-out persona keeps the plugin's default).
+    await guard(async () => {
+      const agentDef = await cli.readAgent(agentId);
+      const config = { ...(agentDef.config ?? {}) };
+      config["llm-core"] = {
+        ...((config["llm-core"] as Record<string, unknown>) ?? {}),
+        communicator: connName,
+      };
+      if (persona !== "") {
+        config["persona"] = {
+          ...((config["persona"] as Record<string, unknown>) ?? {}),
+          text: persona,
+        };
+      }
+      await cli.writeAgent(agentId, { ...agentDef, config });
+    }, undefined);
+
+    out("");
+    out(
+      success(
+        "All set — run " + bold("npm start") + ' and talk to "' + agentId + '" in this terminal.',
+      ),
+    );
+    return "landing";
   }
 
   // ── Loop ───────────────────────────────────────────────────────────────────
@@ -577,21 +1009,30 @@ export async function runInteractiveLoop(
         return defaultPage();
       case "providers":
         return providersPage();
+      case "wizard":
+        return wizardPage();
       case "quit":
         return Promise.resolve("quit");
     }
   };
 
   let page: Page = initialPage;
-  try {
-    while (page !== "quit") {
+  while (page !== "quit") {
+    try {
       page = await run(page);
+    } catch (err) {
+      if (err instanceof QuitSignal) {
+        // Ctrl+C: at the main menu it quits; anywhere else it drops the
+        // current action (unsaved edits abandoned) back to the main menu.
+        if (page === "landing") {
+          out("");
+          return;
+        }
+        out(dim("(cancelled — nothing saved)"));
+        page = "landing";
+        continue;
+      }
+      throw err;
     }
-  } catch (err) {
-    if (err instanceof QuitSignal) {
-      out("");
-      return;
-    }
-    throw err;
   }
 }

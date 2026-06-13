@@ -41,3 +41,10 @@ pending
 - 2026-06-07: node created (skeleton, post-rewrite).
 - 2026-06-07: redesigned — interactive @inquirer/prompts TUI (landing + deep-links + Providers page) instead of slash commands.
 - 2026-06-11: bug-fix wave — communicator editor preserves unedited fields (capabilities/input/output/temperature/maxTokens survive an edit); new CliParseError distinguishes corrupt from absent so providers/default pages abort instead of overwriting a corrupt (key-bearing) file; pure-core agent-id validation blocks ./../separators before any fs; createAgent spreads {...setting, id} so the requested id wins; deleting the default communicator clears the dangling pointer; apiKey entry uses a masked password prompt; usage errors go to stderr.
+- 2026-06-12: usability rework — guided setup wizard (skippable); provider type/capabilities/modalities are selects from shared KNOWN_PROVIDERS (5x4 gateway cross-check test pins the table to reality); free fields state purpose + format + example; normalizeBaseURL strips trailing slashes; natural-language labels everywhere.
+- 2026-06-12: brand theming — theme.ts (mint #2FD69C palette + pre-themed prompt wrappers, star prefix); styled guided-setup headings/steps/success lines; soft-red error lines; emoji replaced with the star glyph; plain-text degrade on NO_COLOR/non-TTY.
+- 2026-06-12: semantic action colors — mint affirmative / red destructive / dim navigation across every select menu.
+- 2026-06-12: two-step arm-and-confirm delete for AI services (double-ENTER; any other selection disarms).
+- 2026-06-12: drop-anywhere exits — Ctrl+C abandons the current action to the main menu (quits only at the menu); explicit cancel entry on the provider-type select; every menu has an exit entry.
+- 2026-06-12: empty input = go back on all text fields (hints inline); agent delete unified to the double-ENTER arm pattern.
+- 2026-06-13: brand primitives moved to shared/theme (boot's startup report shares them); cli theme re-exports them — behavior neutral.

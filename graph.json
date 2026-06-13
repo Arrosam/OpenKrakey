@@ -8,8 +8,29 @@
   "zones": {
     "core": {
       "description": "The whole framework — per-Agent runtime modules + their L1 contracts + shared modules + the two global modules (boot, cli) + the LLM communication gateway.",
-      "nodes": ["clock", "event-system", "orchestrator", "loader", "agent_instance", "boot", "cli", "llm-gateway"],
+      "nodes": [
+        "clock",
+        "event-system",
+        "orchestrator",
+        "loader",
+        "agent_instance",
+        "boot",
+        "cli",
+        "llm-gateway"
+      ],
       "overview": "overviews/zones/core.md"
+    },
+    "plugins": {
+      "description": "Phase-1 MVP plugins under public_plugin/ — the essential set that makes a bare agent converse, remember, and use tools, exercising every core function. Each implements the L1 plugin contract and talks ONLY via the per-Agent event-system.",
+      "nodes": [
+        "llm-core",
+        "persona",
+        "history",
+        "web",
+        "notes",
+        "toolbox"
+      ],
+      "overview": "overviews/zones/plugins.md"
     }
   },
   "nodes": {
@@ -18,7 +39,9 @@
       "path": "packages/clock",
       "description": "Per-Agent dumb timer: countdown + activate; rhythm controllable.",
       "depends_on_contracts": [],
-      "implements_contracts": ["clock"],
+      "implements_contracts": [
+        "clock"
+      ],
       "status": "done",
       "overview": "overviews/nodes/clock.md"
     },
@@ -27,7 +50,9 @@
       "path": "packages/event-system",
       "description": "Per-Agent independent central bus: eventbus + actionbus; clock/loader/orchestrator/plugins all connect.",
       "depends_on_contracts": [],
-      "implements_contracts": ["event-system"],
+      "implements_contracts": [
+        "event-system"
+      ],
       "status": "done",
       "overview": "overviews/nodes/event-system.md"
     },
@@ -35,17 +60,32 @@
       "zone": "core",
       "path": "packages/orchestrator",
       "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather→compose→llm.request; dispatch tool calls from llm.return.",
-      "depends_on_contracts": ["event-system", "clock", "context", "llm"],
-      "implements_contracts": ["orchestrator"],
+      "depends_on_contracts": [
+        "event-system",
+        "clock",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [
+        "orchestrator"
+      ],
       "status": "done",
       "overview": "overviews/nodes/orchestrator.md"
     },
     "loader": {
       "zone": "core",
       "path": "packages/loader",
-      "description": "Per-Agent plugin lifecycle: copy independents, load private(override)+public, set dataDir, inject llm library, register (setup) into event-system, teardown.",
-      "depends_on_contracts": ["plugin", "event-system", "context", "orchestrator", "llm"],
-      "implements_contracts": ["loader"],
+      "description": "Per-Agent plugin lifecycle: load private(override)+public (independents are no-copy: code from public_plugin/, dataDir redirected agent-private), build v1.1 PluginContext (leveled log + print + log.entry push), inject llm library, register (setup) into event-system, teardown.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "orchestrator",
+        "llm"
+      ],
+      "implements_contracts": [
+        "loader"
+      ],
       "status": "done",
       "overview": "overviews/nodes/loader.md"
     },
@@ -53,8 +93,17 @@
       "zone": "core",
       "path": "packages/agent_instance",
       "description": "Wraps ONE Agent: holds+wires clock+event-system+orchestrator+loader; receives the global llm library; start()->loader loads->orchestrator conducts; stop().",
-      "depends_on_contracts": ["clock", "event-system", "orchestrator", "loader", "agent", "llm"],
-      "implements_contracts": ["agent"],
+      "depends_on_contracts": [
+        "clock",
+        "event-system",
+        "orchestrator",
+        "loader",
+        "agent",
+        "llm"
+      ],
+      "implements_contracts": [
+        "agent"
+      ],
       "status": "done",
       "overview": "overviews/nodes/agent_instance.md"
     },
@@ -62,7 +111,10 @@
       "zone": "core",
       "path": "packages/boot",
       "description": "Global startup ONLY: read each agent's config + config/llm.json, build the global llm library, build + launch each agent_instance. Composition root.",
-      "depends_on_contracts": ["agent", "llm"],
+      "depends_on_contracts": [
+        "agent",
+        "llm"
+      ],
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/boot.md"
@@ -71,7 +123,9 @@
       "zone": "core",
       "path": "packages/cli",
       "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links.",
-      "depends_on_contracts": ["agent"],
+      "depends_on_contracts": [
+        "agent"
+      ],
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/cli.md"
@@ -80,74 +134,211 @@
       "zone": "core",
       "path": "packages/llm-gateway",
       "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Industry-standard infra, solidified into core.",
-      "depends_on_contracts": ["llm"],
-      "implements_contracts": ["llm"],
+      "depends_on_contracts": [
+        "llm"
+      ],
+      "implements_contracts": [
+        "llm"
+      ],
       "status": "done",
       "overview": "overviews/nodes/llm-gateway.md"
+    },
+    "llm-core": {
+      "zone": "plugins",
+      "path": "public_plugin/llm-core",
+      "description": "The LLM round-trip plugin: llm.request -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/llm-core.md"
+    },
+    "persona": {
+      "zone": "plugins",
+      "path": "public_plugin/persona",
+      "description": "Stable identity context block (priority 10000+, stable-prefix convention) rendered from the agent's config.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/persona.md"
+    },
+    "history": {
+      "zone": "plugins",
+      "path": "public_plugin/history",
+      "description": "Conversation memory: folds input.message / llm.return / tool.result into a bounded low-priority context block; persists JSONL under dataDir (survives restarts; public=shared, private=isolated).",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/history.md"
+    },
+    "web": {
+      "zone": "plugins",
+      "path": "public_plugin/web",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams that agent's output.message; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/web.md"
+    },
+    "notes": {
+      "zone": "plugins",
+      "path": "public_plugin/notes",
+      "description": "Persistent notes store (the roadmap 'library' demo made useful): note.save/note.read/note.list actions over dataDir files, registered as LLM tools; shared when public, agent-isolated when independent.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/notes.md"
+    },
+    "toolbox": {
+      "zone": "plugins",
+      "path": "public_plugin/toolbox",
+      "description": "Basic tools: time.now action + ToolDefs exposing the orchestrator's clock.set_interval / clock.set_default_interval rhythm actions so the LLM can self-pace.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/toolbox.md"
     }
   },
   "contracts": {
     "clock": {
       "path": "contracts/clock",
-      "connects": ["clock", "orchestrator", "agent_instance"],
+      "connects": [
+        "clock",
+        "orchestrator",
+        "agent_instance"
+      ],
       "test": "tests/clock.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/clock.md"
     },
     "event-system": {
       "path": "contracts/event-system",
-      "connects": ["event-system", "orchestrator", "loader", "agent_instance"],
+      "connects": [
+        "event-system",
+        "orchestrator",
+        "loader",
+        "agent_instance"
+      ],
       "test": "tests/event-system.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/event-system.md"
     },
     "context": {
       "path": "contracts/context",
-      "connects": ["orchestrator", "loader"],
+      "connects": [
+        "orchestrator",
+        "loader"
+      ],
       "test": "tests/context.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/context.md"
     },
     "plugin": {
       "path": "contracts/plugin",
-      "connects": ["loader", "orchestrator"],
+      "connects": [
+        "loader",
+        "orchestrator"
+      ],
       "test": "tests/plugin.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/plugin.md"
     },
     "orchestrator": {
       "path": "contracts/orchestrator",
-      "connects": ["orchestrator", "agent_instance", "loader"],
+      "connects": [
+        "orchestrator",
+        "agent_instance",
+        "loader"
+      ],
       "test": "tests/orchestrator.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/orchestrator.md"
     },
     "agent": {
       "path": "contracts/agent",
-      "connects": ["agent_instance", "boot", "cli"],
+      "connects": [
+        "agent_instance",
+        "boot",
+        "cli"
+      ],
       "test": "tests/agent.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/agent.md"
     },
     "loader": {
       "path": "contracts/loader",
-      "connects": ["loader", "agent_instance"],
+      "connects": [
+        "loader",
+        "agent_instance"
+      ],
       "test": "tests/loader.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/loader.md"
     },
     "llm": {
       "path": "contracts/llm",
-      "connects": ["llm-gateway", "orchestrator", "loader", "agent_instance", "boot"],
+      "connects": [
+        "llm-gateway",
+        "orchestrator",
+        "loader",
+        "agent_instance",
+        "boot"
+      ],
       "test": "tests/llm.test.ts",
       "status": "locked",
       "overview": "overviews/contracts/llm.md"
     }
   },
   "shared": {
-    "actions": { "path": "shared/actions", "description": "Well-known action/event name constants.", "status": "done" },
-    "errors": { "path": "shared/errors", "description": "Common error types.", "status": "done" },
-    "logging": { "path": "shared/logging", "description": "Minimal logger interface + console impl.", "status": "done" },
-    "config": { "path": "shared/config", "description": "OpenKrakeyConfig / DefaultAgentSetting / LLMConfig types + path constants.", "status": "done" }
+    "actions": {
+      "path": "shared/actions",
+      "description": "Well-known action/event name constants.",
+      "status": "done"
+    },
+    "errors": {
+      "path": "shared/errors",
+      "description": "Common error types.",
+      "status": "done"
+    },
+    "logging": {
+      "path": "shared/logging",
+      "description": "Minimal logger interface + console impl.",
+      "status": "done"
+    },
+    "config": {
+      "path": "shared/config",
+      "description": "OpenKrakeyConfig / DefaultAgentSetting / LLMConfig types + path constants.",
+      "status": "done"
+    },
+    "theme": {
+      "path": "shared/theme",
+      "description": "Krakey brand primitives (mint/dim/bold/red painters, ✦ glyph, ✔/✖ verdict lines) shared by every console surface (cli, boot startup report); degrades plain on non-TTY/NO_COLOR.",
+      "status": "done"
+    }
   }
 }

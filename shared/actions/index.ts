@@ -37,6 +37,7 @@ export const Events = {
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
   TOOL_RESULT: "tool.result",
+  LOG: "log.entry",
 } as const;
 
 export type ActionName = (typeof Actions)[keyof typeof Actions];
@@ -75,7 +76,14 @@ export interface EventPayloads {
   "llm.return": Reply<LLMResponse>;
   "input.message": Notify<{ text: string; from?: string; channel?: string; meta?: Record<string, unknown> }>;
   "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
+  /** Emitted by the orchestrator as each dispatched tool call settles (id = ToolCall id). */
   "tool.result": Reply<unknown> & { name: string };
+  /**
+   * A plugin console line mirrored onto the bus by the loader-built ctx:
+   * ctx.log.* carries its level; ctx.print carries level "print" (the plugin's
+   * clean user-facing line — during setup, its starting message).
+   */
+  "log.entry": Notify<{ level: "info" | "warn" | "error" | "print"; pluginId: string; text: string }>;
 }
 
 // Compile-time guard: every Events value has a payload entry and vice-versa.

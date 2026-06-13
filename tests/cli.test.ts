@@ -28,6 +28,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as cliModule from "../packages/cli/src";
+import { KNOWN_PROVIDERS, CAPABILITY_LABELS, MODALITY_LABELS } from "../shared/config";
+import { createCommunicatorLibrary } from "../packages/llm-gateway/src";
 const { createCli, CliError } = cliModule;
 /**
  * `CliParseError` is a CONTRACT ADDITION not yet implemented. We resolve it at
@@ -861,4 +863,113 @@ test('createAgent: a stray default "id" does not leak into a SECOND created agen
   await cli.createAgent("bob");
   assert.equal(rawAgentConfig("alice").id, "alice");
   assert.equal(rawAgentConfig("bob").id, "bob", "each created agent gets ITS OWN requested id");
+});
+
+// ===========================================================================
+// 15. Provider catalogue (shared/config KNOWN_PROVIDERS) — the UI's drift-free
+//     source for selects: ids, natural-language labels, capability/modality
+//     vocab, and format guidance for every free field.
+// ===========================================================================
+
+const ALL_CAPS = ["chat", "embed", "rerank", "ocr"] as const;
+const ALL_MODALITIES = ["text", "image", "audio", "video", "document"] as const;
+
+test("KNOWN_PROVIDERS: exactly the five gateway adapter ids, no duplicates", () => {
+  const ids = KNOWN_PROVIDERS.map((p) => p.id);
+  assert.deepEqual(
+    [...ids].sort(),
+    ["anthropic", "cohere", "jina", "openai-completion", "openai-responses"],
+    "the catalogue must list every adapter the gateway accepts — and nothing else",
+  );
+  assert.equal(new Set(ids).size, ids.length, "no duplicate provider ids");
+});
+
+test("KNOWN_PROVIDERS: every entry carries complete, natural-language UI guidance", () => {
+  for (const p of KNOWN_PROVIDERS) {
+    for (const field of ["label", "summary", "baseURLHint", "baseURLExample", "modelExample"] as const) {
+      const v = (p as any)[field];
+      assert.equal(typeof v, "string", `${p.id}.${field} must be a string`);
+      assert.ok(v.trim().length > 0, `${p.id}.${field} must be non-empty`);
+    }
+    assert.notEqual(p.label, p.id, `${p.id}: label must be natural language, not the raw id`);
+    assert.ok(p.capabilities.length > 0, `${p.id}: at least one capability`);
+    for (const c of p.capabilities) {
+      assert.ok((ALL_CAPS as readonly string[]).includes(c), `${p.id}: unknown capability '${c}'`);
+    }
+    assert.ok(p.defaultCapabilities.length > 0, `${p.id}: at least one default capability`);
+    for (const c of p.defaultCapabilities) {
+      assert.ok(p.capabilities.includes(c), `${p.id}: default capability '${c}' not in capabilities`);
+    }
+    assert.ok(p.inputs.length > 0, `${p.id}: at least one input modality`);
+    for (const m of p.inputs) {
+      assert.ok((ALL_MODALITIES as readonly string[]).includes(m), `${p.id}: unknown input '${m}'`);
+    }
+    assert.ok(p.outputs.length > 0, `${p.id}: at least one output modality`);
+    for (const m of p.outputs) {
+      assert.ok((ALL_MODALITIES as readonly string[]).includes(m), `${p.id}: unknown output '${m}'`);
+    }
+  }
+});
+
+test("capability/modality label maps: a natural-language label for every value", () => {
+  for (const c of ALL_CAPS) {
+    const label = CAPABILITY_LABELS[c];
+    assert.equal(typeof label, "string", `missing capability label: ${c}`);
+    assert.ok(label.trim().length > 0, `empty capability label: ${c}`);
+    assert.notEqual(label, c, `capability label for '${c}' must be natural language, not the key`);
+  }
+  for (const m of ALL_MODALITIES) {
+    const label = MODALITY_LABELS[m];
+    assert.equal(typeof label, "string", `missing modality label: ${m}`);
+    assert.ok(label.trim().length > 0, `empty modality label: ${m}`);
+    assert.notEqual(label, m, `modality label for '${m}' must be natural language, not the key`);
+  }
+});
+
+test("KNOWN_PROVIDERS × gateway cross-check: the table offers exactly what the gateway accepts (full 5×4 matrix, both directions)", () => {
+  for (const p of KNOWN_PROVIDERS) {
+    for (const cap of ALL_CAPS) {
+      const lib = createCommunicatorLibrary(
+        { communicators: { t: { provider: p.id, model: "m", apiKey: "k", capabilities: [cap] } } },
+        { onError: () => {} },
+      );
+      const tableSays = p.capabilities.includes(cap);
+      assert.equal(
+        lib.has("t"),
+        tableSays,
+        `${p.id} + ${cap}: catalogue says ${tableSays ? "supported" : "unsupported"} but the gateway disagrees — UI choices have drifted from reality`,
+      );
+    }
+  }
+});
+
+// ===========================================================================
+// 16. normalizeBaseURL — the pure URL cleanup the providers UI applies on save
+//     (kills the trailing-slash → `//chat/completions` failure class).
+//     Resolved defensively: red on a missing export, never an import crash.
+// ===========================================================================
+
+const normalizeBaseURL: any = (cliModule as any).normalizeBaseURL;
+
+test("normalizeBaseURL: exported as a function from the cli core", () => {
+  assert.equal(typeof normalizeBaseURL, "function", "normalizeBaseURL not implemented yet");
+});
+
+test("normalizeBaseURL: strips one or many trailing slashes", () => {
+  assert.equal(typeof normalizeBaseURL, "function", "normalizeBaseURL not implemented yet");
+  assert.equal(normalizeBaseURL("http://x:1/"), "http://x:1");
+  assert.equal(normalizeBaseURL("http://x:1///"), "http://x:1");
+});
+
+test("normalizeBaseURL: trims surrounding whitespace, preserves the path", () => {
+  assert.equal(typeof normalizeBaseURL, "function", "normalizeBaseURL not implemented yet");
+  assert.equal(normalizeBaseURL("  https://a/v1  "), "https://a/v1");
+  assert.equal(normalizeBaseURL("https://a/v1"), "https://a/v1", "an already-clean URL passes through unchanged");
+});
+
+test("normalizeBaseURL: empty / whitespace-only / slash-only input means 'no override' (undefined)", () => {
+  assert.equal(typeof normalizeBaseURL, "function", "normalizeBaseURL not implemented yet");
+  assert.equal(normalizeBaseURL(""), undefined);
+  assert.equal(normalizeBaseURL("   "), undefined);
+  assert.equal(normalizeBaseURL("/"), undefined);
 });

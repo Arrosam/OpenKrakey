@@ -77,3 +77,115 @@ export const agentPaths = (agentsDir: string, id: string) => ({
   config: `${agentsDir}/${id}/config.json`,
   pluginsDir: `${agentsDir}/${id}/plugins`,
 });
+
+// ---------------------------------------------------------------------------
+// Provider catalogue — UI-facing knowledge about the gateway's adapters.
+// The cli renders selects/hints from this table so a config can never name a
+// provider type or capability the gateway would reject; tests cross-check it
+// against the gateway both ways.
+// ---------------------------------------------------------------------------
+
+/** UI-facing description of one gateway adapter (a valid CommunicatorDef.provider). */
+export interface ProviderInfo {
+  /** The adapter id stored in CommunicatorDef.provider. */
+  id: string;
+  /** Natural-language name shown in UIs. */
+  label: string;
+  /** One-line description of what this provider type is for. */
+  summary: string;
+  /** Capabilities this adapter can serve (the only ones selectable in UIs). */
+  capabilities: Capability[];
+  /** Pre-selected capabilities for a freshly created communicator. */
+  defaultCapabilities: Capability[];
+  /** Input modalities models on this provider may accept (selectable in UIs). */
+  inputs: Modality[];
+  /** Output modalities models on this provider may produce (selectable in UIs). */
+  outputs: Modality[];
+  /** Natural-language guidance for the baseURL format (and what blank means). */
+  baseURLHint: string;
+  /** A concrete example baseURL. */
+  baseURLExample: string;
+  /** A concrete example model id (format guidance, not a recommendation). */
+  modelExample: string;
+}
+
+/** Every provider type the gateway accepts, with UI guidance. */
+export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
+  {
+    id: "anthropic",
+    label: "Anthropic-compatible (Messages API)",
+    summary: "Anthropic's /v1/messages wire format — Claude, or any Anthropic-compatible endpoint.",
+    capabilities: ["chat", "ocr"],
+    defaultCapabilities: ["chat"],
+    inputs: ["text", "image", "document"],
+    outputs: ["text"],
+    baseURLHint: "API root WITHOUT /v1 — leave blank for the official endpoint",
+    baseURLExample: "https://api.anthropic.com",
+    modelExample: "claude-sonnet-4-6",
+  },
+  {
+    id: "openai-completion",
+    label: "OpenAI-compatible (chat completions)",
+    summary: "The /chat/completions wire format — OpenAI, or any compatible endpoint (oneAPI, Ollama, vLLM…).",
+    capabilities: ["chat", "embed", "ocr"],
+    defaultCapabilities: ["chat"],
+    inputs: ["text", "image", "audio"],
+    outputs: ["text"],
+    baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
+    baseURLExample: "http://localhost:11434/v1",
+    modelExample: "gpt-4o",
+  },
+  {
+    id: "openai-responses",
+    label: "OpenAI (Responses API)",
+    summary: "OpenAI's /responses wire format.",
+    capabilities: ["chat", "embed", "ocr"],
+    defaultCapabilities: ["chat"],
+    inputs: ["text", "image", "document"],
+    outputs: ["text"],
+    baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
+    baseURLExample: "https://api.openai.com/v1",
+    modelExample: "gpt-4o",
+  },
+  {
+    id: "cohere",
+    label: "Cohere (rerank)",
+    summary: "Cohere's /rerank wire format for scoring documents against a query.",
+    capabilities: ["rerank"],
+    defaultCapabilities: ["rerank"],
+    inputs: ["text"],
+    outputs: ["text"],
+    baseURLHint: "leave blank for the official endpoint",
+    baseURLExample: "https://api.cohere.com/v2",
+    modelExample: "rerank-v3.5",
+  },
+  {
+    id: "jina",
+    label: "Jina (rerank)",
+    summary: "Jina's /rerank wire format for scoring documents against a query.",
+    capabilities: ["rerank"],
+    defaultCapabilities: ["rerank"],
+    inputs: ["text"],
+    outputs: ["text"],
+    baseURLHint: "leave blank for the official endpoint",
+    baseURLExample: "https://api.jina.ai/v1",
+    modelExample: "jina-reranker-v2-base-multilingual",
+  },
+];
+
+/** Natural-language labels for capabilities (UI display). */
+export const CAPABILITY_LABELS: Record<Capability, string> = {
+  chat: "Chat / text generation",
+  embed: "Text embeddings",
+  rerank: "Document reranking",
+  ocr: "OCR — extract text from images/PDFs",
+};
+
+/** Natural-language labels for content modalities (UI display). */
+export const MODALITY_LABELS: Record<Modality, string> = {
+  text: "Text",
+  image: "Images",
+  audio: "Audio",
+  video: "Video",
+  document: "Documents (PDF)",
+};

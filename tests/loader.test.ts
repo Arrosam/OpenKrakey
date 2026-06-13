@@ -14,13 +14,13 @@
  *   - real plugin modules written to a per-test OS temp dir and dynamically
  *     imported by the loader.
  *
- * Plugins are made OBSERVABLE: each writes an `index.ts` that exports a `calls`
- * array and pushes the exact PluginContext it received in `setup`. Because ESM
- * caches modules by resolved file URL, the test re-imports the SAME file the
- * loader imported (`pathToFileURL(<dir>/<id>/index.ts)`) and inspects
- * `mod.calls[0]` — i.e. the very context object the loader passed. Every test
- * gets a FRESH temp dir, so each plugin file has a unique URL and there is no
- * cross-test ESM cache bleed.
+ * Plugins are made OBSERVABLE: each writes an `index.ts` whose DEFAULT EXPORT
+ * is a FACTORY (contracts/plugin PluginFactory — the loader calls it once per
+ * Agent) and which exports a module-level `calls` array; every instance's setup
+ * pushes its PluginContext there. ESM caches the MODULE by resolved file URL,
+ * so the test re-imports the same file and inspects `mod.calls[0]` — the very
+ * context object the loader passed. Every test gets a FRESH temp dir, so each
+ * plugin file has a unique URL and there is no cross-test ESM cache bleed.
  *
  * Nothing here reads node/contract source or assumes implementation internals;
  * behavior is taken from contracts/loader, contracts/plugin and the loader
@@ -104,8 +104,8 @@ function stubOrchestrator(): Orchestrator & { blocks: Map<string, ContextBlock> 
 // ---------------------------------------------------------------------------
 
 /**
- * Write a minimal, OBSERVABLE plugin. `body` is the object literal passed to
- * `export default` — it must include at least { manifest, setup }. The module
+ * Write a minimal, OBSERVABLE plugin. `body` is the module source whose default
+ * export is a FACTORY returning at least { manifest, setup }. The module
  * also exports a `calls` array; the supplied body's setup is expected to push
  * the ctx into it (the default body below does so).
  */
@@ -170,7 +170,7 @@ export const calls = [];
 export const teardowns = [];
 export const obs = {};
 export const MARKER = ${JSON.stringify(marker)};
-export default {
+export default () => ({
   manifest: { id: ${JSON.stringify(id)}, version: ${JSON.stringify(version)}${requiresLiteral} },
   async setup(ctx) {
     calls.push(ctx);
@@ -179,21 +179,33 @@ export default {
   async teardown() {
     teardowns.push(${JSON.stringify(orderTag)});${appendOrder}${throwStmt}
   },
-};
+});
 `;
 }
 
 /**
  * Re-import the SAME module file the loader imported. ESM caches by URL, so this
- * returns the identical instance — including its live `calls`/`teardowns`.
+ * returns the identical MODULE — its module-level `calls`/`teardowns` accumulate
+ * across every per-agent instance the loader created from the factory.
  */
 async function importPlugin(dir: string, id: string): Promise<any> {
   const file = path.join(dir, id, "index.ts");
   return import(pathToFileURL(file).href);
 }
 
-/** Build a loader for a given AgentDefinition wired to this test's sandbox. */
-function makeLoader(def: AgentDefinition, orchestrator = stubOrchestrator()) {
+/**
+ * Build a loader for a given AgentDefinition wired to this test's sandbox.
+ * `io` lets a test CAPTURE the loader's Logger lines and `print` sink output
+ * (both optional — defaults swallow logs and omit the print sink entirely).
+ */
+function makeLoader(
+  def: AgentDefinition,
+  orchestrator = stubOrchestrator(),
+  io?: {
+    log?: { info(m: string): void; warn(m: string): void; error(m: string): void };
+    print?: (text: string) => void;
+  },
+) {
   const sys = createEventSystem();
   const loader = createLoader({
     agentId: def.id,
@@ -203,7 +215,8 @@ function makeLoader(def: AgentDefinition, orchestrator = stubOrchestrator()) {
     library,
     publicPluginDir,
     agentDir,
-    log: { info: () => {}, warn: () => {}, error: () => {} },
+    log: io?.log ?? { info: () => {}, warn: () => {}, error: () => {} },
+    ...(io?.print ? { print: io.print } : {}),
   });
   return { loader, sys, orchestrator };
 }
@@ -355,7 +368,13 @@ test("public load: ctx exposes the full PluginContext block-op + log surface", a
   assert.equal(typeof ctx.getBlock, "function");
   assert.equal(typeof ctx.removeBlock, "function");
   assert.equal(typeof ctx.listBlocks, "function");
-  assert.equal(typeof ctx.log, "function");
+  // contracts/plugin v1.1: log is a LEVELED logger, print is the plugin's
+  // clean user-facing line (its "starting message" during setup).
+  assert.equal(typeof ctx.log, "object", "ctx.log must be a leveled logger object");
+  assert.equal(typeof ctx.log.info, "function");
+  assert.equal(typeof ctx.log.warn, "function");
+  assert.equal(typeof ctx.log.error, "function");
+  assert.equal(typeof ctx.print, "function");
 });
 
 test("public load: two declared public plugins both load, each with its own ctx", async () => {
@@ -478,64 +497,112 @@ test("override: the overriding private plugin's dataDir follows the PRIVATE loca
 });
 
 // ===========================================================================
-// Behavior 5 — privatePlugins are COPIED into the agent, then loaded
+// Behavior 5 — privatePlugins: NO code copy. The code stays in public_plugin/
+// (relative imports keep resolving; the factory already gives each Agent its
+// own instance); "independent" means an agent-private dataDir under
+// agents/<id>/plugins/<pid>/data.
 // ===========================================================================
 
-test("privatePlugins copy: a declared independent is copied to agents/<id>/plugins/<id> and loaded", async () => {
+test("privatePlugins: code is NOT copied — loaded from public_plugin/ with an agent-private dataDir", async () => {
   writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
   const dest = path.join(agentDir, "plugins", "p2");
-  assert.equal(fs.existsSync(dest), false, "precondition: no private copy yet");
 
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  assert.equal(fs.existsSync(dest), true, "load() must COPY the independent into the agent");
   assert.equal(
     fs.existsSync(path.join(dest, "index.ts")),
-    true,
-    "the copied plugin's module must be present at the destination",
+    false,
+    "load() must NOT copy the plugin code into the agent",
   );
 
-  // And it must have been LOADED (from the copied/private location).
-  const copied = await importPlugin(path.join(agentDir, "plugins"), "p2");
-  assert.equal(copied.calls.length, 1, "the copied independent must be loaded (setup ran)");
+  // Loaded from the PUBLIC location...
+  const mod = await importPlugin(publicPluginDir, "p2");
+  assert.equal(mod.calls.length, 1, "the declared independent must be loaded (setup ran)");
+  // ...but with the agent-private dataDir.
   assert.equal(
-    copied.calls[0].dataDir,
+    mod.calls[0].dataDir,
     path.join(agentDir, "plugins", "p2", "data"),
-    "an independent's dataDir is agent-isolated",
+    "an independent's dataDir is agent-isolated under agents/<id>/plugins/<pid>/data",
   );
 });
 
-test("privatePlugins copy: pre-existing destination is NOT overwritten (skip if present)", async () => {
-  // Public source has marker SRC; pre-create the private copy with a different
-  // body + a sentinel file that must survive (proving the copy was SKIPPED).
+test("privatePlugins: a REAL repo plugin (with relative imports) loads as a declared independent", async () => {
+  // Regression for the copy-era failure: copied code's `../../contracts/...`
+  // imports resolved against the agent folder and crashed every start. With no
+  // copy, the real persona plugin must load from the repo's public_plugin/.
+  const repoPublic = path.resolve("public_plugin");
+  const orchestrator = stubOrchestrator();
+  const sys = createEventSystem();
+  const loader = createLoader({
+    agentId: "ag1",
+    def: { id: "ag1", intervalMs: 1000, plugins: [], privatePlugins: ["persona"] },
+    events: sys,
+    orchestrator,
+    library,
+    publicPluginDir: repoPublic,
+    agentDir,
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+
+  await assert.doesNotReject(loader.load(), "the real persona plugin must load when declared private");
+  assert.ok(orchestrator.blocks.has("persona"), "persona registered its block via the real code");
+  await loader.teardown();
+});
+
+test("privatePlugins: custom code already in agents/<id>/plugins/ still overrides (its data stays beside the code)", async () => {
+  // Public source has marker SRC; the agent carries CUSTOM code for the same id.
   writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "SRC" }));
   const privDir = path.join(agentDir, "plugins");
-  writePlugin(privDir, "p2", observablePlugin({ id: "p2", marker: "PREEXISTING" }));
+  writePlugin(privDir, "p2", observablePlugin({ id: "p2", marker: "CUSTOM" }));
   const sentinel = path.join(privDir, "p2", "SENTINEL.txt");
   fs.writeFileSync(sentinel, "keep-me", "utf8");
 
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  assert.equal(fs.existsSync(sentinel), true, "an existing private copy must be left intact (skip copy)");
-  // The PRE-EXISTING module is the one that loads (not the public source).
+  assert.equal(fs.existsSync(sentinel), true, "the custom private code must be left intact");
   const priv = await importPlugin(privDir, "p2");
-  assert.equal(priv.MARKER, "PREEXISTING", "the already-present private copy must be the one loaded");
-  assert.equal(priv.calls.length, 1, "the pre-existing private copy is loaded");
+  assert.equal(priv.MARKER, "CUSTOM", "the custom private-folder code is the one loaded");
+  assert.equal(priv.calls.length, 1, "the custom private code is loaded");
+  assert.equal(
+    priv.calls[0].dataDir,
+    path.join(privDir, "p2", "data"),
+    "custom private code keeps its data beside the code",
+  );
 });
 
-test("privatePlugins copy: missing public source => load() rejects with PluginLoadError", async () => {
+test("privatePlugins: a pre-existing agent-private data/ folder does NOT shadow the public code (re-load is stable)", async () => {
+  // Regression: an independent's dataDir is agents/<id>/plugins/<pid>/data, so
+  // after one load the folder agents/<id>/plugins/<pid>/ exists holding only
+  // data/ — it must NOT be mistaken for custom code on the next load.
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2", marker: "PUBLIC" }));
+  const dataOnly = path.join(agentDir, "plugins", "p2", "data");
+  fs.mkdirSync(dataOnly, { recursive: true });
+  fs.writeFileSync(path.join(dataOnly, "state.txt"), "kept", "utf8");
+
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
+  await assert.doesNotReject(
+    loader.load(),
+    "a data-only private folder must not be treated as a (codeless) plugin",
+  );
+
+  const mod = await importPlugin(publicPluginDir, "p2");
+  assert.equal(mod.MARKER, "PUBLIC", "the public code is loaded (the data folder is not code)");
+  assert.equal(fs.existsSync(path.join(dataOnly, "state.txt")), true, "pre-existing data survives");
+});
+
+test("privatePlugins: missing public source => load() rejects with PluginLoadError", async () => {
   // Declare an independent whose public source does NOT exist.
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
   await assert.rejects(loader.load(), PluginLoadError);
 });
 
-test("privatePlugins copy: missing source leaves no partial copy behind", async () => {
+test("privatePlugins: missing source leaves nothing behind in the agent folder", async () => {
   const dest = path.join(agentDir, "plugins", "ghost");
   const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["ghost"] }));
   await assert.rejects(loader.load(), PluginLoadError);
-  assert.equal(fs.existsSync(dest), false, "a failed copy must not leave a destination dir");
+  assert.equal(fs.existsSync(dest), false, "a failed load must not create a destination dir");
 });
 
 // ===========================================================================
@@ -617,7 +684,7 @@ test("invalid module: default missing `manifest` => PluginLoadError", async () =
   writePlugin(
     publicPluginDir,
     "bad",
-    `export default { async setup(_ctx) {} };`,
+    `export default () => ({ async setup(_ctx) {} });`,
   );
   const { loader } = makeLoader(def({ plugins: ["bad"] }));
   await assert.rejects(loader.load(), PluginLoadError);
@@ -627,7 +694,7 @@ test("invalid module: default missing `setup` => PluginLoadError", async () => {
   writePlugin(
     publicPluginDir,
     "bad",
-    `export default { manifest: { id: "bad", version: "1" } };`,
+    `export default () => ({ manifest: { id: "bad", version: "1" } });`,
   );
   const { loader } = makeLoader(def({ plugins: ["bad"] }));
   await assert.rejects(loader.load(), PluginLoadError);
@@ -714,10 +781,10 @@ test("teardown: a plugin WITHOUT a teardown? is skipped without error", async ()
     "noteardown",
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "noteardown", version: "1" },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `,
   );
   const { loader } = makeLoader(def({ plugins: ["noteardown"] }));
@@ -782,18 +849,20 @@ function goodRegistrarPlugin(id: string, action: string): string {
   return `
 export const state = { setupCalled: false, teardownCalled: false };
 export const calls = [];
-let unsub;
-export default {
-  manifest: { id: ${JSON.stringify(id)}, version: "1" },
-  async setup(ctx) {
-    calls.push(ctx);
-    unsub = ctx.actions.register(${JSON.stringify(action)}, async () => "ok");
-    state.setupCalled = true;
-  },
-  async teardown() {
-    if (typeof unsub === "function") unsub();
-    state.teardownCalled = true;
-  },
+export default () => {
+  let unsub; // per-instance closure: each agent's instance owns its own Unsub
+  return {
+    manifest: { id: ${JSON.stringify(id)}, version: "1" },
+    async setup(ctx) {
+      calls.push(ctx);
+      unsub = ctx.actions.register(${JSON.stringify(action)}, async () => "ok");
+      state.setupCalled = true;
+    },
+    async teardown() {
+      if (typeof unsub === "function") unsub();
+      state.teardownCalled = true;
+    },
+  };
 };
 `;
 }
@@ -813,10 +882,10 @@ function providerPlugin(opts: { id: string; provides?: string[]; requires?: stri
   const reqLit = requires ? `, requires: ${JSON.stringify(requires)}` : "";
   return `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: ${JSON.stringify(id)}, version: "1"${provLit}${reqLit} },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `;
 }
 
@@ -984,10 +1053,10 @@ test("requires (action, ordered): provider sorts first and registers the action 
     "a-provider",
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "a-provider", version: "1" },
   async setup(ctx) { calls.push(ctx); ctx.actions.register("svc.ready", async () => "ok"); },
-};
+});
 `,
   );
   writePlugin(publicPluginDir, "b-consumer", providerPlugin({ id: "b-consumer", requires: ["svc.ready"] }));
@@ -1004,25 +1073,31 @@ export default {
 
 // ===========================================================================
 // EXT-5 — Independent copy is CODE-ONLY: the source's accumulated data/ is NOT
-//          copied into the agent's private copy.
+//          visible to a declared independent (agent-private dataDir).
 // ===========================================================================
 
-test("independent copy: data/ is excluded — code is copied but source-accumulated data is not", async () => {
-  // Public source has both code (index.ts) and an accumulated data/ file.
-  writePlugin(publicPluginDir, "store", observablePlugin({ id: "store" }));
-  const srcDataDir = path.join(publicPluginDir, "store", "data");
+test("data isolation: a declared independent does NOT see the public plugin's accumulated data", async () => {
+  // The public source has accumulated shared data; the agent-private dataDir
+  // must start EMPTY (no copy, no sharing) — the whole point of "independent".
+  writePlugin(publicPluginDir, "p2", observablePlugin({ id: "p2" }));
+  const srcDataDir = path.join(publicPluginDir, "p2", "data");
   fs.mkdirSync(srcDataDir, { recursive: true });
   fs.writeFileSync(path.join(srcDataDir, "seed.txt"), "accumulated", "utf8");
 
-  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["store"] }));
+  const { loader } = makeLoader(def({ plugins: [], privatePlugins: ["p2"] }));
   await loader.load();
 
-  const dest = path.join(agentDir, "plugins", "store");
-  assert.equal(fs.existsSync(path.join(dest, "index.ts")), true, "the plugin CODE must be copied");
+  const mod = await importPlugin(publicPluginDir, "p2");
+  const dataDir = mod.calls[0].dataDir;
   assert.equal(
-    fs.existsSync(path.join(dest, "data", "seed.txt")),
+    dataDir,
+    path.join(agentDir, "plugins", "p2", "data"),
+    "the independent's dataDir is the agent's own",
+  );
+  assert.equal(
+    fs.existsSync(path.join(dataDir, "seed.txt")),
     false,
-    "the source's accumulated data/ must NOT be copied into the independent copy",
+    "the public plugin's accumulated data must NOT leak into the private dataDir",
   );
 });
 
@@ -1037,10 +1112,10 @@ test("index.js fallback: a plugin dir containing only index.js loads successfull
     path.join(pdir, "index.js"),
     `
 export const calls = [];
-export default {
+export default () => ({
   manifest: { id: "jsonly", version: "1" },
   async setup(ctx) { calls.push(ctx); },
-};
+});
 `,
     "utf8",
   );
@@ -1050,4 +1125,261 @@ export default {
 
   const mod = await import(pathToFileURL(path.join(pdir, "index.js")).href);
   assert.equal(mod.calls.length, 1, "the index.js plugin's setup ran exactly once");
+});
+
+// ===========================================================================
+// EXT-2 — The FACTORY contract (contracts/plugin PluginFactory) + per-Agent
+//          instantiation (R6): plugins share CODE, never live state.
+// ===========================================================================
+
+test("factory contract: a LEGACY object default export (not a factory) => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "legacy",
+    `export default { manifest: { id: "legacy", version: "1" }, async setup(_ctx) {} };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["legacy"] }));
+  await assert.rejects(
+    loader.load(),
+    PluginLoadError,
+    "an object default export is not a factory and must be rejected",
+  );
+});
+
+test("factory contract: a factory that THROWS during construction => PluginLoadError", async () => {
+  writePlugin(
+    publicPluginDir,
+    "boomfactory",
+    `export default () => { throw new Error("construction exploded"); };`,
+  );
+  const { loader } = makeLoader(def({ plugins: ["boomfactory"] }));
+  await assert.rejects(loader.load(), PluginLoadError);
+});
+
+test("R6: two agents loading the SAME public plugin get independent instances (shared code, shared dataDir, never shared state)", async () => {
+  // A factory whose per-instance state is observable through a module-level
+  // `instances` array: one entry per factory call, mutated only by that call's
+  // own instance.
+  writePlugin(
+    publicPluginDir,
+    "solo",
+    `
+export const instances = [];
+export default () => {
+  const inst = { agentId: null, dataDir: null, torndown: false };
+  instances.push(inst);
+  let unsub;
+  return {
+    manifest: { id: "solo", version: "1" },
+    async setup(ctx) {
+      inst.agentId = ctx.agentId;
+      inst.dataDir = ctx.dataDir;
+      unsub = ctx.actions.register("solo.act", async () => "ok");
+    },
+    async teardown() {
+      if (typeof unsub === "function") unsub();
+      inst.torndown = true;
+    },
+  };
+};
+`,
+  );
+
+  // Two distinct agents, each with its own event-system (makeLoader builds one
+  // per call), both loading the one public "solo".
+  const a = makeLoader(def({ id: "agA", plugins: ["solo"] }));
+  const b = makeLoader(def({ id: "agB", plugins: ["solo"] }));
+  await a.loader.load();
+  await assert.doesNotReject(
+    b.loader.load(),
+    "a second agent must load the same public plugin without instance collision",
+  );
+
+  const mod = await importPlugin(publicPluginDir, "solo");
+  assert.equal(mod.instances.length, 2, "the factory ran once PER AGENT (two instances)");
+  const [ia, ib] = mod.instances;
+  assert.equal(ia.agentId, "agA", "instance 1 was set up with agent A's context");
+  assert.equal(ib.agentId, "agB", "instance 2 was set up with agent B's context");
+  // The shared-data exception still holds: SAME dataDir for both agents.
+  assert.equal(
+    ia.dataDir,
+    ib.dataDir,
+    "public plugins still SHARE dataDir (the explicit shared-knowledge semantics)",
+  );
+  // Each instance registered on ITS OWN bus.
+  assert.equal(a.sys.actions.has("solo.act"), true, "agent A's bus has A's action");
+  assert.equal(b.sys.actions.has("solo.act"), true, "agent B's bus has B's action");
+
+  // Teardown isolation: tearing agent A down must not touch agent B.
+  await a.loader.teardown();
+  assert.equal(ia.torndown, true, "A's instance was torn down");
+  assert.equal(ib.torndown, false, "B's instance must be untouched by A's teardown");
+  assert.equal(a.sys.actions.has("solo.act"), false, "A's action left A's bus");
+  assert.equal(b.sys.actions.has("solo.act"), true, "B's action survives A's teardown");
+
+  await b.loader.teardown();
+  assert.equal(ib.torndown, true, "B's instance tears down independently");
+});
+
+// ===========================================================================
+// EXT — plugin console output (contracts/plugin v1.1):
+//   - ctx.log is a LEVELED logger { info, warn, error }: lines go to the
+//     loader's Logger tagged with the plugin id;
+//   - ctx.print(text) is the plugin's clean USER-FACING line (during setup it
+//     is the plugin's "starting message"): routed VERBATIM to the LoaderDeps
+//     `print` sink (default: stdout), never wrapped in diagnostic prefixes;
+//   - every log/print is ALSO pushed on the agent's own bus as a `log.entry`
+//     Notify<{ level, pluginId, text }> so channel plugins can mirror it.
+// ===========================================================================
+
+test("ctx.log.warn routes to the loader Logger's warn, tagged with the plugin id", async () => {
+  const warns: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.warn("W1");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await loader.load();
+
+  assert.equal(warns.length, 1, "exactly one warn line");
+  assert.ok(warns[0].includes("W1"), "the message text survives");
+  assert.ok(warns[0].includes("p1"), "the line is attributable to the plugin");
+});
+
+test("ctx.log.info and ctx.log.error route to the matching Logger levels", async () => {
+  const infos: string[] = [];
+  const errors: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.info("I1"); ctx.log.error("E1");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: (m) => infos.push(m), warn: () => {}, error: (m) => errors.push(m) },
+  });
+  await loader.load();
+
+  assert.ok(infos.some((m) => m.includes("I1")), "info went to Logger.info");
+  assert.ok(errors.some((m) => m.includes("E1")), "error went to Logger.error");
+});
+
+test("ctx.print routes the EXACT text to the print sink — no prefixes, no levels", async () => {
+  const prints: string[] = [];
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("Web chat: http://localhost:7717");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    print: (t) => prints.push(t),
+  });
+  await loader.load();
+
+  assert.deepEqual(
+    prints,
+    ["Web chat: http://localhost:7717"],
+    "print must deliver the text verbatim to the sink",
+  );
+});
+
+test("ctx.print with NO print sink configured still works (default sink; no throw)", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("starting message");` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["p1"] }));
+  await assert.doesNotReject(loader.load(), "the default print sink must be safe");
+});
+
+test("every ctx.log call is pushed on the agent's bus as a log.entry Notify", async () => {
+  const { Events } = await import("../shared/actions");
+  assert.equal((Events as any).LOG, "log.entry", "Events.LOG must name the log.entry event");
+
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.log.warn("pushed-W");` }),
+  );
+  const orch = stubOrchestrator();
+  const { loader, sys } = makeLoader(def({ plugins: ["p1"] }), orch);
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+  await loader.load();
+
+  const hit = seen.find((p) => p?.data?.text === "pushed-W");
+  assert.ok(hit, "the warn line was pushed as a log.entry event");
+  assert.equal(typeof hit.at, "number", "Notify envelope: at is a timestamp");
+  assert.equal(hit.data.level, "warn", "payload carries the level");
+  assert.equal(hit.data.pluginId, "p1", "payload carries the plugin id");
+});
+
+test("ctx.print is pushed as a log.entry with level 'print'", async () => {
+  writePlugin(
+    publicPluginDir,
+    "p1",
+    observablePlugin({ id: "p1", setupBody: `ctx.print("hello-print");` }),
+  );
+  const orch = stubOrchestrator();
+  const { loader, sys } = makeLoader(def({ plugins: ["p1"] }), orch, { print: () => {} });
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+  await loader.load();
+
+  const hit = seen.find((p) => p?.data?.text === "hello-print");
+  assert.ok(hit, "the print was pushed as a log.entry event");
+  assert.equal(hit.data.level, "print", "prints carry level 'print'");
+  assert.equal(hit.data.pluginId, "p1", "payload carries the plugin id");
+});
+
+test("log.entry stays on the OWN agent's bus: agent B sees none of agent A's entries", async () => {
+  writePlugin(
+    publicPluginDir,
+    "chatty",
+    observablePlugin({ id: "chatty", setupBody: `ctx.log.info("from-" + ctx.agentId);` }),
+  );
+  const agentDirA = path.join(tmp, "agents", "agA");
+  const agentDirB = path.join(tmp, "agents", "agB");
+  fs.mkdirSync(agentDirA, { recursive: true });
+  fs.mkdirSync(agentDirB, { recursive: true });
+
+  const make = (id: string, dir: string) => {
+    const sys = createEventSystem();
+    const loader = createLoader({
+      agentId: id,
+      def: { id, intervalMs: 1000, plugins: ["chatty"] },
+      events: sys,
+      orchestrator: stubOrchestrator(),
+      library,
+      publicPluginDir,
+      agentDir: dir,
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+    return { sys, loader };
+  };
+
+  const a = make("agA", agentDirA);
+  const b = make("agB", agentDirB);
+  const seenA: any[] = [];
+  const seenB: any[] = [];
+  a.sys.events.on("log.entry", (p) => seenA.push(p));
+  b.sys.events.on("log.entry", (p) => seenB.push(p));
+
+  await a.loader.load();
+  assert.equal(seenA.filter((p) => p?.data?.text === "from-agA").length, 1, "A saw its entry");
+  assert.equal(seenB.length, 0, "B's bus is silent while only A loads (R6)");
+
+  await b.loader.load();
+  assert.equal(seenB.filter((p) => p?.data?.text === "from-agB").length, 1, "B saw its own");
+  assert.equal(
+    seenB.some((p) => p?.data?.text === "from-agA"),
+    false,
+    "A's entries never leak onto B's bus",
+  );
+
+  await a.loader.teardown();
+  await b.loader.teardown();
 });
