@@ -237,7 +237,7 @@
       "implements_contracts": [
         "plugin"
       ],
-      "status": "pending",
+      "status": "done",
       "overview": "overviews/nodes/inspector.md"
     }
   },
