@@ -61,7 +61,8 @@ test.after(() => {
 // the bound port (PORT:<n>), echoes each agent's input.message (GOT_INPUT:<id>:<json>)
 // and fire_now (FIRED:<id>), and runs a stdin command loop:
 //   out <id> <text>   -> emit output.message{text} on <id>'s bus
-//   return <id>       -> emit llm.return (ok) on <id>'s bus  (flips sent -> read)
+//   req <id> <reqId>  -> emit llm.request{id:reqId} on <id>'s bus (a beat's request)
+//   ret <id> <reqId>  -> emit llm.return{id:reqId} on <id>'s bus (that request's return)
 //   down <id>         -> teardown that agent's instance (TORE_DOWN:<id>)
 //   quit              -> teardown all + exit
 // --------------------------------------------------------------------------
@@ -119,8 +120,16 @@ rl.on("line", async (line) => {
     const id = rest.slice(0, c);
     const text = rest.slice(c + 1);
     instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
-  } else if (op === "return") {
-    instances[rest] && instances[rest].sys.events.emit(${JSON.stringify(Events.LLM_RETURN)}, { id: "x", at: Date.now(), ok: true, data: { content: "ok", toolCalls: [] } });
+  } else if (op === "req") {
+    const s2 = rest.indexOf(" ");
+    const id = s2 === -1 ? rest : rest.slice(0, s2);
+    const rid = s2 === -1 ? "r" : rest.slice(s2 + 1);
+    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_REQUEST)}, { id: rid, at: Date.now(), data: { context: { text: "" } } });
+  } else if (op === "ret") {
+    const s2 = rest.indexOf(" ");
+    const id = s2 === -1 ? rest : rest.slice(0, s2);
+    const rid = s2 === -1 ? "r" : rest.slice(s2 + 1);
+    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_RETURN)}, { id: rid, at: Date.now(), ok: true, data: { content: "ok", toolCalls: [] } });
   } else if (op === "down") {
     if (instances[rest] && instances[rest].plugin.teardown) await instances[rest].plugin.teardown();
     emit("TORE_DOWN:" + rest);
@@ -514,9 +523,55 @@ test("web: a message is 'sent' on POST then flips to 'read' when the beat comple
     assert.ok(!a.events.some((x) => x.type === "status" && x.id === id && x.status === "read"),
       "the message must not be 'read' before the agent processes it");
 
-    c.send("return alice"); // the beat that folded the message completes
+    // The beat that folded the message in: its request carries the message, then
+    // that request returns.
+    c.send("req alice R1");
+    c.send("ret alice R1");
     assert.ok(await waitEvents(a.events, (e) => e.some((x) => x.type === "status" && x.id === id && x.status === "read")),
-      "llm.return flips the message to 'read'");
+      "the return of the request that carried the message flips it to 'read'");
+    a.close();
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: read is tied to the request that carried the message — a stale earlier return does NOT mark it read", async () => {
+  // The race: a timer-driven request is already outstanding when the browser posts
+  // a message (orchestrator beats end at llm.request, so returns can overlap and
+  // arrive out of order). The EARLIER request's return — composed before the
+  // message existed — must NOT mark the new message read.
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const a = await openSSE(c, "alice");
+    await waitEvents(a.events, (e) => e.length > 0); // greeting
+
+    // A request is already in flight BEFORE the message is posted.
+    c.send("req alice OLD");
+
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "race me" }),
+    });
+    const { id } = (await res.json()) as { id: number };
+    await waitEvents(a.events, (e) => e.some((x) => x.type === "status" && x.id === id && x.status === "sent"));
+
+    // The OLD request (composed before the message) returns first.
+    c.send("ret alice OLD");
+    await new Promise((r) => setTimeout(r, 350));
+    assert.ok(
+      !a.events.some((x) => x.type === "status" && x.id === id && x.status === "read"),
+      "a stale earlier return must NOT prematurely mark the message read",
+    );
+
+    // The request that actually carried the message returns -> now read.
+    c.send("req alice NEW");
+    c.send("ret alice NEW");
+    assert.ok(
+      await waitEvents(a.events, (e) => e.some((x) => x.type === "status" && x.id === id && x.status === "read")),
+      "the message flips to read only when ITS request returns",
+    );
     a.close();
   } finally {
     await c.close();
