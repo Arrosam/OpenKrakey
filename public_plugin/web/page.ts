@@ -107,8 +107,19 @@ export const PAGE_HTML = `<!doctype html>
   }
   bell.addEventListener('click', askNotify);
 
+  function showLocked(){
+    countEl.textContent='locked';
+    roster.innerHTML='';
+    log.innerHTML='<div class="empty">This tab isn\\u2019t authorized. Open the link printed in the console &mdash; it carries a one-time token.</div>';
+    box.disabled=true; send.disabled=true; box.placeholder='Locked'; current=null;
+    if(es){ es.close(); es=null; }
+  }
   function loadRoster(){
-    fetch('/api/agents').then(function(r){return r.json();}).then(function(d){
+    fetch('/api/agents').then(function(r){
+      if(r.status===401){ showLocked(); return null; }
+      return r.json();
+    }).then(function(d){
+      if(!d) return;
       var list=(d&&d.agents)||[];
       countEl.textContent=list.length+' agent'+(list.length===1?'':'s')+' online';
       roster.innerHTML='';
