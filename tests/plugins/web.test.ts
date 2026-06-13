@@ -305,6 +305,27 @@ test("web: GET /api/agents lists every registered agent", async () => {
   }
 });
 
+test("web: the server URL is announced DURING setup (in the agent's startup block), not asynchronously after", async () => {
+  // Regression: the URL must print while setup() runs (so the startup report
+  // shows it indented under the agent), NOT from an async listen callback that
+  // fires after setup returns and after the run summary.
+  const c = await startChild(["solo"]);
+  try {
+    assertUp(c);
+    const printIdx = c.lines.findIndex((l) => l.startsWith("PRINT:") && /Web chat/.test(l));
+    const doneIdx = c.lines.findIndex((l) => l === "SETUP_DONE");
+    assert.ok(printIdx !== -1, "the web URL must be printed: " + JSON.stringify(c.lines));
+    assert.ok(doneIdx !== -1, "setup must complete");
+    assert.ok(
+      printIdx < doneIdx,
+      "the URL must be announced before setup completes (so it lands in the agent's startup block); " +
+        "print@" + printIdx + " vs SETUP_DONE@" + doneIdx,
+    );
+  } finally {
+    await c.close();
+  }
+});
+
 test("web: GET / serves an HTML chat page", async () => {
   const c = await startChild(["alice"]);
   try {
