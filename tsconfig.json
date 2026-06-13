@@ -11,5 +11,5 @@
     "outDir": ".dist",
     "rootDir": "."
   },
-  "include": ["contracts", "packages", "shared"]
+  "include": ["contracts", "packages", "shared", "public_plugin"]
 }

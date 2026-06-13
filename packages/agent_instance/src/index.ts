@@ -33,6 +33,8 @@ export function createAgentInstance(
   deps?: {
     library?: CommunicatorLibrary;
     log?: Logger;
+    /** Sink for plugin ctx.print lines (forwarded to the loader). */
+    print?: (text: string) => void;
     publicPluginDir?: string;
     agentsDir?: string;
   },
@@ -61,6 +63,7 @@ export function createAgentInstance(
     publicPluginDir,
     agentDir,
     log,
+    print: deps?.print,
   });
 
   // The ONLY wiring this node owns: turn each clock activation into a `clock.tick`

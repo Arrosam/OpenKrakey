@@ -15,7 +15,10 @@
  * emit `prompt.gather` (plugins refresh blocks) → compose → emit `llm.request`
  * (Request<{context}>) WITHOUT awaiting — the beat ends at the emit. The LLM
  * round-trip returns later as an `llm.return` event (Reply<LLMResponse>) whose
- * tool calls are dispatched fire-and-forget on the actionbus.
+ * tool calls are dispatched fire-and-forget on the actionbus. As EACH dispatched
+ * call settles, a `tool.result` event is emitted (Reply: id = the ToolCall id,
+ * name = the action name; ok+data on success, ok:false+error on rejection) so
+ * plugins can fold tool outcomes into the next beat's context.
  *
  * Degradation: compose renders each block in ISOLATION — a block whose render()
  * throws/rejects degrades to empty text for that beat (logged); it never drops
