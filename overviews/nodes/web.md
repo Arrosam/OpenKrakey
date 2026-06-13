@@ -48,3 +48,4 @@ done
   per-agent SSE isolation (R6), sent/read delivery status (read on llm.return), dependency-free page.
 - 2026-06-13: setup() awaits the server bind so the URL is announced inside the agent startup block (was an async listen callback landing after the run summary); real bound port; bind clash prints a ✖ note and degrades.
 - 2026-06-13: chat page switched to Bootstrap Icons (CDN: bi-send-fill send button, bi-check/bi-check-all ticks, bi-bell* notify toggle) and added browser push notifications — a header bell opts in; replies raise a Notification while the tab is backgrounded.
+- 2026-06-13: security — server binds loopback (config.web.host, default 127.0.0.1; was all interfaces) and every /api route requires a per-process session token (random base64url or config.web.token), presented via HttpOnly cookie / ?token= / Bearer and checked constant-time; tokenized startup URL; GET / sets the cookie on a valid token; page shows a locked notice on 401.
