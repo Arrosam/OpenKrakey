@@ -75,11 +75,14 @@ export function createAgentInstance(
   // The per-Agent independent set, constructed once.
   const clock = createClock({ defaultIntervalMs: def.intervalMs });
   const events = createEventSystem();
-  // Mirror each core module's diagnostic logger onto this Agent's eventbus as
-  // `log.entry` (tagged `core:<module>`), keeping `log` as the base so console
-  // output is unchanged.
+  // Bridge ONLY the orchestrator's diagnostic logger onto this Agent's eventbus as
+  // `log.entry` (tagged `core:orchestrator`), keeping `log` as the base so console
+  // output is unchanged. The loader is NOT bridged here: it reuses its logger to
+  // echo every plugin's ctx.log.* line, so mirroring it would duplicate plugin
+  // logs on the bus — the loader self-reports its own diagnostics (tagged
+  // `core:loader`) directly. So the loader gets the plain agent-tagged console
+  // logger `log`.
   const orchLog = busLogger(log, events.events, "core:orchestrator");
-  const loaderLog = busLogger(log, events.events, "core:loader");
   const orchestrator = createOrchestrator({ events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
@@ -89,7 +92,7 @@ export function createAgentInstance(
     library,
     publicPluginDir,
     agentDir,
-    log: loaderLog,
+    log,
     print: deps?.print,
   });
 
