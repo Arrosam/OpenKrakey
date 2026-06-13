@@ -31,11 +31,13 @@
 npm install
 cp config/llm.example.json config/llm.json   # 填入你的 API key（或用 "${ENV_VAR}" 引用环境变量）
 npm run cli                                   # → ✦ Guided setup：选服务、填模型/端点/密钥、起 agent，一路引导
-npm start                                     # 启动所有 agents/*/config.json —— 直接在终端对话
+npm start                                     # 启动所有 agents/*/config.json —— 控制台打印 ✦ Web chat: http://localhost:7717
 ```
 
+启动后打开浏览器到 `http://localhost:7717` 即可与各 agent 对话（每个 agent 独立会话、消息有 sent/read 状态）。
+
 MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份块）· `history`（对话记忆，重启不丢）·
-`console-channel`（终端输入/输出，输入即唤醒）· `notes`（持久笔记工具）· `toolbox`（时间 + LLM 自调节奏）。
+`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态）· `notes`（持久笔记工具）· `toolbox`（时间 + LLM 自调节奏）。
 把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本。
 
 ## 状态
