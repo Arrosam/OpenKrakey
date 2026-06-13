@@ -112,9 +112,9 @@ const PLUGIN_SUMMARIES: Record<string, string> = {
   "llm-core": "talks to the AI service (required for replies)",
   persona: "the agent's identity / system prompt",
   history: "conversation memory, persists across restarts",
-  "console-channel": "talk to the agent in this terminal",
   notes: "lets the agent save and read named notes",
   toolbox: "clock tools — read the time, set its own pace",
+  web: "chat with the agent from your browser",
 };
 const pluginChoice = (id: string, checked: boolean) => ({
   name: PLUGIN_SUMMARIES[id] ? `${id} — ${PLUGIN_SUMMARIES[id]}` : id,
