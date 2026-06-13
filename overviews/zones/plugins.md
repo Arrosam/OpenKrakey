@@ -28,8 +28,10 @@ independent-isolated), `provides`/`requires`, and the CLOCK_* rhythm actions.
 | web | refcounted http hub: POST /message → input.message + fire_now; SSE stream of output.message; sent/read status; serves the chat page |
 | notes | note.save/read/list actions over dataDir files, registered as LLM tools |
 | toolbox | time.now + ToolDefs for the orchestrator's clock rhythm actions (LLM self-pacing) |
+| inspector | read-only debug dashboard: own refcounted loopback+token http hub + per-agent SSE; bounded in-memory record ring of ALL bus events; shows prompts sent/received, the event timeline, and logs (incl. core:*), correlated per-beat by request id; emits nothing |
 
 ## Change log
 - 2026-06-13: all six plugins flipped to the PluginFactory shape (per-Agent instances); data-carrying plugins (history, notes) are privatePlugins in the default setting so each agent owns its memory/notes.
 - 2026-06-13: plugin contract v1.1 adoption — console-channel greets via ctx.print; llm-core/notes/toolbox warn via ctx.log.warn.
 - 2026-06-13: console-channel (terminal chat) removed; web (browser chat) is the channel — refcounted http hub, per-agent SSE isolation (R6), sent/read delivery status; the e2e loop now drives through web HTTP.
+- 2026-06-14: inspector added — a read-only observability sibling of web (own refcounted loopback+token http hub, per-agent SSE, bounded in-memory record ring of all bus events; dependency-free dashboard for prompts/event-timeline/logs, correlated by request id). Pairs with a core-log-to-bus bridge in agent_instance so the Logs feed also carries core:orchestrator/core:loader diagnostics.
