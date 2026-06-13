@@ -929,3 +929,82 @@ export default () => ({
   assert.equal(typeof err.text, "string");
   assert.ok(err.text.length > 0, "the core:loader error log must carry non-empty text");
 });
+
+// ---- Cover 6 (REGRESSION GUARD): a plugin log line is mirrored to the bus
+// EXACTLY ONCE — never duplicated as a core:* entry.
+//
+// The bug this guards against: the loader echoes plugin log lines to the console
+// through its INJECTED logger. If that loader logger is itself bus-bridged
+// (core:loader), every plugin ctx.log.* line gets mirrored a SECOND time as a
+// `core:loader` log.entry carrying the same text. The contract is: a plugin's
+// ctx.log.warn("X") yields ONE log.entry on the bus, tagged with the PLUGIN's id,
+// text "X" — and ZERO log.entry whose pluginId starts with "core:" carrying that
+// same text.
+//
+// We make the plugin self-observing: in setup it subscribes to "log.entry" FIRST
+// (so it is guaranteed to see its own subsequent line), THEN calls ctx.log.warn.
+// The log fires during setup, so no beat is needed (large interval = no noise).
+// We re-import the SAME module file (ESM URL cache) to read its exported entries.
+
+test("plugin-log dedup regression: ctx.log.warn yields EXACTLY ONE log.entry (plugin-tagged); NO core:* duplicate of the same text", async () => {
+  // Subscribe BEFORE logging so the plugin observes its own line; log in setup.
+  writePublicPlugin(
+    "dedup-warn",
+    `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: "dedup-warn", version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+    ctx.log.warn("UNIQ-PLUGIN-LINE-7");
+  },
+});
+`,
+  );
+  const agent = make(
+    // large interval so no beat noise — the warn fires during setup
+    bareDef("dedup-plug", { intervalMs: 10_000, plugins: ["dedup-warn"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("dedup-warn");
+  await waitUntil(
+    () => mod.logs.some((l: any) => typeof l.text === "string" && l.text.includes("UNIQ-PLUGIN-LINE-7")),
+    1500,
+  );
+  await agent.stop();
+
+  // Every captured entry carrying our unique text.
+  const matching = mod.logs.filter(
+    (l: any) => typeof l.text === "string" && l.text.includes("UNIQ-PLUGIN-LINE-7"),
+  );
+  // EXACTLY ONE mirrored line — and it is the plugin's own, not a core: tag.
+  assert.equal(
+    matching.length,
+    1,
+    "a plugin's ctx.log.warn must be mirrored to the bus EXACTLY once (no core:loader duplicate)",
+  );
+  assert.equal(
+    matching[0].pluginId,
+    "dedup-warn",
+    "the single mirrored entry must be tagged with the PLUGIN's id",
+  );
+
+  // ZERO core:* duplicate of that same plugin line.
+  const coreDupes = mod.logs.filter(
+    (l: any) =>
+      typeof l.pluginId === "string" &&
+      l.pluginId.startsWith("core:") &&
+      typeof l.text === "string" &&
+      l.text.includes("UNIQ-PLUGIN-LINE-7"),
+  );
+  assert.deepEqual(
+    coreDupes,
+    [],
+    "a plugin log line MUST NOT be re-mirrored as a core:* (e.g. core:loader) log.entry",
+  );
+});
