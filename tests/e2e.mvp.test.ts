@@ -214,6 +214,7 @@ interface E2EResult {
 async function collectSSE(
   port: number,
   id: string,
+  token: string,
   out: string[],
   pred: (texts: string[]) => boolean,
   ms: number,
@@ -221,7 +222,8 @@ async function collectSSE(
   const ac = new AbortController();
   const deadline = setTimeout(() => ac.abort(), ms);
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/agents/${id}/stream`, { signal: ac.signal });
+    const qs = token ? "?token=" + encodeURIComponent(token) : "";
+    const res = await fetch(`http://127.0.0.1:${port}/api/agents/${id}/stream${qs}`, { signal: ac.signal });
     if (!res.body) return;
     const reader = (res.body as ReadableStream<Uint8Array>).getReader();
     const dec = new TextDecoder();
@@ -267,6 +269,7 @@ async function runE2E(): Promise<E2EResult> {
   let stdout = "";
   let stderr = "";
   let port = 0;
+  let token = "";
   const sseOutputs: string[] = [];
 
   const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
@@ -284,6 +287,8 @@ async function runE2E(): Promise<E2EResult> {
       const m = /PRINT:[^\n]*http:\/\/[^\s:]+:(\d+)/.exec(stdout);
       if (m) {
         port = parseInt(m[1], 10);
+        const tk = /[?&]token=([^\s&]+)/.exec(stdout);
+        token = tk ? tk[1] : "";
         break;
       }
       await new Promise((r) => setTimeout(r, 25));
@@ -295,12 +300,14 @@ async function runE2E(): Promise<E2EResult> {
       const collected = collectSSE(
         port,
         "e2e-agent",
+        token,
         sseOutputs,
         (texts) => texts.some((t) => t.includes("E2E-FINAL-REPLY")),
         15_000,
       );
       await new Promise((r) => setTimeout(r, 150)); // let the stream attach
-      await fetch(`http://127.0.0.1:${port}/api/agents/e2e-agent/message`, {
+      const qs = token ? "?token=" + encodeURIComponent(token) : "";
+      await fetch(`http://127.0.0.1:${port}/api/agents/e2e-agent/message${qs}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text: "hello krakey" }),
