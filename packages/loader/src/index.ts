@@ -267,7 +267,9 @@ export function createLoader(deps: LoaderDeps): Loader {
       try {
         await plugin.teardown?.();
       } catch (err) {
-        log.error("teardown failed for '" + plugin.manifest.id + "': " + err);
+        const detail = "teardown failed for '" + plugin.manifest.id + "': " + err;
+        log.error(detail);
+        pushLogEntry("error", "core:loader", detail);
       }
     }
     loaded.length = 0;
