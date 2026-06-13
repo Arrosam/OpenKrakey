@@ -26,7 +26,7 @@
         "llm-core",
         "persona",
         "history",
-        "console-channel",
+        "web",
         "notes",
         "toolbox"
       ],
@@ -184,17 +184,18 @@
       "status": "done",
       "overview": "overviews/nodes/history.md"
     },
-    "console-channel": {
+    "web": {
       "zone": "plugins",
-      "path": "public_plugin/console-channel",
-      "description": "Terminal I/O channel: stdin lines -> input.message + clock.fire_now wake; prints output.message; greets on agent.start.",
+      "path": "public_plugin/web",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams that agent's output.message; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
-        "event-system"
+        "event-system",
+        "llm"
       ],
       "implements_contracts": [],
       "status": "done",
-      "overview": "overviews/nodes/console-channel.md"
+      "overview": "overviews/nodes/web.md"
     },
     "notes": {
       "zone": "plugins",

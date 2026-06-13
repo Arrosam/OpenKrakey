@@ -1,8 +1,8 @@
 # Zone: plugins
 
 ## Purpose
-The Phase-1 MVP plugin set under `public_plugin/`. Together they turn a bare agent into a usable one
-— it converses in the terminal, remembers across restarts, and uses tools (including setting its own
+The MVP plugin set under `public_plugin/`. Together they turn a bare agent into a usable one
+— it converses in the browser, remembers across restarts, and uses tools (including setting its own
 pace) — while exercising every core function: the beat loop, context composition by priority, the
 key-less LLM library, tool dispatch + `tool.result` folding, dataDir semantics (public-shared vs
 independent-isolated), `provides`/`requires`, and the CLOCK_* rhythm actions.
@@ -25,10 +25,11 @@ independent-isolated), `provides`/`requires`, and the CLOCK_* rhythm actions.
 | llm-core | llm.request → communicator chat → llm.return (+ output.message); provides llm.register_tool |
 | persona | stable identity block (10000+) from config |
 | history | input/llm.return/tool.result → bounded transcript block + JSONL persistence in dataDir |
-| console-channel | stdin → input.message + fire_now wake; prints output.message; greets on agent.start |
+| web | refcounted http hub: POST /message → input.message + fire_now; SSE stream of output.message; sent/read status; serves the chat page |
 | notes | note.save/read/list actions over dataDir files, registered as LLM tools |
 | toolbox | time.now + ToolDefs for the orchestrator's clock rhythm actions (LLM self-pacing) |
 
 ## Change log
 - 2026-06-13: all six plugins flipped to the PluginFactory shape (per-Agent instances); data-carrying plugins (history, notes) are privatePlugins in the default setting so each agent owns its memory/notes.
 - 2026-06-13: plugin contract v1.1 adoption — console-channel greets via ctx.print; llm-core/notes/toolbox warn via ctx.log.warn.
+- 2026-06-13: console-channel (terminal chat) removed; web (browser chat) is the channel — refcounted http hub, per-agent SSE isolation (R6), sent/read delivery status; the e2e loop now drives through web HTTP.
