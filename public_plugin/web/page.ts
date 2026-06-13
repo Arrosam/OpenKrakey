@@ -1,9 +1,10 @@
 /**
- * The web channel's single static page — a dependency-free, dark Krakey chat UI
- * (no build step, no framework). Served verbatim at `GET /`. It fetches the agent
- * roster, opens an SSE stream per selected agent, renders the transcript, and posts
- * messages — showing a `sent` tick when a message is queued and `read` once the
- * agent's beat has processed it.
+ * The web channel's single static page — a dark Krakey chat UI (no build step, no
+ * framework). Served verbatim at `GET /`. It fetches the agent roster, opens an SSE
+ * stream per selected agent, renders the transcript, and posts messages — showing a
+ * `sent` tick when a message is queued and `read` once the agent's beat has
+ * processed it. Icons are Bootstrap Icons (loaded from CDN). When the tab is in the
+ * background, incoming replies raise a browser notification (opt-in via the bell).
  */
 export const PAGE_HTML = `<!doctype html>
 <html lang="en">
@@ -11,6 +12,7 @@ export const PAGE_HTML = `<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Krakey</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" />
 <style>
   :root{ --mint:#2FD69C; --bg:#0d1210; --bg2:#0a0f0d; --surf:#171e1a; --line:rgba(255,255,255,0.08);
     --tx:#e7ece9; --tx2:#7b847e; --tx3:#5f6863; }
@@ -31,6 +33,9 @@ export const PAGE_HTML = `<!doctype html>
   .av{ border-radius:50%; background:rgba(47,214,156,0.14); display:flex; align-items:center; justify-content:center; color:var(--mint); font-weight:500; flex-shrink:0; }
   #title{ font-size:14px; font-weight:500; }
   #sub{ font-size:11.5px; color:var(--tx2); display:flex; align-items:center; gap:6px; }
+  #bell{ border:none; background:none; color:var(--tx2); font-size:18px; cursor:pointer; padding:6px; border-radius:8px; display:flex; }
+  #bell:hover{ background:rgba(255,255,255,0.05); color:var(--tx); }
+  #bell.on{ color:var(--mint); }
   #log{ flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:13px; }
   .row{ display:flex; gap:9px; align-items:flex-start; }
   .bubble{ border-radius:12px; padding:9px 13px; font-size:13.5px; line-height:1.5; max-width:78%; white-space:pre-wrap; word-break:break-word; }
@@ -38,12 +43,13 @@ export const PAGE_HTML = `<!doctype html>
   .me{ display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
   .me .bubble{ background:rgba(47,214,156,0.13); border:.5px solid rgba(47,214,156,0.22); color:#d6f3e7; }
   .tick{ font-size:11px; display:flex; align-items:center; gap:4px; padding-right:2px; color:var(--tx2); }
+  .tick .bi{ font-size:13px; }
   .tick.read{ color:var(--mint); }
   .empty{ color:var(--tx2); font-size:13px; margin:auto; }
   form{ display:flex; gap:10px; align-items:center; padding:13px 16px; border-top:.5px solid var(--line); }
   #box{ flex:1; background:#111714; border:.5px solid rgba(255,255,255,0.10); border-radius:10px; padding:11px 13px; font-size:13px; color:var(--tx); outline:none; }
   #box::placeholder{ color:var(--tx2); }
-  #send{ width:40px; height:40px; border:none; border-radius:10px; background:var(--mint); color:#06251a; font-size:20px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+  #send{ width:40px; height:40px; border:none; border-radius:10px; background:var(--mint); color:#06251a; font-size:18px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
   #send:disabled{ opacity:.4; cursor:default; }
 </style>
 </head>
@@ -59,14 +65,15 @@ export const PAGE_HTML = `<!doctype html>
     <header>
       <div class="av" id="hav" style="width:26px;height:26px;font-size:13px;"></div>
       <div style="flex:1;min-width:0;">
-        <div id="title">—</div>
+        <div id="title">&mdash;</div>
         <div id="sub"></div>
       </div>
+      <button id="bell" type="button" title="Notify me of replies" aria-label="Enable notifications"><i class="bi bi-bell-slash"></i></button>
     </header>
     <div id="log"><div class="empty">Pick an agent to start chatting.</div></div>
     <form id="form">
-      <input id="box" autocomplete="off" placeholder="Select an agent…" disabled />
-      <button id="send" type="submit" disabled aria-label="Send">&#8593;</button>
+      <input id="box" autocomplete="off" placeholder="Select an agent&hellip;" disabled />
+      <button id="send" type="submit" disabled aria-label="Send"><i class="bi bi-send-fill"></i></button>
     </form>
   </main>
 </div>
@@ -75,10 +82,30 @@ export const PAGE_HTML = `<!doctype html>
   var roster=document.getElementById('roster'), countEl=document.getElementById('count');
   var titleEl=document.getElementById('title'), subEl=document.getElementById('sub'), havEl=document.getElementById('hav');
   var log=document.getElementById('log'), box=document.getElementById('box'), send=document.getElementById('send'), form=document.getElementById('form');
-  var current=null, es=null, msgs={};
+  var bell=document.getElementById('bell');
+  var current=null, es=null, msgs={}, greeted=false;
 
   function initial(id){ return (id||'?').slice(0,1).toLowerCase(); }
   function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+  function notifySupported(){ return ('Notification' in window); }
+  function refreshBell(){
+    var on = notifySupported() && Notification.permission==='granted';
+    bell.className = on ? 'on' : '';
+    bell.firstChild.className = 'bi ' + (on ? 'bi-bell-fill' : (notifySupported() && Notification.permission==='denied' ? 'bi-bell-slash' : 'bi-bell'));
+    bell.title = on ? 'Reply notifications on' : (notifySupported() ? 'Click to enable reply notifications' : 'Notifications not supported');
+  }
+  function askNotify(){
+    if(!notifySupported()) return;
+    if(Notification.permission==='default'){ Notification.requestPermission().then(refreshBell).catch(function(){}); }
+    refreshBell();
+  }
+  function maybeNotify(text){
+    if(!notifySupported() || Notification.permission!=='granted') return;
+    if(!document.hidden) return;
+    try{ var n=new Notification(current||'Krakey',{ body:text, tag:'krakey-'+current }); n.onclick=function(){ window.focus(); n.close(); }; }catch(e){}
+  }
+  bell.addEventListener('click', askNotify);
 
   function loadRoster(){
     fetch('/api/agents').then(function(r){return r.json();}).then(function(d){
@@ -89,7 +116,7 @@ export const PAGE_HTML = `<!doctype html>
         var b=document.createElement('button');
         b.className='agent'+(id===current?' sel':'');
         b.innerHTML='<span class="dot"></span><span style="flex:1">'+esc(id)+'</span>';
-        b.onclick=function(){ select(id); };
+        b.onclick=function(){ askNotify(); select(id); };
         roster.appendChild(b);
       });
       if(!current && list.length) select(list[0]);
@@ -105,26 +132,26 @@ export const PAGE_HTML = `<!doctype html>
   function addMyMsg(id,text){
     var wrap=document.createElement('div'); wrap.className='me';
     wrap.innerHTML='<div class="bubble">'+esc(text)+'</div>'+
-      '<div class="tick" data-msg="'+id+'"><span class="tk-ic">&#10003;</span><span class="tk-tx">sent</span></div>';
+      '<div class="tick" data-msg="'+id+'"><i class="bi bi-check"></i><span class="tk-tx">sent</span></div>';
     log.appendChild(wrap); log.scrollTop=log.scrollHeight; msgs[id]=wrap;
   }
   function markRead(id){
     var w=msgs[id]; if(!w) return; var t=w.querySelector('.tick'); if(!t) return;
-    t.className='tick read'; t.querySelector('.tk-ic').innerHTML='&#10003;&#10003;'; t.querySelector('.tk-tx').textContent='read';
+    t.className='tick read'; t.querySelector('.bi').className='bi bi-check-all'; t.querySelector('.tk-tx').textContent='read';
   }
 
   function select(id){
     if(es){ es.close(); es=null; }
-    current=id; msgs={};
+    current=id; msgs={}; greeted=false;
     titleEl.textContent=id; havEl.textContent=initial(id);
     subEl.innerHTML='<span class="dot"></span>online';
-    box.disabled=false; send.disabled=false; box.placeholder='Message '+id+'…'; box.focus();
+    box.disabled=false; send.disabled=false; box.placeholder='Message '+id+'\\u2026'; box.focus();
     log.innerHTML='';
     Array.prototype.forEach.call(roster.children,function(b){ b.classList.toggle('sel', b.textContent.trim()===id); });
     es=new EventSource('/api/agents/'+encodeURIComponent(id)+'/stream');
     es.onmessage=function(ev){
       var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
-      if(m.type==='output'){ addAgentMsg(m.text); }
+      if(m.type==='output'){ addAgentMsg(m.text); if(greeted){ maybeNotify(m.text); } greeted=true; }
       else if(m.type==='status' && m.status==='read'){ markRead(m.id); }
     };
   }
@@ -132,12 +159,13 @@ export const PAGE_HTML = `<!doctype html>
   form.addEventListener('submit',function(e){
     e.preventDefault();
     var text=box.value.trim(); if(!text||!current) return;
-    box.value='';
+    box.value=''; askNotify();
     fetch('/api/agents/'+encodeURIComponent(current)+'/message',{
       method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({text:text})
     }).then(function(r){return r.json();}).then(function(d){ if(d&&typeof d.id!=='undefined') addMyMsg(d.id,text); }).catch(function(){});
   });
 
+  refreshBell();
   loadRoster();
   setInterval(loadRoster, 5000);
 })();
