@@ -136,6 +136,7 @@ rl.on("line", async (line) => {
 interface Child {
   proc: ChildProcess;
   port: number;
+  token: string;
   lines: string[];
   send(cmd: string): void;
   waitFor(pred: (lines: string[]) => boolean, ms?: number): Promise<boolean>;
@@ -184,6 +185,7 @@ async function startChild(agents: string[]): Promise<Child> {
   const child: Child = {
     proc,
     port: 0,
+    token: "",
     lines,
     send: (cmd) => {
       try {
@@ -229,6 +231,8 @@ async function startChild(agents: string[]): Promise<Child> {
   const urlLine = lines.find((l) => l.startsWith("PRINT:") && /http:\/\/[^\s]+:\d+/.test(l));
   const m = urlLine ? /:(\d+)\b/.exec(urlLine.replace("PRINT:", "")) : null;
   child.port = m ? parseInt(m[1], 10) : 0;
+  const tk = urlLine ? /[?&]token=([^\s&]+)/.exec(urlLine) : null;
+  child.token = tk ? decodeURIComponent(tk[1]) : "";
   return child;
 }
 
@@ -239,13 +243,19 @@ function assertUp(c: Child): void {
 
 const base = (c: Child) => "http://127.0.0.1:" + c.port;
 
+/** A full /api URL carrying the session token (so authed requests pass). */
+function api(c: Child, path: string): string {
+  const sep = path.includes("?") ? "&" : "?";
+  return base(c) + path + (c.token ? sep + "token=" + encodeURIComponent(c.token) : "");
+}
+
 /** Open an SSE stream and accumulate parsed events into the returned array. */
 async function openSSE(
   c: Child,
   id: string,
 ): Promise<{ events: any[]; status: number; close: () => void }> {
   const ac = new AbortController();
-  const res = await fetch(base(c) + "/api/agents/" + id + "/stream", { signal: ac.signal });
+  const res = await fetch(api(c, "/api/agents/" + id + "/stream"), { signal: ac.signal });
   const events: any[] = [];
   if (res.body) {
     (async () => {
@@ -296,7 +306,7 @@ test("web: GET /api/agents lists every registered agent", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
-    const res = await fetch(base(c) + "/api/agents");
+    const res = await fetch(api(c, "/api/agents"));
     assert.equal(res.status, 200);
     const body = (await res.json()) as { agents: string[] };
     assert.deepEqual([...body.agents].sort(), ["alice", "bob"], "both agents are listed online");
@@ -368,7 +378,7 @@ test("web: POST /api/agents/:id/message emits input.message + fire_now on THAT a
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
-    const res = await fetch(base(c) + "/api/agents/alice/message", {
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "hello alice" }),
@@ -397,7 +407,7 @@ test("web: POST to an unknown agent id -> 404", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
-    const res = await fetch(base(c) + "/api/agents/ghost/message", {
+    const res = await fetch(api(c, "/api/agents/ghost/message"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "anyone?" }),
@@ -412,7 +422,7 @@ test("web: POST with empty text -> 400 (nothing enqueued)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
-    const res = await fetch(base(c) + "/api/agents/alice/message", {
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "   " }),
@@ -472,7 +482,7 @@ test("web: SSE to an unknown agent id -> 404", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
-    const res = await fetch(base(c) + "/api/agents/ghost/stream");
+    const res = await fetch(api(c, "/api/agents/ghost/stream"));
     assert.equal(res.status, 404);
   } finally {
     await c.close();
@@ -490,7 +500,7 @@ test("web: a message is 'sent' on POST then flips to 'read' when the beat comple
     const a = await openSSE(c, "alice");
     await waitEvents(a.events, (e) => e.length > 0); // greeting
 
-    const res = await fetch(base(c) + "/api/agents/alice/message", {
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text: "track me" }),
@@ -527,9 +537,9 @@ test("web: the port stays open while >=1 agent is registered and closes after th
     // Tear down alice — server must stay up for bob.
     c.send("down alice");
     await c.waitFor((ls) => ls.includes("TORE_DOWN:alice"));
-    const stillUp = await fetch(base(c) + "/api/agents").then((r) => r.status).catch(() => 0);
+    const stillUp = await fetch(api(c, "/api/agents")).then((r) => r.status).catch(() => 0);
     assert.equal(stillUp, 200, "server stays up while bob is still registered");
-    const agents = (await fetch(base(c) + "/api/agents").then((r) => r.json())) as { agents: string[] };
+    const agents = (await fetch(api(c, "/api/agents")).then((r) => r.json())) as { agents: string[] };
     assert.deepEqual(agents.agents, ["bob"], "alice is gone from the roster, bob remains");
 
     // Tear down bob — now the port must close.
@@ -543,6 +553,68 @@ test("web: the port stays open while >=1 agent is registered and closes after th
       closed = true;
     }
     assert.ok(closed, "after the last agent tears down, the port is released (connection refused)");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Scenario 6 — token auth + loopback bind: the API is gated by a session token
+// that only the console (which ran the program) sees; the server binds loopback.
+// ===========================================================================
+
+test("web: the startup URL carries a session token and binds loopback (127.0.0.1)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(c.token.length >= 16, "a non-trivial session token is generated: " + JSON.stringify(c.token));
+    const urlLine = c.lines.find((l) => l.startsWith("PRINT:") && /Web chat/.test(l)) || "";
+    assert.match(urlLine, /127\.0\.0\.1/, "the server binds loopback (URL is 127.0.0.1, not all interfaces)");
+    assert.match(urlLine, /[?&]token=/, "the printed URL carries the token");
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: API requests WITHOUT the token are rejected with 401", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const list = await fetch(base(c) + "/api/agents");
+    assert.equal(list.status, 401, "GET /api/agents requires the token");
+    const post = await fetch(base(c) + "/api/agents/alice/message", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "sneak in" }),
+    });
+    assert.equal(post.status, 401, "POST message requires the token");
+    const stream = await fetch(base(c) + "/api/agents/alice/stream");
+    assert.equal(stream.status, 401, "SSE stream requires the token");
+    // The unauthorized POST must NOT have reached alice's bus.
+    await new Promise((r) => setTimeout(r, 150));
+    assert.ok(!c.lines.some((l) => l.startsWith("GOT_INPUT:alice:")), "a tokenless message never reaches the agent");
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: a WRONG token is rejected with 401", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const res = await fetch(base(c) + "/api/agents?token=not-the-real-token");
+    assert.equal(res.status, 401, "a bad token is rejected");
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: GET / serves the page WITHOUT a token (the page holds no secrets)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const res = await fetch(base(c) + "/");
+    assert.equal(res.status, 200, "the page itself is not token-gated");
   } finally {
     await c.close();
   }
