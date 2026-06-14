@@ -146,6 +146,18 @@ export const PAGE_HTML = `<!doctype html>
       '<div class="tick" data-msg="'+id+'"><i class="bi bi-check"></i><span class="tk-tx">sent</span></div>';
     log.appendChild(wrap); log.scrollTop=log.scrollHeight; msgs[id]=wrap;
   }
+  function renderHistory(messages){
+    (messages||[]).forEach(function(m){
+      if(!m) return;
+      if(m.role==='user'){
+        var hasId = typeof m.id!=='undefined' && m.id!==null;
+        addMyMsg(hasId?m.id:'', m.text||'');
+        if(hasId && m.status==='read') markRead(m.id);
+      } else if(m.role==='agent'){
+        addAgentMsg(m.text||'');
+      }
+    });
+  }
   function markRead(id){
     var w=msgs[id]; if(!w) return; var t=w.querySelector('.tick'); if(!t) return;
     t.className='tick read'; t.querySelector('.bi').className='bi bi-check-all'; t.querySelector('.tk-tx').textContent='read';
@@ -162,7 +174,8 @@ export const PAGE_HTML = `<!doctype html>
     es=new EventSource('/api/agents/'+encodeURIComponent(id)+'/stream');
     es.onmessage=function(ev){
       var m; try{ m=JSON.parse(ev.data); }catch(e){ return; }
-      if(m.type==='output'){ addAgentMsg(m.text); if(greeted){ maybeNotify(m.text); } greeted=true; }
+      if(m.type==='history'){ renderHistory(m.messages); }
+      else if(m.type==='output'){ addAgentMsg(m.text); if(greeted){ maybeNotify(m.text); } greeted=true; }
       else if(m.type==='status' && m.status==='read'){ markRead(m.id); }
     };
   }
