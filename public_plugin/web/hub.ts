@@ -59,13 +59,28 @@ export function addReg(reg: AgentReg): void {
   regs.set(reg.agentId, reg);
 }
 
-/** Deregister an agent; the server is stopped once the last one detaches. */
+/**
+ * Deregister an agent; the server is stopped once the last one detaches. Owns SSE
+ * teardown: ends each of this agent's open stream responses (best-effort) before
+ * dropping the reg, so teardown callers don't have to (parity with inspector's
+ * hubDeregister).
+ */
 export function removeReg(agentId: string): void {
-  regs.delete(agentId);
+  const reg = regs.get(agentId);
+  if (reg) {
+    for (const res of reg.clients) {
+      try {
+        res.end();
+      } catch {
+        /* already closed */
+      }
+    }
+    regs.delete(agentId);
+  }
 }
 
-/** Allocate the next message id (the POST handler's `++msgSeq`). */
-export function bumpMsgSeq(): number {
+/** Allocate the next message id (the POST handler's `++msgSeq`). Module-private — its only caller is the POST handler below. */
+function bumpMsgSeq(): number {
   return ++msgSeq;
 }
 
@@ -91,7 +106,15 @@ export function broadcast(reg: AgentReg, event: unknown): void {
 function agentRoute(pathname: string): { id: string; tail: "message" | "stream" } | undefined {
   const m = /^\/api\/agents\/([^/]+)\/(message|stream)$/.exec(pathname);
   if (!m) return undefined;
-  return { id: decodeURIComponent(m[1]), tail: m[2] as "message" | "stream" };
+  let id: string;
+  try {
+    id = decodeURIComponent(m[1]);
+  } catch {
+    // Malformed %-escape in the agent-id segment → not a resolvable route; the
+    // caller falls through to the final 404 (and the process stays alive).
+    return undefined;
+  }
+  return { id, tail: m[2] as "message" | "stream" };
 }
 
 /** The token presented on a request: ?token=, `Authorization: Bearer`, or the cookie (read RAW). */
@@ -104,6 +127,25 @@ function presentedToken(req: http.IncomingMessage, search: string): string | und
 }
 
 function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
+  // Belt-and-suspenders: any unexpected throw in dispatch must degrade to a 400,
+  // never bubble up as an uncaughtException that crashes the shared http.Server
+  // (and the whole process). Best-effort — never rethrow.
+  try {
+    dispatch(req, res);
+  } catch {
+    if (!res.headersSent) {
+      try {
+        res.statusCode = 400;
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ error: "bad request" }));
+      } catch {
+        /* response may already be (partly) sent — nothing more we can do */
+      }
+    }
+  }
+}
+
+function dispatch(req: http.IncomingMessage, res: http.ServerResponse): void {
   const url = req.url || "/";
   const qIdx = url.indexOf("?");
   const pathname = qIdx === -1 ? url : url.slice(0, qIdx);

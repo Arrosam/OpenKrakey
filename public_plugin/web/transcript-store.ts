@@ -9,6 +9,12 @@
  * swallow errors so they never block or break message delivery (M-7); once `closed`
  * (teardown) async appends no-op, leaving the synchronous compacting rewrite
  * authoritative (M-9).
+ *
+ * Storage is an indexed ring (a backing array with a `head` index + `count`): at
+ * capacity an append advances `head` instead of shifting the array, so eviction is
+ * O(1). The backing array is bulk-compacted (dead prefix sliced off) only once it
+ * grows past 2×MAX_TRANSCRIPT, which makes appends amortized O(1) while keeping the
+ * retained window bounded. `list()` materializes the live window in FIFO order.
  */
 import * as fs from "node:fs";
 
@@ -29,8 +35,15 @@ export interface TranscriptEntry {
 }
 
 export class TranscriptStore {
-  /** The bounded in-memory history, replayed to a browser on connect. */
-  private readonly entries: TranscriptEntry[];
+  /**
+   * Backing store for the indexed ring. The live window is `buf[head .. head+count)`
+   * (oldest→newest); slots before `head` are evicted entries awaiting bulk compaction.
+   */
+  private buf: TranscriptEntry[];
+  /** Index of the oldest retained entry in `buf` (advanced on eviction; reset by compaction). */
+  private head = 0;
+  /** Number of retained entries (always <= MAX_TRANSCRIPT). */
+  private count: number;
   /** Absolute path of this agent's chat.jsonl under ctx.dataDir (agent-isolated at runtime). */
   private readonly chatPath: string;
   /**
@@ -44,7 +57,8 @@ export class TranscriptStore {
 
   private constructor(chatPath: string, entries: TranscriptEntry[]) {
     this.chatPath = chatPath;
-    this.entries = entries;
+    this.buf = entries;
+    this.count = entries.length;
   }
 
   /**
@@ -75,31 +89,49 @@ export class TranscriptStore {
     return new TranscriptStore(chatPath, kept);
   }
 
-  /** The entries to replay to a connecting client (live array; read-only by contract). */
+  /**
+   * The entries to replay to a connecting client, oldest→newest, capped at
+   * MAX_TRANSCRIPT. Materializes the ring's live window into a fresh array (read
+   * only for replay), so the caller never observes the evicted prefix.
+   */
   list(): readonly TranscriptEntry[] {
-    return this.entries;
+    return this.buf.slice(this.head, this.head + this.count);
   }
 
   /** The largest persisted message id (0 if none) — used to seed the id counter past every restart. */
   maxId(): number {
     let max = 0;
-    for (const e of this.entries) {
-      if (typeof e.id === "number") max = Math.max(max, e.id);
+    const end = this.head + this.count;
+    for (let i = this.head; i < end; i++) {
+      const id = this.buf[i].id;
+      if (typeof id === "number") max = Math.max(max, id);
     }
     return max;
   }
 
   /**
    * Append one entry to the in-memory transcript AND chat.jsonl. The in-memory
-   * transcript is capped at MAX_TRANSCRIPT (oldest dropped) so both replay and the
-   * on-disk rewrite stay bounded (H-3). The file write is async and serialized onto
-   * `writing` so it never blocks delivery and writes never interleave (M-7); a disk
-   * error is swallowed (best-effort persistence) and once `closed` is set the append
-   * is skipped, leaving compactSync's rewrite authoritative (M-9).
+   * transcript is capped at MAX_TRANSCRIPT (oldest evicted in O(1) by advancing the
+   * ring head) so both replay and the on-disk rewrite stay bounded (H-3); the dead
+   * prefix is bulk-sliced only once the backing array exceeds 2×MAX_TRANSCRIPT, so
+   * appends are amortized O(1). The file write is async and serialized onto `writing`
+   * so it never blocks delivery and writes never interleave (M-7); a disk error is
+   * swallowed (best-effort persistence) and once `closed` is set the append is
+   * skipped, leaving compactSync's rewrite authoritative (M-9).
    */
   append(entry: TranscriptEntry): void {
-    this.entries.push(entry);
-    if (this.entries.length > MAX_TRANSCRIPT) this.entries.shift();
+    this.buf.push(entry);
+    if (this.count < MAX_TRANSCRIPT) {
+      this.count++;
+    } else {
+      // At capacity: evict the oldest in O(1) by advancing the head. Bulk-compact
+      // the dead prefix only when it has grown large, keeping appends amortized O(1).
+      this.head++;
+      if (this.head > MAX_TRANSCRIPT) {
+        this.buf = this.buf.slice(this.head);
+        this.head = 0;
+      }
+    }
     this.writing = this.writing
       .then(() =>
         this.closed ? undefined : fs.promises.appendFile(this.chatPath, JSON.stringify(entry) + "\n"),
@@ -110,11 +142,16 @@ export class TranscriptStore {
   /**
    * Flip the matching in-memory entry's status to "read" so a reconnect/replay shows
    * "read" immediately, and compactSync bakes it onto disk (M-9). No-op if no entry
-   * carries that id.
+   * carries that id. Scans only the retained window.
    */
   markRead(id: number): void {
-    const t = this.entries.find((e) => e.id === id);
-    if (t) t.status = "read";
+    const end = this.head + this.count;
+    for (let i = this.head; i < end; i++) {
+      if (this.buf[i].id === id) {
+        this.buf[i].status = "read";
+        return;
+      }
+    }
   }
 
   /**
@@ -127,9 +164,10 @@ export class TranscriptStore {
   compactSync(): void {
     this.closed = true;
     try {
+      const kept = this.buf.slice(this.head, this.head + this.count);
       fs.writeFileSync(
         this.chatPath,
-        this.entries.map((e) => JSON.stringify(e)).join("\n") + (this.entries.length ? "\n" : ""),
+        kept.map((e) => JSON.stringify(e)).join("\n") + (kept.length ? "\n" : ""),
       );
     } catch {
       /* persistence is best-effort — a write failure must not break shutdown */
