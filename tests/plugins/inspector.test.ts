@@ -1080,3 +1080,245 @@ test("inspector: a known-agent snapshot returns the documented shape { records:[
     await c.close();
   }
 });
+
+// ###########################################################################
+// SECURITY REGRESSION TESTS (added) — two hardening fixes in `inspector`.
+// These are RED on the pre-fix code and GREEN once the fixes land. They reuse
+// the same child-process harness (startChild / assertUp / base / api / c.token)
+// as every test above; the child runs a real node:http server on an ephemeral
+// port with a pinned+printed session token.
+//
+//   TEST A — a malformed Cookie on the un-gated GET / must NOT crash the
+//            server (regression for an UNAUTHENTICATED denial-of-service):
+//            extractToken does decodeURIComponent(cookieValue), which THROWS a
+//            URIError on a bad percent-sequence like "%". Pre-fix that throw is
+//            uncaught and takes down the whole process — every agent in it.
+//
+//   TEST B — the dashboard page's esc() must escape quotes (regression for an
+//            attribute-injection XSS): esc() is used inside an HTML attribute
+//            (class="lvl …") yet pre-fix it only escaped & < > and left " and '
+//            intact, so attacker-controlled text could break out of the attribute.
+// ###########################################################################
+
+// --- shared helpers for the security regressions ---------------------------
+
+/**
+ * Perform a fetch and report whether the server actually answered vs dropped
+ * the connection. A crashed/killed server yields a rejected fetch (ECONNREFUSED
+ * / ECONNRESET / socket hang up) — that's the "dropped" signal we test for.
+ * Never throws; resolves to a small descriptor.
+ */
+async function probe(
+  url: string,
+  init?: RequestInit,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  try {
+    const res = await fetch(url, init);
+    // Drain the body so the socket is released and the child isn't left with a
+    // half-read response (which can wedge keep-alive on some node versions).
+    try {
+      await res.arrayBuffer();
+    } catch {
+      /* body errored after headers — still counts as "answered" */
+    }
+    return { ok: true, status: res.status };
+  } catch (e) {
+    return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Pull the body of a top-level `function esc(...) { ... }` declaration out of the
+ * dashboard HTML by brace-matching (robust to braces inside regex/string/object
+ * literals in the body). Returns { params, body } or null if not found.
+ */
+function extractFn(
+  html: string,
+  name: string,
+): { params: string; body: string } | null {
+  const re = new RegExp("function\\s+" + name + "\\s*\\(([^)]*)\\)\\s*\\{", "g");
+  const m = re.exec(html);
+  if (!m) return null;
+  const params = m[1].trim();
+  // Scan from the opening brace to its match, tracking depth. This is a
+  // pragmatic balancer — good enough for a small dependency-free page helper;
+  // it is not a full JS parser, but esc()'s body is a flat .replace() chain.
+  const open = re.lastIndex - 1; // index of the "{" we just matched
+  let depth = 0;
+  for (let i = open; i < html.length; i++) {
+    const ch = html[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return { params, body: html.slice(open + 1, i) };
+      }
+    }
+  }
+  return null;
+}
+
+// ===========================================================================
+// SEC-A — malformed Cookie on GET / must not crash the server (DoS regression)
+// ===========================================================================
+
+test("inspector(security): a malformed percent-encoded Cookie on GET / does NOT crash the server", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    // 1) The un-gated page request carrying a malformed cookie value. "%" is a
+    //    truncated percent-escape; decodeURIComponent("%") throws URIError.
+    //    Pre-fix the uncaught throw crashes the process. The request itself must
+    //    NOT hang or drop — it must yield SOME status (the page on tolerant
+    //    parsing, or a 4xx; never a refused/reset socket).
+    const first = await probe(base(c) + "/", { headers: { cookie: "inspector_token=%" } });
+    assert.ok(
+      first.ok,
+      "GET / with a malformed cookie must return a response, not drop the connection " +
+        "(got network error: " + (first.error || "") + ")",
+    );
+    assert.ok(
+      first.status === 200 || (first.status >= 400 && first.status < 500),
+      "GET / with a malformed cookie must answer with 200 or a 4xx, got " + first.status,
+    );
+
+    // 2) THE crash detector: a subsequent, well-formed authed request must still
+    //    be served. Pre-fix the process is gone and this fetch is refused.
+    const after = await probe(api(c, "/api/agents"));
+    assert.ok(
+      after.ok,
+      "the server must still be alive after the malformed cookie (the subsequent " +
+        "request was dropped — the process crashed: " + (after.error || "") + ")",
+    );
+    assert.equal(
+      after.status,
+      200,
+      "a normal authed GET /api/agents after the malformed cookie must return 200 (server survived)",
+    );
+
+    // 3) And the agent roster is intact — the per-agent state did not die with it.
+    const body = (await fetch(api(c, "/api/agents")).then((r) => r.json())) as { agents: string[] };
+    assert.deepEqual(body.agents, ["alice"], "the agent is still registered after the malformed cookie");
+  } finally {
+    await c.close();
+  }
+});
+
+test("inspector(security): a malformed percent-encoded :id on a token-gated path returns 4xx, not a crash", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    // A token-gated route whose :id segment is a bad percent-escape ("%").
+    // Decoding the path segment must not throw out of the handler; the route
+    // should resolve as a normal unknown-id 404 (it is certainly not a live agent).
+    const malformed = await probe(api(c, "/api/agents/%/snapshot"));
+    assert.ok(
+      malformed.ok,
+      "GET /api/agents/%/snapshot must return a response, not drop the connection " +
+        "(got network error: " + (malformed.error || "") + ")",
+    );
+    assert.equal(
+      malformed.status,
+      404,
+      "a malformed percent-encoded agent id resolves to a normal 404, got " + malformed.status,
+    );
+
+    // Crash detector: the server is still healthy afterwards.
+    const after = await probe(api(c, "/api/agents"));
+    assert.ok(after.ok, "server must survive the malformed :id (subsequent request dropped: " + (after.error || "") + ")");
+    assert.equal(after.status, 200, "a normal request after the malformed :id must return 200 (server survived)");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// SEC-B — the dashboard page's esc() must escape quotes (attribute-injection XSS)
+// ===========================================================================
+
+test("inspector(security): the dashboard page's esc() escapes BOTH double- and single-quotes", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    const html = await fetch(base(c) + "/").then((r) => r.text());
+    const fn = extractFn(html, "esc");
+    assert.ok(
+      fn && fn.body.length > 0,
+      "the page must define a `function esc(...)` helper (could not extract it from the HTML)",
+    );
+
+    // Preferred, BEHAVIORAL check: reconstruct esc() from the page source and
+    // run it. CRITICAL: only the *reconstruction* may be caught (an unusual body
+    // shape we cannot rebuild) — the behavioral assertions themselves must
+    // PROPAGATE, never be swallowed into the weaker source fallback. So we build
+    // `escFn` inside a narrow try, then assert OUTSIDE it.
+    //
+    // The extracted body is a COMPLETE function body (it has its own `return`),
+    // so reconstruct it directly; only if that fails to yield a 1-arg
+    // string->string function do we try the expression-wrapped form (for an esc
+    // written as a bare expression) and then the source-level fallback.
+    let escFn: ((x: string) => string) | null = null;
+    try {
+      // eslint-disable-next-line no-new-func
+      const cand = new Function(fn!.params || "s", fn!.body) as (x: string) => string;
+      if (typeof cand("x") !== "string") throw new Error("non-string");
+      escFn = cand;
+    } catch {
+      try {
+        // eslint-disable-next-line no-new-func
+        const cand = new Function(fn!.params || "s", "return (" + fn!.body + "\n);") as (
+          x: string,
+        ) => string;
+        if (typeof cand("x") !== "string") throw new Error("non-string");
+        escFn = cand;
+      } catch {
+        escFn = null;
+      }
+    }
+
+    if (escFn) {
+      const esc = escFn;
+      const dq = esc('a"b');
+      const sq = esc("a'b");
+      // Sanity: it must still escape the basics it already did, so we know we ran
+      // the real helper and not a no-op.
+      const lt = esc("a<b>c");
+      assert.ok(typeof dq === "string" && typeof sq === "string", "esc() must return a string");
+      assert.ok(!lt.includes("<") && !lt.includes(">"), "esc() must still escape < and > (ran the real helper)");
+
+      assert.ok(
+        !dq.includes('"'),
+        'esc(\'a"b\') must not contain a bare double-quote (attribute injection); got ' + JSON.stringify(dq),
+      );
+      assert.ok(
+        /&quot;|&#0*34;|&#x0*22;/i.test(dq),
+        'esc() must entity-encode " as &quot; / &#34; / &#x22;; got ' + JSON.stringify(dq),
+      );
+      assert.ok(
+        !sq.includes("'"),
+        "esc(\"a'b\") must not contain a bare single-quote (attribute injection); got " + JSON.stringify(sq),
+      );
+      assert.ok(
+        /&#0*39;|&#x0*27;|&apos;/i.test(sq),
+        "esc() must entity-encode ' as &#39; / &#x27; / &apos;; got " + JSON.stringify(sq),
+      );
+    } else {
+      // Could not reconstruct esc() — fall back to a strictly-weaker source guard
+      // that still FAILS if quote-escaping is absent from the body text.
+      const src = fn!.body;
+      assert.ok(
+        /&quot;|&#0*34;|&#x0*22;/i.test(src),
+        "esc()'s source must map the double-quote to an HTML entity (&quot;/&#34;/&#x22;); body: " + src,
+      );
+      assert.ok(
+        /&#0*39;|&#x0*27;|&apos;/i.test(src),
+        "esc()'s source must map the single-quote to an HTML entity (&#39;/&#x27;/&apos;); body: " + src,
+      );
+    }
+  } finally {
+    await c.close();
+  }
+});
