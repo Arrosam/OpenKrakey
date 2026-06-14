@@ -1322,3 +1322,134 @@ test("inspector(security): the dashboard page's esc() escapes BOTH double- and s
     await c.close();
   }
 });
+
+// ###########################################################################
+// RING-BUFFER EVICTION GUARD (added) — pins the FIFO drop-oldest semantics so an
+// upcoming internal rewrite of the eviction mechanism cannot regress them. This
+// is GREEN on today's code; it deliberately over-specifies the *observable*
+// contract (cap, order, dropped count, monotonic seq) so the rewrite is held to
+// the exact same behavior, not merely "bounded + some dropped".
+// ###########################################################################
+
+// ===========================================================================
+// Ring eviction — drop-oldest at capacity, order preserved, accurate `dropped`,
+// strictly-increasing seq, retained == the highest `bufferSize` seqs.
+// ===========================================================================
+
+test("inspector: the ring evicts oldest-first at capacity, preserves order, and reports an exact dropped count (FIFO guard)", async () => {
+  const SIZE = 5;
+  const N = 10; // emit twice the capacity so exactly N-SIZE get evicted FIFO
+  // First (and only) agent: ephemeral port 0 + bufferSize 5.
+  const c = await startChild(["alice"], [SIZE]);
+  try {
+    assertUp(c);
+
+    // Drive N distinct, ORDERED events onto alice's bus. log.entry carries
+    // observable `text`, so each record's payload pins its identity AND its
+    // emission order. Wait for each ack so the emission order is deterministic
+    // (the bus delivers synchronously, but we serialize to be unambiguous).
+    for (let i = 0; i < N; i++) {
+      await sendAndWait(c, "log alice info core:test evt-" + i, "log");
+    }
+
+    // Poll until the ring has captured the full final window. We require BOTH the
+    // newest sentinel (evt-9) present AND the count settled at the cap, so we are
+    // never asserting against a mid-fill snapshot.
+    const recs = await waitSnapshot(
+      c,
+      "alice",
+      (rs) =>
+        rs.filter((r) => r.kind === "log").length >= SIZE &&
+        rs.some((r) => r.kind === "log" && /\bevt-9\b/.test(flat(r.payload))),
+      6000,
+    );
+    const snap = await snapshot(c, "alice");
+    assert.equal(snap.status, 200, "alice's snapshot is reachable");
+
+    // Only our log records are on this bus (nothing else was emitted), so the
+    // whole ring is the log window. Guard that assumption explicitly.
+    const logs = snap.records.filter((r) => r.kind === "log");
+    assert.equal(
+      logs.length,
+      snap.records.length,
+      "no non-log records should exist on this freshly-started agent's bus: " + flat(snap.records),
+    );
+
+    // (1) CAP: the ring is capped at exactly bufferSize.
+    assert.equal(
+      snap.records.length,
+      SIZE,
+      "the ring must hold exactly bufferSize=" + SIZE + " records (got " + snap.records.length + ")",
+    );
+
+    // (2) ORDER + DROP-OLDEST: the retained records are the LAST SIZE emitted, in
+    //     emission order — evt-5..evt-9. The oldest (evt-0..evt-4) were dropped.
+    const texts = snap.records.map((r) => {
+      const m = /\bevt-(\d+)\b/.exec(flat(r.payload));
+      return m ? Number(m[1]) : NaN;
+    });
+    const expected = [];
+    for (let i = N - SIZE; i < N; i++) expected.push(i); // [5,6,7,8,9]
+    assert.deepEqual(
+      texts,
+      expected,
+      "the ring must retain the LAST " + SIZE + " events IN ORDER (evt-" + (N - SIZE) + "..evt-" + (N - 1) +
+        "); the oldest were evicted FIFO. got: " + flat(texts),
+    );
+    // Spell out the FIFO-drop half independently: none of the evicted sentinels survive.
+    for (let i = 0; i < N - SIZE; i++) {
+      assert.ok(
+        !snap.records.some((r) => new RegExp("\\bevt-" + i + "\\b").test(flat(r.payload))),
+        "evt-" + i + " was among the oldest and must have been dropped (FIFO), but it is still present",
+      );
+    }
+
+    // (3) DROPPED: exactly N-SIZE were evicted — an ACCURATE running count, not a
+    //     boolean "something overflowed".
+    assert.equal(
+      snap.dropped,
+      N - SIZE,
+      "dropped must equal the number evicted (" + (N - SIZE) + "), got " + snap.dropped,
+    );
+
+    // (4) SEQ: per-record seq is strictly increasing across the retained window,
+    //     and the retained seqs are the HIGHEST SIZE seqs (a contiguous tail —
+    //     consistent with a monotonic counter and drop-oldest eviction). We assert
+    //     the shape WITHOUT hardcoding the seq base (0- or 1-based both pass).
+    const seqs = snap.records.map((r) => r.seq);
+    assert.ok(
+      seqs.every((s) => typeof s === "number" && Number.isFinite(s)),
+      "every retained record carries a numeric seq: " + flat(seqs),
+    );
+    for (let i = 1; i < seqs.length; i++) {
+      assert.ok(
+        seqs[i] > seqs[i - 1],
+        "seq must be STRICTLY increasing in retained order (seq[" + i + "]=" + seqs[i] +
+          " !> seq[" + (i - 1) + "]=" + seqs[i - 1] + "): " + flat(seqs),
+      );
+    }
+    // Highest SIZE seqs == a contiguous run ending at the max (the tail of the
+    // monotonic counter). With N total emissions and SIZE retained, the gap from
+    // first-retained to last-retained is exactly SIZE-1 (no holes), and the max
+    // seq corresponds to the newest record (evt-9, last in the window).
+    const minRetained = Math.min(...seqs);
+    const maxRetained = Math.max(...seqs);
+    assert.equal(
+      maxRetained - minRetained,
+      SIZE - 1,
+      "the retained seqs must be a contiguous block of " + SIZE + " (the highest seqs, no holes): " + flat(seqs),
+    );
+    assert.equal(
+      seqs[seqs.length - 1],
+      maxRetained,
+      "the newest retained record (evt-" + (N - 1) + ") must carry the highest seq: " + flat(seqs),
+    );
+    assert.equal(
+      seqs[0],
+      minRetained,
+      "the oldest retained record (evt-" + (N - SIZE) + ") must carry the lowest of the retained seqs: " + flat(seqs),
+    );
+  } finally {
+    await c.close();
+  }
+});
