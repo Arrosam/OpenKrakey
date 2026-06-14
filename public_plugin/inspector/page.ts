@@ -282,8 +282,9 @@ export const PAGE = `<!doctype html>
     statusEl.className = "status-bar" + (cls ? " " + cls : "");
   }
   function esc(s) {
-    return String(s).replace(/[&<>]/g, function (c) {
-      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;"
+        : c === '"' ? "&quot;" : "&#39;";
     });
   }
   function fmtTime(ms) {
@@ -314,12 +315,12 @@ export const PAGE = `<!doctype html>
   }
 
   // ---- per-selection state ----
-  var state = null; // { id, seen, records, es, prompts, ... }
+  var state = null; // { id, lastSeq, records, es, prompts, ... }
 
   function freshState(id) {
     return {
       id: id,
-      seen: Object.create(null),
+      lastSeq: -1,      // monotonic high-water mark for dedup (seq is server-monotonic)
       records: [],
       es: null,
       prompts: {},      // corrId -> { sent, received }
@@ -343,6 +344,7 @@ export const PAGE = `<!doctype html>
 
   function summarize(rec) {
     var p = rec.payload;
+    if (p && p.__truncated) return "⚠ truncated (" + p.bytes + " bytes)";
     switch (rec.kind) {
       case "prompt.sent": {
         var t = get(p, ["data", "context", "text"]);
@@ -382,14 +384,23 @@ export const PAGE = `<!doctype html>
   // ---- panel 2: event stream (explicit auto-follow toggle is the master) ----
   var eventsBody = $("events");
   var autoFollow = $("autoFollow");
+  // Our own programmatic scrolls (backfill/append/tab-show) fire a scroll event
+  // too; this flag lets the listener ignore them so auto-follow isn't spuriously
+  // unchecked while we're snapping to the bottom.
+  var programmaticScroll = false;
+  function pinToBottom() {
+    programmaticScroll = true;
+    eventsBody.scrollTop = eventsBody.scrollHeight;
+  }
   // The checkbox is the source of truth. Manually scrolling up is a nicety that
   // unchecks it; checking it again snaps back to the latest.
   eventsBody.addEventListener("scroll", function () {
+    if (programmaticScroll) { programmaticScroll = false; return; }
     var atBottom = (eventsBody.scrollHeight - eventsBody.scrollTop - eventsBody.clientHeight) < 24;
     if (!atBottom && autoFollow.checked) autoFollow.checked = false;
   });
   autoFollow.addEventListener("change", function () {
-    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
+    if (autoFollow.checked) pinToBottom();
   });
   function makeEventRow(rec) {
     var div = document.createElement("div");
@@ -411,7 +422,7 @@ export const PAGE = `<!doctype html>
     var frag = document.createDocumentFragment();
     for (var i = 0; i < s.records.length; i++) frag.appendChild(makeEventRow(s.records[i]));
     eventsBody.appendChild(frag);
-    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
+    if (autoFollow.checked) pinToBottom();
   }
   // Cheap incremental append for a single LIVE record; trims oldest DOM rows.
   function appendEventRow(rec) {
@@ -423,7 +434,7 @@ export const PAGE = `<!doctype html>
       rows[0].remove();
       rows = eventsBody.querySelectorAll(".row");
     }
-    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
+    if (autoFollow.checked) pinToBottom();
   }
 
   // ---- panel 1: prompts ----
@@ -444,11 +455,16 @@ export const PAGE = `<!doctype html>
       else if (pr.received.payload && pr.received.payload.ok === false) { badge = "error"; bcls = "err"; }
       else { badge = "ok"; bcls = "ok"; }
 
-      var sentText = pr.sent ? (get(pr.sent.payload, ["data", "context", "text"]) || "") : "(no request captured)";
+      var sentText;
+      if (!pr.sent) sentText = "(no request captured)";
+      else if (pr.sent.payload && pr.sent.payload.__truncated) sentText = "⚠ truncated (" + pr.sent.payload.bytes + " bytes)";
+      else sentText = get(pr.sent.payload, ["data", "context", "text"]) || "";
       var recvBlock = "(awaiting response…)";
       if (pr.received) {
         var rp = pr.received.payload;
-        if (rp && rp.ok === false) {
+        if (rp && rp.__truncated) {
+          recvBlock = "⚠ truncated (" + rp.bytes + " bytes)";
+        } else if (rp && rp.ok === false) {
           recvBlock = "error: " + (rp.error || "?");
         } else {
           var d = rp && rp.data;
@@ -482,11 +498,21 @@ export const PAGE = `<!doctype html>
     var pidF = logPid.value.trim().toLowerCase();
     var shown = 0;
     for (var i = 0; i < s.logs.length; i++) {
-      var d = get(s.logs[i].payload, ["data"]) || {};
-      if (lvl && d.level !== lvl) continue;
-      if (pidF && String(d.pluginId || "").toLowerCase().indexOf(pidF) === -1) continue;
+      var lp = s.logs[i].payload;
       var row = document.createElement("div");
       row.className = "log";
+      if (lp && lp.__truncated) {
+        // Truncated: level/pid are gone, so it can't be filtered — surface it raw.
+        if (lvl || pidF) continue;
+        row.innerHTML = '<span class="lvl">?</span><span class="pid">?</span>'
+          + '<span class="txt">⚠ truncated (' + lp.bytes + ' bytes)</span>';
+        logsBody.appendChild(row);
+        shown++;
+        continue;
+      }
+      var d = get(lp, ["data"]) || {};
+      if (lvl && d.level !== lvl) continue;
+      if (pidF && String(d.pluginId || "").toLowerCase().indexOf(pidF) === -1) continue;
       row.innerHTML = '<span class="lvl ' + esc(d.level || "") + '">' + esc(d.level || "?") + '</span>'
         + '<span class="pid">' + esc(d.pluginId || "?") + '</span>'
         + '<span class="txt">' + esc(d.text || "") + '</span>';
@@ -524,13 +550,14 @@ export const PAGE = `<!doctype html>
   }
 
   // ---- record routing: STATE ONLY (never touches the DOM) ----
-  // Updates seen/records/prompts/promptOrder/logs/beats and enforces the caps.
+  // Updates records/prompts/promptOrder/logs/beats and enforces the caps.
   // Returns true if the record was new (false if it was a dedup'd duplicate), so
   // callers can decide whether a re-render is warranted.
   function applyRecord(s, rec) {
-    var key = rec.seq;
-    if (s.seen[key]) return false;
-    s.seen[key] = true;
+    // seq is a monotonic per-agent server counter and the snapshot is an ordered
+    // prefix with no stream replay, so a high-water mark dedupes in O(1) memory.
+    if (rec.seq <= s.lastSeq) return false;
+    s.lastSeq = rec.seq;
 
     s.records.push(rec);
     if (s.records.length > CAP_EVENTS) s.records.shift();
@@ -574,6 +601,38 @@ export const PAGE = `<!doctype html>
     $("cBeats").textContent = s.beats.length;
   }
 
+  // ---- live render coalescer: bound panel re-renders to once-per-frame -------
+  // The event stream stays incremental (appendEventRow). The other three panels
+  // are full-rebuilds, so a burst of live records would rebuild them N times per
+  // frame. Instead, mark the affected panel dirty and flush at most once per rAF,
+  // re-rendering only panels that are dirty AND currently visible. Hidden panels
+  // keep their dirty flag and are flushed when their tab is activated.
+  var dirty = { prompts: false, logs: false, beats: false };
+  var rafHandle = 0;
+  var raf = (typeof window !== "undefined" && window.requestAnimationFrame)
+    ? window.requestAnimationFrame.bind(window)
+    : function (cb) { return setTimeout(cb, 16); };
+
+  // A panel is visible if its own tab is active OR the overview shows all four.
+  function panelVisible(panel) {
+    var view = document.getElementById("main").getAttribute("data-view");
+    return view === "overview" || view === panel;
+  }
+
+  function flushDirty() {
+    rafHandle = 0;
+    var s = state;
+    if (!s) { dirty.prompts = dirty.logs = dirty.beats = false; return; }
+    if (dirty.prompts && panelVisible("prompts")) { renderPrompts(s); dirty.prompts = false; }
+    if (dirty.logs && panelVisible("logs")) { renderLogs(s); dirty.logs = false; }
+    if (dirty.beats && panelVisible("beats")) { renderBeats(s); dirty.beats = false; }
+    renderCounts(s); // cheap (4 text writes); keep header badges fresh regardless
+  }
+
+  function scheduleFlush() {
+    if (!rafHandle) rafHandle = raf(flushDirty);
+  }
+
   // BACKFILL: apply ALL records to state, then render every panel exactly ONCE.
   function ingestSnapshot(s, recs) {
     for (var i = 0; i < recs.length; i++) applyRecord(s, recs[i]);
@@ -582,20 +641,26 @@ export const PAGE = `<!doctype html>
     renderLogs(s);
     renderBeats(s);
     renderCounts(s);
+    dirty.prompts = dirty.logs = dirty.beats = false; // just rendered everything
   }
 
-  // LIVE (SSE): one record — append the event row incrementally and refresh the
-  // other panels. Cheap only because state + DOM are capped.
+  // LIVE (SSE): one record. The event stream appends incrementally; the prompt,
+  // log and beat panels are marked dirty and coalesced into one rAF flush.
   function ingestLive(s, rec) {
     if (!applyRecord(s, rec)) return;
     appendEventRow(rec);
-    if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) renderPrompts(s);
-    if (rec.kind === "log") renderLogs(s);
-    renderBeats(s);
-    renderCounts(s);
+    if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) dirty.prompts = true;
+    if (rec.kind === "log") dirty.logs = true;
+    dirty.beats = true; // every record joins (or opens) a beat
+    scheduleFlush();
   }
 
   function resetPanels() {
+    // Drop any pending coalesced flush + dirty flags so a stale re-render can't
+    // paint the previous agent's data into the freshly-cleared panels.
+    if (rafHandle && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafHandle);
+    rafHandle = 0;
+    dirty.prompts = dirty.logs = dirty.beats = false;
     promptsBody.innerHTML = '<div class="empty">No prompts yet.</div>';
     eventsBody.innerHTML = '<div class="empty">No events yet.</div>';
     logsBody.innerHTML = '<div class="empty">No logs yet.</div>';
@@ -680,7 +745,16 @@ export const PAGE = `<!doctype html>
         openStream(id);
       })
       .catch(function (e) {
-        if (String(e.message) !== "401") setStatus("error: " + e.message, "err");
+        if (String(e.message) === "401") return; // showLock() already handled it
+        setStatus("error: " + e.message, "err");
+        // A non-401 (e.g. snapshot 404 because the agent vanished) leaves a blank
+        // dashboard; fall back to the landing — but only if THIS selection is
+        // still current (don't yank the user off a newer pick made mid-flight).
+        if (!state || state.id === id) {
+          state = null;
+          agentSel.value = "";
+          showLanding();
+        }
       });
   }
 
@@ -717,9 +791,11 @@ export const PAGE = `<!doctype html>
     btn.addEventListener("click", function () {
       document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.toggle("active", b === btn); });
       document.getElementById("main").setAttribute("data-view", btn.getAttribute("data-view"));
+      // A panel that fell dirty while hidden now becomes visible — render it now.
+      flushDirty();
       // re-pin the event stream to bottom when (re)showing it under auto-follow
       if (typeof eventsBody !== "undefined" && document.getElementById("autoFollow") && document.getElementById("autoFollow").checked) {
-        eventsBody.scrollTop = eventsBody.scrollHeight;
+        pinToBottom();
       }
     });
   });
