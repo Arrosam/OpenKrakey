@@ -32,6 +32,8 @@
  */
 import * as http from "node:http";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { LLMResponse } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
@@ -41,12 +43,32 @@ const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
 const COOKIE_NAME = "krakey_token";
 
+/**
+ * One persisted line of an agent's chat transcript (the chat.jsonl wire shape).
+ * `id`/`status` are present only for user messages (carried so a replayed `sent`
+ * tick survives a reload); agent messages have just role/text/at.
+ */
+interface TranscriptEntry {
+  role: "user" | "agent";
+  text: string;
+  id?: number;
+  status?: string;
+  at: number;
+}
+
 interface AgentReg {
   agentId: string;
   /** Deliver one browser message to THIS agent (emit input.message + wake the beat). */
   deliver: (text: string, msgId: number) => void;
   /** Open SSE responses streaming THIS agent's output + statuses. */
   clients: Set<http.ServerResponse>;
+  /**
+   * This agent's chat transcript, replayed to a browser on connect (R6: each agent
+   * keeps its own). Loaded from chat.jsonl at setup and appended to as messages flow.
+   */
+  transcript: TranscriptEntry[];
+  /** Absolute path of this agent's chat.jsonl under ctx.dataDir (agent-isolated at runtime). */
+  chatPath: string;
   /** Message ids appended to the queue, not yet carried by an LLM request. */
   pending: number[];
   /**
@@ -77,6 +99,42 @@ function sseSend(res: http.ServerResponse, event: unknown): void {
 
 function broadcast(reg: AgentReg, event: unknown): void {
   for (const res of reg.clients) sseSend(res, event);
+}
+
+/**
+ * Append one entry to the agent's in-memory transcript AND its chat.jsonl. The file
+ * write is best-effort: a disk error must never break message delivery, so it is
+ * swallowed (the in-memory transcript still replays for the life of the process).
+ */
+function record(reg: AgentReg, entry: TranscriptEntry): void {
+  reg.transcript.push(entry);
+  try {
+    fs.appendFileSync(reg.chatPath, JSON.stringify(entry) + "\n");
+  } catch {
+    /* persistence is best-effort — never block delivery on a write error */
+  }
+}
+
+/** Load a chat.jsonl into a transcript array, one JSON object per line; skip malformed lines. */
+function loadTranscript(chatPath: string): TranscriptEntry[] {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(chatPath, "utf8");
+  } catch {
+    return []; // no history yet (or unreadable) — start empty
+  }
+  const out: TranscriptEntry[] = [];
+  for (const line of raw.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    try {
+      const e = JSON.parse(s) as TranscriptEntry;
+      if (e && (e.role === "user" || e.role === "agent") && typeof e.text === "string") out.push(e);
+    } catch {
+      /* ignore a malformed line */
+    }
+  }
+  return out;
 }
 
 /** Match /api/agents/:id/(message|stream). */
@@ -166,6 +224,17 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
       res.setHeader("cache-control", "no-cache");
       res.setHeader("connection", "keep-alive");
       res.write(": ok\n\n");
+      // Replay THIS agent's transcript first (always — `messages: []` when empty),
+      // then the greeting, then live messages — so a reload/switch shows history.
+      sseSend(res, {
+        type: "history",
+        messages: reg.transcript.map((e) => ({
+          role: e.role,
+          text: e.text,
+          id: e.id,
+          status: e.status,
+        })),
+      });
       sseSend(res, { type: "output", text: reg.greeting });
       reg.clients.add(res);
       req.on("close", () => reg.clients.delete(res));
@@ -191,6 +260,7 @@ function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
         }
         const id = ++msgSeq;
         reg.pending.push(id);
+        record(reg, { role: "user", text, id, status: "sent", at: Date.now() });
         reg.deliver(text, id);
         broadcast(reg, { type: "status", id, status: "sent" });
         res.statusCode = 202;
@@ -270,8 +340,20 @@ const createWeb: PluginFactory = (): Plugin => {
           ? cfg.token
           : crypto.randomBytes(24).toString("base64url");
 
+      // Ensure the per-plugin (agent-isolated) data dir exists, then load any prior
+      // transcript so history survives a restart. Best-effort: a dir/read failure
+      // just starts the agent with an empty transcript.
+      const chatPath = path.join(ctx.dataDir, "chat.jsonl");
+      try {
+        fs.mkdirSync(ctx.dataDir, { recursive: true });
+      } catch {
+        /* best-effort: an unwritable dataDir degrades to in-memory only */
+      }
+
       const r: AgentReg = {
         agentId: ctx.agentId,
+        transcript: loadTranscript(chatPath),
+        chatPath,
         deliver: (text, msgId) => {
           const payload: EventPayloads["input.message"] = {
             at: Date.now(),
@@ -290,10 +372,13 @@ const createWeb: PluginFactory = (): Plugin => {
       reg = r;
       regs.set(ctx.agentId, r);
 
-      // Stream this agent's replies to its browser clients.
+      // Stream this agent's replies to its browser clients, persisting each.
       const offOutput = ctx.events.on(Events.OUTPUT_MESSAGE, (payload) => {
         const text = (payload as EventPayloads["output.message"])?.data?.text;
-        if (typeof text === "string") broadcast(r, { type: "output", text });
+        if (typeof text === "string") {
+          record(r, { role: "agent", text, at: Date.now() });
+          broadcast(r, { type: "output", text });
+        }
       });
 
       // A new request snapshots the messages now in its composed context: those
