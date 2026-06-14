@@ -17,7 +17,7 @@ import type { PluginContext } from "../../contracts/plugin";
 const DEFAULT_PORT = 7788;
 
 /** The fully-resolved, validated inspector configuration. */
-export interface InspectorConfig {
+interface InspectorConfig {
   port: number;
   host: string;
   token: string;

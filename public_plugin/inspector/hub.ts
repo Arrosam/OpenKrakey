@@ -27,9 +27,20 @@ export interface EventRecord {
   payload: unknown;
 }
 
-/** Per-agent registration kept inside the shared hub, keyed by agentId. */
+/**
+ * Per-agent registration kept inside the shared hub, keyed by agentId.
+ *
+ * The record ring is a circular buffer: `buf` is the backing store (grows up to
+ * the configured cap, then slots are reused), `head` indexes the oldest live
+ * record, and `count` is the number of live records. Logical (seq/insertion)
+ * order is `buf[(head + i) % buf.length]` for `i` in `[0, count)`. This gives
+ * amortized-O(1) appends with drop-oldest eviction (vs. O(N) Array.shift()).
+ * Read it in order via `snapshotRing`.
+ */
 export interface AgentReg {
-  ring: EventRecord[];
+  buf: EventRecord[];
+  head: number;
+  count: number;
   dropped: number;
   sseClients: Set<http.ServerResponse>;
 }
@@ -48,7 +59,6 @@ interface Hub {
   token: string;
   /** The port we actually bound (from server.address()); 0 until bound. */
   boundPort: number;
-  host: string;
   refs: number;
 }
 
@@ -59,7 +69,6 @@ const hub: Hub = {
   agents: new Map(),
   token: "",
   boundPort: 0,
-  host: "127.0.0.1",
   refs: 0,
 };
 
@@ -168,7 +177,7 @@ function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void
           sendJson(res, 404, { error: "unknown agent" });
           return;
         }
-        sendJson(res, 200, { records: reg.ring.slice(), dropped: reg.dropped });
+        sendJson(res, 200, { records: snapshotRing(reg), dropped: reg.dropped });
         return;
       }
 
@@ -206,20 +215,52 @@ function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void
 // ---- ring append + SSE fan-out (storage + transport) ------------------------
 
 /**
+ * Read an agent's ring in seq/insertion order (oldest → newest) as a plain
+ * array. Walks the circular buffer from `head` for `count` elements; replaces
+ * the old `reg.ring.slice()` for the snapshot route.
+ */
+export function snapshotRing(reg: AgentReg): EventRecord[] {
+  const out: EventRecord[] = [];
+  const len = reg.buf.length;
+  for (let i = 0; i < reg.count; i++) {
+    out.push(reg.buf[(reg.head + i) % len]);
+  }
+  return out;
+}
+
+/**
  * Append a record to an agent's ring and fan it out to that agent's live SSE
  * clients. FIFO: when at capacity the oldest is dropped (and `dropped`
  * incremented) BEFORE pushing. Broken SSE clients are collected during the
  * write loop and reaped after it, never mutating the Set mid-iteration.
  */
 export function pushRecord(reg: AgentReg, rec: EventRecord, bufferSize: number): void {
-  // FIFO ring: drop the oldest BEFORE pushing when at capacity.
-  while (reg.ring.length >= bufferSize) {
-    reg.ring.shift();
+  // FIFO circular ring: drop the oldest BEFORE pushing while at/over capacity
+  // (a loop, not an if, so a shrunk bufferSize evicts down to the new cap).
+  // Eviction just advances `head` past the oldest slot — amortized O(1), no
+  // Array.shift(). The `count > 0` guard is the natural "can't evict an empty
+  // ring" precondition (config guarantees bufferSize >= 1, so it also rules out
+  // a 0-cap spin).
+  while (reg.count > 0 && reg.count >= bufferSize) {
+    reg.head = (reg.head + 1) % reg.buf.length;
+    reg.count--;
     reg.dropped++;
   }
-  reg.ring.push(rec);
+  // Append at the logical tail. While the backing array is still smaller than
+  // the cap we grow it (head is 0 and the buffer is densely packed in that
+  // regime, so the tail index is exactly buf.length); once it's at cap we reuse
+  // the slot at (head + count) % length.
+  if (reg.buf.length < bufferSize) {
+    reg.buf.push(rec);
+  } else {
+    reg.buf[(reg.head + reg.count) % reg.buf.length] = rec;
+  }
+  reg.count++;
 
-  // Fan out to this agent's live SSE clients only (R6).
+  // Fan out to this agent's live SSE clients only (R6). Skip building/serializing
+  // the frame entirely when nobody is listening (the common case — the dashboard
+  // usually isn't open); the ring append above always happens regardless.
+  if (reg.sseClients.size === 0) return;
   const frame = "data: " + safeStringify({ type: "record", record: rec }) + "\n\n";
   let dead: http.ServerResponse[] | null = null;
   for (const client of reg.sseClients) {
@@ -242,7 +283,7 @@ export async function hubRegister(
 ): Promise<{ reg: AgentReg; boundPort: number; token: string; created: boolean }> {
   let reg = hub.agents.get(agentId);
   if (!reg) {
-    reg = { ring: [], dropped: 0, sseClients: new Set() };
+    reg = { buf: [], head: 0, count: 0, dropped: 0, sseClients: new Set() };
     hub.agents.set(agentId, reg);
   }
   hub.refs++;
@@ -253,7 +294,6 @@ export async function hubRegister(
   if (!hub.server) {
     // First agent in the process: it wins the token, host, and port.
     hub.token = cfg.token;
-    hub.host = cfg.host;
     const server = http.createServer(handleRequest);
     hub.server = server;
     hub.listening = new Promise<void>((resolve) => {
