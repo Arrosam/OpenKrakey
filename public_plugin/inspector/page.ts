@@ -35,6 +35,12 @@ export const PAGE = `<!doctype html>
     --mono: ui-monospace, "Consolas", "Cascadia Code", monospace;
   }
   * { box-sizing: border-box; }
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--cyan); }
+  ::-webkit-scrollbar-corner { background: transparent; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
@@ -50,13 +56,6 @@ export const PAGE = `<!doctype html>
   }
   .brand {
     display: flex; align-items: center; gap: 8px;
-    padding-right: 12px; border-right: 1px solid var(--border);
-  }
-  .brand-logo {
-    width: 32px; height: 32px; border-radius: 6px;
-    background: linear-gradient(135deg, var(--cyan), var(--magenta));
-    color: var(--bg); display: flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: 18px;
   }
   .brand-name { font-size: 13px; font-weight: 700; }
   .brand-tag { font-size: 10px; color: var(--muted); }
@@ -190,7 +189,6 @@ export const PAGE = `<!doctype html>
 <body>
 <header>
   <div class="brand">
-    <div class="brand-logo">K</div>
     <div class="brand-text"><div class="brand-name">Krakey Inspector</div><div class="brand-tag">debug console</div></div>
   </div>
   <nav class="tabs">
