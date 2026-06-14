@@ -12,312 +12,24 @@
  * Isolation (R6): an agent's records are only ever served from its own AgentReg;
  * agent A never sees agent B's data. All mutable state lives in the factory
  * closure or the module-level hub — the factory itself is side-effect free.
+ *
+ * This file is just the factory: it resolves config (config.ts), joins the
+ * process-wide hub (hub.ts), and maps each captured bus event into an
+ * EventRecord that it hands to the hub's per-agent ring. Storage, the HTTP
+ * router, and the served page live in their own sibling files.
  */
-import * as http from "node:http";
-import * as crypto from "node:crypto";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Unsub } from "../../contracts/event-system";
 import { Events } from "../../shared/actions";
-import { PAGE } from "./page";
-
-/** The wire record the dashboard (and any observer) reads. Shape is contract. */
-interface EventRecord {
-  seq: number;
-  at: number;
-  kind: string;
-  agentId: string;
-  corrId?: string;
-  payload: unknown;
-}
-
-/** Per-agent registration kept inside the shared hub, keyed by agentId. */
-interface AgentReg {
-  ring: EventRecord[];
-  dropped: number;
-  sseClients: Set<http.ServerResponse>;
-}
-
-/**
- * The process-wide refcounted hub. A single http.Server is shared by every
- * per-Agent instance in this process; `agents` routes requests by the :id in
- * the path. The first registration listens; the last deregistration closes.
- */
-interface Hub {
-  server: http.Server | null;
-  /** Resolves once the (first) listen succeeds — awaited by every joiner. */
-  listening: Promise<void> | null;
-  agents: Map<string, AgentReg>;
-  /** Process token — the first agent's token wins. */
-  token: string;
-  /** The port we actually bound (from server.address()); 0 until bound. */
-  boundPort: number;
-  host: string;
-  refs: number;
-}
-
-/**
- * Default loopback port. Deliberately distinct from web's default (7717) so the
- * inspector never collides with it on a stock config.
- */
-const DEFAULT_PORT = 7788;
-
-// Module-level singleton (ESM caches the module, so this is one per process).
-const hub: Hub = {
-  server: null,
-  listening: null,
-  agents: new Map(),
-  token: "",
-  boundPort: 0,
-  host: "127.0.0.1",
-  refs: 0,
-};
-
-// ---- small helpers ----------------------------------------------------------
-
-function safeStringify(v: unknown): string {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-
-/** Constant-time token comparison; unequal lengths fail closed. */
-function tokenOk(provided: string | undefined): boolean {
-  if (!provided || !hub.token) return false;
-  const a = Buffer.from(provided);
-  const b = Buffer.from(hub.token);
-  if (a.length !== b.length) return false;
-  try {
-    return crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
-}
-
-/** Pull a token from Authorization: Bearer, ?token=, or the inspector cookie. */
-function extractToken(req: http.IncomingMessage, url: URL): string | undefined {
-  const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth.startsWith("Bearer ")) {
-    return auth.slice("Bearer ".length).trim();
-  }
-  const q = url.searchParams.get("token");
-  if (q) return q;
-  const cookie = req.headers["cookie"];
-  if (typeof cookie === "string") {
-    for (const part of cookie.split(";")) {
-      const eq = part.indexOf("=");
-      if (eq === -1) continue;
-      const k = part.slice(0, eq).trim();
-      if (k === "inspector_token") {
-        // A malformed %-sequence makes decodeURIComponent throw; an unauthenticated
-        // caller must never be able to crash the shared process — skip this cookie.
-        try {
-          return decodeURIComponent(part.slice(eq + 1).trim());
-        } catch {
-          return undefined;
-        }
-      }
-    }
-  }
-  return undefined;
-}
-
-function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
-  const text = safeStringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(text),
-  });
-  res.end(text);
-}
-
-// ---- the single request router (handles ALL agents) -------------------------
-
-function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-  // Belt-and-suspenders: any unexpected throw in routing must degrade to a 400,
-  // never bubble up to crash the shared http.Server (and the whole process).
-  try {
-    routeRequest(req, res);
-  } catch {
-    try {
-      res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-      res.end("bad request");
-    } catch {
-      /* response may already be (partly) sent — nothing more we can do */
-    }
-  }
-}
-
-function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
-  let url: URL;
-  try {
-    url = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
-  } catch {
-    res.writeHead(404).end();
-    return;
-  }
-  const path = url.pathname;
-  const method = req.method || "GET";
-
-  // GET / — the dashboard page. NOT token-gated. If a valid token is present,
-  // set an HttpOnly cookie so subsequent EventSource/fetch calls authenticate.
-  if (method === "GET" && path === "/") {
-    const provided = extractToken(req, url);
-    const headers: http.OutgoingHttpHeaders = {
-      "content-type": "text/html; charset=utf-8",
-      "content-length": Buffer.byteLength(PAGE),
-    };
-    if (tokenOk(provided)) {
-      headers["set-cookie"] = "inspector_token=" + encodeURIComponent(hub.token) +
-        "; HttpOnly; SameSite=Strict; Path=/";
-    }
-    res.writeHead(200, headers);
-    res.end(PAGE);
-    return;
-  }
-
-  // Everything under /api/* is token-gated.
-  if (path === "/api/agents" || path.startsWith("/api/agents/")) {
-    if (!tokenOk(extractToken(req, url))) {
-      sendJson(res, 401, { error: "unauthorized" });
-      return;
-    }
-
-    // GET /api/agents — list registered agent ids.
-    if (method === "GET" && path === "/api/agents") {
-      sendJson(res, 200, { agents: Array.from(hub.agents.keys()) });
-      return;
-    }
-
-    // /api/agents/:id/(snapshot|stream)
-    const rest = path.slice("/api/agents/".length);
-    const slash = rest.indexOf("/");
-    if (slash !== -1) {
-      let id: string;
-      try {
-        id = decodeURIComponent(rest.slice(0, slash));
-      } catch {
-        // Malformed %-escape in the agent id segment → not a resolvable agent.
-        sendJson(res, 404, { error: "not found" });
-        return;
-      }
-      const sub = rest.slice(slash + 1);
-      const reg = hub.agents.get(id);
-
-      // R6: only ever serve this agent's own AgentReg.
-      if (method === "GET" && sub === "snapshot") {
-        if (!reg) {
-          sendJson(res, 404, { error: "unknown agent" });
-          return;
-        }
-        sendJson(res, 200, { records: reg.ring.slice(), dropped: reg.dropped });
-        return;
-      }
-
-      if (method === "GET" && sub === "stream") {
-        if (!reg) {
-          sendJson(res, 404, { error: "unknown agent" });
-          return;
-        }
-        res.writeHead(200, {
-          "content-type": "text/event-stream",
-          "cache-control": "no-cache",
-          connection: "keep-alive",
-        });
-        if (typeof res.flushHeaders === "function") res.flushHeaders();
-        // Prime the stream so the client's onopen fires promptly.
-        res.write(": connected\n\n");
-        reg.sseClients.add(res);
-        req.on("close", () => {
-          reg.sseClients.delete(res);
-        });
-        // Do NOT replay the ring here — the page backfills via /snapshot first.
-        return;
-      }
-    }
-
-    sendJson(res, 404, { error: "not found" });
-    return;
-  }
-
-  // No POST, no other routes — read-only.
-  res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-  res.end("not found");
-}
-
-// ---- hub lifecycle (refcounted) ---------------------------------------------
-
-/** Register an agent; the FIRST registration creates + listens the server. */
-async function hubRegister(
-  agentId: string,
-  cfg: { port: number; host: string; token: string },
-): Promise<{ reg: AgentReg; boundPort: number; token: string; created: boolean }> {
-  let reg = hub.agents.get(agentId);
-  if (!reg) {
-    reg = { ring: [], dropped: 0, sseClients: new Set() };
-    hub.agents.set(agentId, reg);
-  }
-  hub.refs++;
-
-  // True only for the agent whose call actually created the shared server, so
-  // the startup URL gets printed exactly once.
-  const created = !hub.server;
-  if (!hub.server) {
-    // First agent in the process: it wins the token, host, and port.
-    hub.token = cfg.token;
-    hub.host = cfg.host;
-    const server = http.createServer(handleRequest);
-    hub.server = server;
-    hub.listening = new Promise<void>((resolve) => {
-      // Degrade (do not crash) on a listen error — e.g. a later rebind clash.
-      server.once("error", () => {
-        hub.boundPort = 0;
-        resolve();
-      });
-      server.listen(cfg.port, cfg.host, () => {
-        const addr = server.address();
-        hub.boundPort = addr && typeof addr === "object" ? addr.port : cfg.port;
-        resolve();
-      });
-    });
-  }
-  // Every joiner awaits the same listen promise (the first bound port wins).
-  if (hub.listening) await hub.listening;
-
-  return { reg, boundPort: hub.boundPort, token: hub.token, created };
-}
-
-/** Deregister an agent; the LAST deregistration closes the server. */
-function hubDeregister(agentId: string): void {
-  const reg = hub.agents.get(agentId);
-  if (reg) {
-    for (const client of reg.sseClients) {
-      try {
-        client.end();
-      } catch {
-        /* ignore */
-      }
-    }
-    reg.sseClients.clear();
-    hub.agents.delete(agentId);
-  }
-  hub.refs = Math.max(0, hub.refs - 1);
-  if (hub.refs === 0 && hub.server) {
-    const server = hub.server;
-    hub.server = null;
-    hub.listening = null;
-    hub.boundPort = 0;
-    try {
-      // Force-drop lingering keep-alive sockets so the port frees promptly;
-      // optional-chained because closeAllConnections is Node ≥18.2 only.
-      server.closeAllConnections?.();
-      server.close();
-    } catch {
-      /* ignore */
-    }
-  }
-}
+import { resolveConfig } from "./config";
+import {
+  hubRegister,
+  hubDeregister,
+  pushRecord,
+  safeStringify,
+  type AgentReg,
+  type EventRecord,
+} from "./hub";
 
 // ---- the plugin factory ------------------------------------------------------
 
@@ -346,29 +58,11 @@ const factory: PluginFactory = (): Plugin => {
   async function setup(ctx: PluginContext): Promise<void> {
     agentId = ctx.agentId;
 
-    // ---- config resolution (merge nested-over-flat) ----
-    const c = (ctx.config ?? {}) as any;
-    const slice = {
-      ...(typeof c === "object" ? c : {}),
-      ...((c && c.inspector) || {}),
-    };
-    // Numeric config is validated, not trusted: a non-number (or non-positive
-    // size) falls back to the default rather than poisoning listen()/the ring.
-    const port: number = typeof slice.port === "number" ? slice.port : DEFAULT_PORT;
-    const host: string = slice.host ?? "127.0.0.1";
-    let token: string = slice.token ?? crypto.randomBytes(24).toString("base64url");
-    // Reject a token that isn't a string, is too short to be a secret, or
-    // contains anything outside the URL/cookie-safe charset.
-    if (typeof token !== "string" || token.length < 16 || !/^[A-Za-z0-9._~+\/=-]+$/.test(token)) {
-      token = crypto.randomBytes(24).toString("base64url");
-    }
-    const bufferSize: number =
-      typeof slice.bufferSize === "number" && slice.bufferSize > 0 ? slice.bufferSize : 1000;
-    const maxRecordBytes: number =
-      typeof slice.maxRecordBytes === "number" && slice.maxRecordBytes > 0 ? slice.maxRecordBytes : 65536;
+    // ---- config resolution (merge nested-over-flat + validation) ----
+    const cfg = resolveConfig(ctx);
 
     // ---- join the refcounted hub (first registration listens) ----
-    const joined = await hubRegister(agentId, { port, host, token });
+    const joined = await hubRegister(agentId, { port: cfg.port, host: cfg.host, token: cfg.token });
     reg = joined.reg;
     const boundPort = joined.boundPort;
     // The process token is whatever the first agent set; use it in our URL.
@@ -394,8 +88,8 @@ const factory: PluginFactory = (): Plugin => {
           // (not a string) so consumers can detect truncation explicitly.
           let recPayload: unknown = payload;
           const json = safeStringify(payload);
-          if (json.length > maxRecordBytes) {
-            recPayload = { __truncated: true, bytes: json.length, preview: json.slice(0, maxRecordBytes) };
+          if (json.length > cfg.maxRecordBytes) {
+            recPayload = { __truncated: true, bytes: json.length, preview: json.slice(0, cfg.maxRecordBytes) };
           }
 
           const rec: EventRecord = {
@@ -407,27 +101,8 @@ const factory: PluginFactory = (): Plugin => {
             payload: recPayload,
           };
 
-          // FIFO ring: drop the oldest BEFORE pushing when at capacity.
-          if (reg) {
-            while (reg.ring.length >= bufferSize) {
-              reg.ring.shift();
-              reg.dropped++;
-            }
-            reg.ring.push(rec);
-
-            // Fan out to this agent's live SSE clients only (R6).
-            const frame = "data: " + safeStringify({ type: "record", record: rec }) + "\n\n";
-            let dead: http.ServerResponse[] | null = null;
-            for (const client of reg.sseClients) {
-              try {
-                client.write(frame);
-              } catch {
-                // Reap a broken client; don't mutate the Set mid-iteration.
-                (dead || (dead = [])).push(client);
-              }
-            }
-            if (dead) for (const d of dead) reg.sseClients.delete(d);
-          }
+          // Hand off to the hub: FIFO ring append + SSE fan-out (R6).
+          if (reg) pushRecord(reg, rec, cfg.bufferSize);
         } catch {
           /* best-effort: never throw out of a bus handler */
         }
@@ -445,10 +120,10 @@ const factory: PluginFactory = (): Plugin => {
     // boundPort === 0 means the listen failed (almost always a busy port).
     if (joined.created) {
       if (boundPort > 0) {
-        const displayHost = (host === "0.0.0.0" || host === "::") ? "127.0.0.1" : host;
+        const displayHost = (cfg.host === "0.0.0.0" || cfg.host === "::") ? "127.0.0.1" : cfg.host;
         ctx.print("✦ Inspector: http://" + displayHost + ":" + boundPort + "/?token=" + procToken);
       } else {
-        ctx.print("✖ Inspector: could not bind " + host + ":" + port +
+        ctx.print("✖ Inspector: could not bind " + cfg.host + ":" + cfg.port +
           " — is the port already in use? Set config.inspector.port to a free port.");
       }
     }
