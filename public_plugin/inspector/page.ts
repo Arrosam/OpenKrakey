@@ -7,6 +7,11 @@
  * from /snapshot then live-streams /stream over SSE. Records are deduped by
  * `seq` and routed into four panels: Prompts, Event stream, Logs, and a
  * Per-beat timeline. No external CDN is required.
+ *
+ * Shell layout follows the "KrakeyBot dashboard" pattern: a tabbed single-page
+ * console where each panel can be viewed full-screen, or an "Overview" tab shows
+ * all four panels in a 2×2 grid (the default). Tab switching is a pure CSS toggle
+ * driven by `main[data-view]`; the data/render logic is unchanged.
  */
 export const PAGE = `<!doctype html>
 <html lang="en">
@@ -16,125 +21,187 @@ export const PAGE = `<!doctype html>
 <title>Krakey Inspector</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --panel: #161b22;
-    --panel2: #1c2330;
-    --border: #2b3340;
-    --fg: #e6edf3;
-    --dim: #8b949e;
-    --mint: #2fd69c;
-    --blue: #58a6ff;
-    --amber: #e3b341;
-    --red: #ff6b6b;
-    --violet: #bc8cff;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --bg: #0d0f12;
+    --panel: #14181d;
+    --panel-2: #1a1f26;
+    --border: #262c34;
+    --text: #d8dee9;
+    --muted: #6b7280;
+    --cyan: #6cd5d5;
+    --green: #7ec77e;
+    --yellow: #e8c060;
+    --magenta: #c585c5;
+    --red: #d27575;
+    --mono: ui-monospace, "Consolas", "Cascadia Code", monospace;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
-    background: var(--bg); color: var(--fg);
-    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.5 var(--mono);
     display: flex; flex-direction: column; height: 100vh; overflow: hidden;
   }
+
+  /* ---- header: brand + tabs + agent selector + status ---- */
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+    padding: 6px 12px; border-bottom: 1px solid var(--border);
     background: var(--panel); flex: 0 0 auto;
   }
-  header .star { color: var(--mint); font-size: 18px; }
-  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
-  header .grow { flex: 1 1 auto; }
-  header select {
-    background: var(--panel2); color: var(--fg); border: 1px solid var(--border);
-    border-radius: 6px; padding: 5px 9px; font: inherit;
+  .brand {
+    display: flex; align-items: center; gap: 8px;
+    padding-right: 12px; border-right: 1px solid var(--border);
   }
-  header .status { color: var(--dim); font-size: 12px; min-width: 90px; text-align: right; }
-  header .status.live { color: var(--mint); }
-  header .status.err { color: var(--red); }
+  .brand-logo {
+    width: 32px; height: 32px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--cyan), var(--magenta));
+    color: var(--bg); display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 18px;
+  }
+  .brand-name { font-size: 13px; font-weight: 700; }
+  .brand-tag { font-size: 10px; color: var(--muted); }
+  .tabs { display: flex; gap: 4px; flex: 1; }
+  .tab-btn {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    padding: 6px 14px; border-radius: 4px; cursor: pointer;
+    font: 13px var(--mono);
+  }
+  .tab-btn:hover { color: var(--text); background: var(--panel-2); }
+  .tab-btn.active { color: var(--text); background: var(--panel-2); border-color: var(--border); }
+  header select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 8px; font: inherit;
+  }
+  .status-bar {
+    font-size: 11px; color: var(--muted);
+    padding: 4px 8px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px;
+  }
+  .status-bar.live { color: var(--green); }
+  .status-bar.err { color: var(--red); }
 
   #lock {
     margin: auto; max-width: 420px; text-align: center; padding: 40px;
-    color: var(--dim);
+    color: var(--muted);
   }
   #lock h2 { color: var(--red); }
 
-  main { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1fr;
-    grid-template-rows: 1fr 1fr; gap: 1px; background: var(--border);
-    overflow: hidden; }
-  .panel { background: var(--panel); display: flex; flex-direction: column;
-    overflow: hidden; min-height: 0; }
-  .panel > h2 {
-    margin: 0; padding: 8px 12px; font-size: 12px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: .6px; color: var(--dim);
-    border-bottom: 1px solid var(--border); background: var(--panel2);
+  /* ---- main: tabbed views via data-view (single render targets) ---- */
+  main {
+    flex: 1; overflow: hidden; padding: 12px;
+    display: grid; gap: 12px; min-height: 0;
+  }
+  main[data-view="overview"] {
+    grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+  }
+  main:not([data-view="overview"]) {
+    grid-template-columns: 1fr; grid-template-rows: 1fr;
+  }
+  main:not([data-view="overview"]) .panel { display: none; }
+  main[data-view="prompts"] .panel--prompts,
+  main[data-view="events"] .panel--events,
+  main[data-view="beats"] .panel--beats,
+  main[data-view="logs"] .panel--logs { display: flex; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+  }
+  .panel.cyan { border-color: var(--cyan); }
+  .panel.magenta { border-color: var(--magenta); }
+  .panel.green { border-color: var(--green); }
+  .panel.yellow { border-color: var(--yellow); }
+  .panel.red { border-color: var(--red); }
+
+  /* uniform title bar — identical height/structure across all four panels */
+  .panel h3 {
+    margin: 0; padding: 6px 10px; font-size: 12px; color: var(--muted);
+    background: var(--panel-2); border-bottom: 1px solid var(--border);
     display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
   }
-  .panel > h2 .count { color: var(--mint); font-weight: 400; }
-  .panel > h2 .controls { margin-left: auto; display: flex; gap: 6px; align-items: center; }
-  .panel > h2 select, .panel > h2 input {
-    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
-    border-radius: 5px; padding: 2px 6px; font: 11px var(--mono);
+  .panel h3 .count { color: var(--cyan); font-weight: 400; }
+  .panel.cyan h3 { color: var(--cyan); }
+  .panel.magenta h3 { color: var(--magenta); }
+  .panel.green h3 { color: var(--green); }
+  .panel.yellow h3 { color: var(--yellow); }
+  .panel.red h3 { color: var(--red); }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex: 0 0 auto; font-size: 11px;
   }
-  .body { flex: 1 1 auto; overflow: auto; padding: 8px 10px; }
+  .toolbar label { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+  .toolbar select, .toolbar input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; font: 11px var(--mono);
+  }
+  .body { flex: 1; overflow: auto; padding: 8px 10px; min-height: 0; }
 
   .row { font: 12px var(--mono); padding: 2px 4px; border-radius: 4px;
     white-space: pre-wrap; word-break: break-word; }
-  .row .seq { color: var(--dim); }
-  .row .time { color: var(--dim); }
+  .row .seq { color: var(--muted); }
+  .row .time { color: var(--muted); }
   .row .kind { font-weight: 600; margin: 0 6px; }
-  .k-tick { color: var(--dim); }
-  .k-gather { color: var(--violet); }
-  .k-prompt-sent { color: var(--blue); }
-  .k-prompt-received { color: var(--mint); }
-  .k-input { color: var(--amber); }
-  .k-output { color: var(--mint); }
-  .k-tool { color: var(--violet); }
-  .k-log { color: var(--dim); }
-  .k-start { color: var(--mint); }
+  .k-tick { color: var(--muted); }
+  .k-gather { color: var(--magenta); }
+  .k-prompt-sent { color: var(--cyan); }
+  .k-prompt-received { color: var(--green); }
+  .k-input { color: var(--yellow); }
+  .k-output { color: var(--green); }
+  .k-tool { color: var(--magenta); }
+  .k-log { color: var(--muted); }
+  .k-start { color: var(--green); }
 
   .pair { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px;
     overflow: hidden; }
-  .pair .ph { padding: 6px 10px; font: 11px var(--mono); background: var(--panel2);
-    color: var(--dim); display: flex; gap: 8px; align-items: center; }
-  .pair .ph .corr { color: var(--blue); }
+  .pair .ph { padding: 6px 10px; font: 11px var(--mono); background: var(--panel-2);
+    color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .pair .ph .corr { color: var(--cyan); }
   .pair .ph .badge { margin-left: auto; font-size: 10px; padding: 1px 7px;
     border-radius: 10px; }
-  .pair .ph .badge.ok { background: rgba(47,214,156,.15); color: var(--mint); }
-  .pair .ph .badge.err { background: rgba(255,107,107,.15); color: var(--red); }
-  .pair .ph .badge.pending { background: rgba(227,179,65,.15); color: var(--amber); }
+  .pair .ph .badge.ok { background: rgba(126,199,126,.15); color: var(--green); }
+  .pair .ph .badge.err { background: rgba(210,117,117,.15); color: var(--red); }
+  .pair .ph .badge.pending { background: rgba(232,192,96,.15); color: var(--yellow); }
   .pair pre { margin: 0; padding: 8px 10px; font: 11px var(--mono);
     white-space: pre-wrap; word-break: break-word; max-height: 200px; overflow: auto; }
   .pair pre + pre { border-top: 1px solid var(--border); }
-  .pair .lbl { color: var(--dim); }
+  .pair .lbl { color: var(--muted); }
 
   .log { font: 12px var(--mono); padding: 2px 4px; display: flex; gap: 8px; }
   .log .lvl { flex: 0 0 auto; width: 48px; }
-  .log .lvl.info { color: var(--blue); }
-  .log .lvl.warn { color: var(--amber); }
+  .log .lvl.info { color: var(--cyan); }
+  .log .lvl.warn { color: var(--yellow); }
   .log .lvl.error { color: var(--red); }
-  .log .lvl.print { color: var(--mint); }
-  .log .pid { color: var(--violet); flex: 0 0 auto; }
+  .log .lvl.print { color: var(--green); }
+  .log .pid { color: var(--magenta); flex: 0 0 auto; }
   .log .txt { white-space: pre-wrap; word-break: break-word; }
 
   .beat { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; }
-  .beat .bh { padding: 6px 10px; background: var(--panel2); font: 11px var(--mono);
-    color: var(--violet); border-bottom: 1px solid var(--border); }
+  .beat .bh { padding: 6px 10px; background: var(--panel-2); font: 11px var(--mono);
+    color: var(--magenta); border-bottom: 1px solid var(--border); }
   .beat .step { padding: 3px 10px; font: 11px var(--mono); display: flex; gap: 8px; }
-  .beat .step .arrow { color: var(--dim); }
+  .beat .step .arrow { color: var(--muted); }
 
-  .empty { color: var(--dim); font-style: italic; padding: 12px 4px; }
-  .dropped { color: var(--amber); font: 11px var(--mono); padding: 4px; }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 4px; }
+  .dropped { color: var(--yellow); font: 11px var(--mono); padding: 4px; }
 </style>
 </head>
 <body>
 <header>
-  <span class="star">✦</span>
-  <h1>Krakey Inspector</h1>
-  <label style="color:var(--dim);font-size:12px;">agent
-    <select id="agentSel"><option value="">— none —</option></select>
-  </label>
-  <span class="grow"></span>
-  <span class="status" id="status">idle</span>
+  <div class="brand">
+    <div class="brand-logo">K</div>
+    <div class="brand-text"><div class="brand-name">Krakey Inspector</div><div class="brand-tag">debug console</div></div>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-view="overview">Overview</button>
+    <button class="tab-btn" data-view="prompts">Prompts</button>
+    <button class="tab-btn" data-view="events">Event stream</button>
+    <button class="tab-btn" data-view="beats">Per-beat</button>
+    <button class="tab-btn" data-view="logs">Logs</button>
+  </nav>
+  <label style="color:var(--muted);font-size:12px;">agent <select id="agentSel"><option value="">— none —</option></select></label>
+  <span class="status-bar" id="status">idle</span>
 </header>
 
 <div id="lock" style="display:none">
@@ -143,42 +210,30 @@ export const PAGE = `<!doctype html>
   (the inspector printed the full URL on startup).</p>
 </div>
 
-<main id="main">
-  <section class="panel">
-    <h2>Prompts <span class="count" id="cPrompts">0</span></h2>
+<main id="main" data-view="overview">
+  <section class="panel panel--prompts cyan">
+    <h3>Prompts <span class="count" id="cPrompts">0</span></h3>
     <div class="body" id="prompts"><div class="empty">No prompts yet.</div></div>
   </section>
 
-  <section class="panel">
-    <h2>Event stream <span class="count" id="cEvents">0</span>
-      <span class="controls">
-        <label style="display:flex;gap:4px;align-items:center;color:var(--dim);font:11px var(--mono);">
-          <input type="checkbox" id="autoFollow" checked /> auto-follow
-        </label>
-      </span>
-    </h2>
+  <section class="panel panel--events">
+    <h3>Event stream <span class="count" id="cEvents">0</span></h3>
+    <div class="toolbar"><label><input type="checkbox" id="autoFollow" checked> auto-follow</label></div>
     <div class="body" id="events"><div class="empty">No events yet.</div></div>
   </section>
 
-  <section class="panel">
-    <h2>Logs <span class="count" id="cLogs">0</span>
-      <span class="controls">
-        <select id="logLevel">
-          <option value="">all levels</option>
-          <option value="info">info</option>
-          <option value="warn">warn</option>
-          <option value="error">error</option>
-          <option value="print">print</option>
-        </select>
-        <input id="logPid" placeholder="pluginId…" size="10" />
-      </span>
-    </h2>
-    <div class="body" id="logs"><div class="empty">No logs yet.</div></div>
+  <section class="panel panel--beats magenta">
+    <h3>Per-beat timeline <span class="count" id="cBeats">0</span></h3>
+    <div class="body" id="beats"><div class="empty">No beats yet.</div></div>
   </section>
 
-  <section class="panel">
-    <h2>Per-beat timeline <span class="count" id="cBeats">0</span></h2>
-    <div class="body" id="beats"><div class="empty">No beats yet.</div></div>
+  <section class="panel panel--logs">
+    <h3>Logs <span class="count" id="cLogs">0</span></h3>
+    <div class="toolbar">
+      <select id="logLevel"><option value="">all levels</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option><option value="print">print</option></select>
+      <input id="logPid" placeholder="pluginId…" size="10" />
+    </div>
+    <div class="body" id="logs"><div class="empty">No logs yet.</div></div>
   </section>
 </main>
 
@@ -196,7 +251,7 @@ export const PAGE = `<!doctype html>
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
-    statusEl.className = "status" + (cls ? " " + cls : "");
+    statusEl.className = "status-bar" + (cls ? " " + cls : "");
   }
   function esc(s) {
     return String(s).replace(/[&<>]/g, function (c) {
@@ -586,6 +641,18 @@ export const PAGE = `<!doctype html>
   }
 
   agentSel.addEventListener("change", function () { select(agentSel.value); });
+
+  // ---- tab switching: pure CSS toggle via main[data-view] ----
+  document.querySelectorAll(".tab-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".tab-btn").forEach(function (b) { b.classList.toggle("active", b === btn); });
+      document.getElementById("main").setAttribute("data-view", btn.getAttribute("data-view"));
+      // re-pin the event stream to bottom when (re)showing it under auto-follow
+      if (typeof eventsBody !== "undefined" && document.getElementById("autoFollow") && document.getElementById("autoFollow").checked) {
+        eventsBody.scrollTop = eventsBody.scrollHeight;
+      }
+    });
+  });
 
   // ---- agent list (poll lightly so new agents appear) ----
   function loadAgents() {
