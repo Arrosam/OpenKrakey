@@ -141,3 +141,9 @@ done
   (CSS), `page.script.ts` (the dashboard IIFE), and `page.ts` (assembles `PAGE` byte-identically). Token
   auth moved to the new `shared/http-auth` primitives (Bearer→query→cookie precedence composed locally;
   constant-time `tokenOk`, closed-when-unset). Entry point + default export unchanged.
+- 2026-06-15: code-review fixes (merged, cross-validated). Ring eviction is now amortized O(1) — a
+  circular buffer (`buf`+`head`+`count`) with an ordered `snapshotRing` accessor replaces the O(N)
+  `Array.shift()` (preserves FIFO drop-oldest, the exact `dropped` count, and snapshot order). The SSE
+  frame is built only when the agent has live clients, so an unobserved agent does no per-event frame
+  serialization. Dead surface removed: the write-only `Hub.host` field, the `InspectorConfig` export, and
+  the redundant SSE-client teardown loop in `index.ts` (client teardown is solely `hubDeregister`'s job).
