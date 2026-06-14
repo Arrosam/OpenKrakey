@@ -42,6 +42,8 @@ import { PAGE_HTML } from "./page";
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
 const COOKIE_NAME = "krakey_token";
+/** Hard cap on transcript entries kept in memory and rewritten to disk (bounds replay + file growth). */
+const MAX_TRANSCRIPT = 1000;
 
 /**
  * One persisted line of an agent's chat transcript (the chat.jsonl wire shape).
@@ -69,6 +71,14 @@ interface AgentReg {
   transcript: TranscriptEntry[];
   /** Absolute path of this agent's chat.jsonl under ctx.dataDir (agent-isolated at runtime). */
   chatPath: string;
+  /**
+   * Serialized async append chain: each `record` chains its file write onto the
+   * prior one so writes never interleave and never block delivery (M-7). Errors are
+   * swallowed (best-effort persistence). Goes inert once `closed` is set (teardown).
+   */
+  writing: Promise<void>;
+  /** Set true in teardown so any in-flight async append no-ops, leaving the sync rewrite authoritative. */
+  closed: boolean;
   /** Message ids appended to the queue, not yet carried by an LLM request. */
   pending: number[];
   /**
@@ -102,24 +112,33 @@ function broadcast(reg: AgentReg, event: unknown): void {
 }
 
 /**
- * Append one entry to the agent's in-memory transcript AND its chat.jsonl. The file
- * write is best-effort: a disk error must never break message delivery, so it is
- * swallowed (the in-memory transcript still replays for the life of the process).
+ * Append one entry to the agent's in-memory transcript AND its chat.jsonl. The
+ * in-memory transcript is capped at MAX_TRANSCRIPT (oldest dropped) so both replay
+ * and the on-disk rewrite stay bounded (H-3). The file write is async and serialized
+ * onto reg.writing so it never blocks delivery and writes never interleave (M-7); a
+ * disk error is swallowed (best-effort persistence) and once reg.closed is set the
+ * append is skipped, leaving teardown's sync rewrite authoritative (M-9).
  */
 function record(reg: AgentReg, entry: TranscriptEntry): void {
   reg.transcript.push(entry);
-  try {
-    fs.appendFileSync(reg.chatPath, JSON.stringify(entry) + "\n");
-  } catch {
-    /* persistence is best-effort — never block delivery on a write error */
-  }
+  if (reg.transcript.length > MAX_TRANSCRIPT) reg.transcript.shift();
+  reg.writing = reg.writing
+    .then(() =>
+      reg.closed ? undefined : fs.promises.appendFile(reg.chatPath, JSON.stringify(entry) + "\n"),
+    )
+    .catch(() => {});
 }
 
-/** Load a chat.jsonl into a transcript array, one JSON object per line; skip malformed lines. */
-function loadTranscript(chatPath: string): TranscriptEntry[] {
+/**
+ * Load a chat.jsonl into a transcript array, one JSON object per line; skip malformed
+ * lines and keep only the LAST MAX_TRANSCRIPT valid entries (H-3 bound). Each kept
+ * entry preserves its `id`/`status` so a persisted `sent`/`read` tick replays after a
+ * restart (M-9). Async read — never blocks the event loop.
+ */
+async function loadTranscript(chatPath: string): Promise<TranscriptEntry[]> {
   let raw: string;
   try {
-    raw = fs.readFileSync(chatPath, "utf8");
+    raw = await fs.promises.readFile(chatPath, "utf8");
   } catch {
     return []; // no history yet (or unreadable) — start empty
   }
@@ -134,7 +153,7 @@ function loadTranscript(chatPath: string): TranscriptEntry[] {
       /* ignore a malformed line */
     }
   }
-  return out;
+  return out.length > MAX_TRANSCRIPT ? out.slice(out.length - MAX_TRANSCRIPT) : out;
 }
 
 /** Match /api/agents/:id/(message|stream). */
@@ -350,10 +369,19 @@ const createWeb: PluginFactory = (): Plugin => {
         /* best-effort: an unwritable dataDir degrades to in-memory only */
       }
 
+      const transcript = await loadTranscript(chatPath);
+      // Seed the module-global id counter past every persisted id so a new message
+      // can never reuse an id that survived a restart (M-8 collision).
+      for (const e of transcript) {
+        if (typeof e.id === "number") msgSeq = Math.max(msgSeq, e.id);
+      }
+
       const r: AgentReg = {
         agentId: ctx.agentId,
-        transcript: loadTranscript(chatPath),
+        transcript,
         chatPath,
+        writing: Promise.resolve(),
+        closed: false,
         deliver: (text, msgId) => {
           const payload: EventPayloads["input.message"] = {
             at: Date.now(),
@@ -400,7 +428,13 @@ const createWeb: PluginFactory = (): Plugin => {
         const done = r.inFlight.get(reqId);
         if (!done) return;
         r.inFlight.delete(reqId);
-        for (const id of done) broadcast(r, { type: "status", id, status: "read" });
+        for (const id of done) {
+          broadcast(r, { type: "status", id, status: "read" });
+          // Also flip the in-memory transcript so a reconnect/replay shows "read"
+          // immediately, and teardown's compacting rewrite bakes it onto disk (M-9).
+          const t = r.transcript.find((e) => e.id === id);
+          if (t) t.status = "read";
+        }
       });
 
       unsubs = [offOutput, offRequest, offReturn];
@@ -413,6 +447,21 @@ const createWeb: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       if (reg) {
+        // Stop the async append chain, then synchronously rewrite the file from the
+        // in-memory transcript — compacting it to <= MAX_TRANSCRIPT entries and baking
+        // in current statuses (e.g. messages flipped to "read"), so it replays exactly
+        // after a clean restart (M-9). Setting `closed` first makes any in-flight async
+        // append a no-op, leaving this sync write authoritative. Best-effort.
+        reg.closed = true;
+        try {
+          fs.writeFileSync(
+            reg.chatPath,
+            reg.transcript.map((e) => JSON.stringify(e)).join("\n") +
+              (reg.transcript.length ? "\n" : ""),
+          );
+        } catch {
+          /* persistence is best-effort — a write failure must not break shutdown */
+        }
         for (const res of reg.clients) {
           try {
             res.end();

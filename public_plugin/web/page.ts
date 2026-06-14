@@ -86,7 +86,8 @@ export const PAGE_HTML = `<!doctype html>
   var current=null, es=null, msgs={}, greeted=false;
 
   function initial(id){ return (id||'?').slice(0,1).toLowerCase(); }
-  function esc(s){ var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+  var ESC={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+  function esc(s){ return String(s).replace(/[&<>"']/g,function(c){ return ESC[c]; }); }
 
   function notifySupported(){ return ('Notification' in window); }
   function refreshBell(){
@@ -143,7 +144,7 @@ export const PAGE_HTML = `<!doctype html>
   function addMyMsg(id,text){
     var wrap=document.createElement('div'); wrap.className='me';
     wrap.innerHTML='<div class="bubble">'+esc(text)+'</div>'+
-      '<div class="tick" data-msg="'+id+'"><i class="bi bi-check"></i><span class="tk-tx">sent</span></div>';
+      '<div class="tick" data-msg="'+esc(String(id))+'"><i class="bi bi-check"></i><span class="tk-tx">sent</span></div>';
     log.appendChild(wrap); log.scrollTop=log.scrollHeight; msgs[id]=wrap;
   }
   function renderHistory(messages){
