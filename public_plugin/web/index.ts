@@ -8,15 +8,11 @@
  * queue, `read` once the agent's beat has processed it (signalled by `llm.return`).
  *
  * process resource ownership (one process owns one terminal, one port): one
- * `node:http` server per process, owned by a MODULE-LEVEL hub shared + refcounted by every
- * per-Agent instance — the only legitimate process-singleton owner. Per-Agent
- * mutable state still lives in each factory closure (R6); the hub holds only an
- * opaque per-agent registry { agentId, deliver, sse-clients, pending } so no Agent
- * can observe another's input or output. Routing is explicit by URL.
- *
- * Routes: GET / (the chat page) · GET /api/agents · POST /api/agents/:id/message
- * (-> input.message + fire_now on that agent's bus; 404 unknown, 400 empty) ·
- * GET /api/agents/:id/stream (SSE: greeting, then that agent's output + statuses).
+ * `node:http` server per process, owned by a MODULE-LEVEL hub (./hub) shared +
+ * refcounted by every per-Agent instance — the only legitimate process-singleton
+ * owner. Per-Agent mutable state still lives in each factory closure (R6); the hub
+ * holds only an opaque per-agent registry { agentId, deliver, sse-clients, store,
+ * pending, inFlight } so no Agent can observe another's input or output.
  *
  * Security: the server binds LOOPBACK by default (config.web.host, default
  * 127.0.0.1 — not all interfaces, so it is not LAN-reachable) and every /api/*
@@ -25,232 +21,39 @@
  * it, so a random local process never learns it. GET / serves the page (no
  * secrets) and, when opened with the valid ?token=, sets an HttpOnly cookie so the
  * page's same-origin fetch/SSE authenticate automatically (no token in API URLs).
- * A token may also be presented via ?token= or `Authorization: Bearer`.
  *
  * The default export is a PluginFactory — the loader calls it once per Agent; only
- * the hub (a process resource) is module-level.
+ * the hub (a process resource) is module-level. Persistence + the transcript live
+ * in ./transcript-store; the HTTP/SSE server + auth live in ./hub.
  */
-import * as http from "node:http";
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { LLMResponse } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
-import { PAGE_HTML } from "./page";
+import {
+  type AgentReg,
+  addReg,
+  removeReg,
+  broadcast,
+  ensureServer,
+  maybeStopServer,
+  seedMsgSeq,
+} from "./hub";
+import { TranscriptStore } from "./transcript-store";
 
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
-const COOKIE_NAME = "krakey_token";
-
-interface AgentReg {
-  agentId: string;
-  /** Deliver one browser message to THIS agent (emit input.message + wake the beat). */
-  deliver: (text: string, msgId: number) => void;
-  /** Open SSE responses streaming THIS agent's output + statuses. */
-  clients: Set<http.ServerResponse>;
-  /** Message ids appended to the queue, not yet carried by an LLM request. */
-  pending: number[];
-  /**
-   * requestId -> message ids carried by THAT request's composed context, awaiting
-   * THAT request's return. A beat ends at llm.request (returns can overlap and
-   * arrive out of order), so a message is only `read` when the return of the
-   * request that actually included it arrives — not any earlier outstanding one.
-   */
-  inFlight: Map<string, number[]>;
-  /** The one-line greeting sent to a client on connect. */
-  greeting: string;
-}
-
-// ---- module-level hub: the single owner of the process http server ----
-let server: http.Server | undefined;
-const regs = new Map<string, AgentReg>();
-let msgSeq = 0;
-/** The per-process session token gating every /api route (set when the server starts). */
-let token = "";
-
-function sseSend(res: http.ServerResponse, event: unknown): void {
-  try {
-    res.write("data: " + JSON.stringify(event) + "\n\n");
-  } catch {
-    /* client gone — dropped on its 'close' */
-  }
-}
-
-function broadcast(reg: AgentReg, event: unknown): void {
-  for (const res of reg.clients) sseSend(res, event);
-}
-
-/** Match /api/agents/:id/(message|stream). */
-function agentRoute(pathname: string): { id: string; tail: "message" | "stream" } | undefined {
-  const m = /^\/api\/agents\/([^/]+)\/(message|stream)$/.exec(pathname);
-  if (!m) return undefined;
-  return { id: decodeURIComponent(m[1]), tail: m[2] as "message" | "stream" };
-}
-
-/** The token presented on a request: ?token=, `Authorization: Bearer`, or the cookie. */
-function presentedToken(req: http.IncomingMessage, search: string): string | undefined {
-  const q = new URLSearchParams(search).get("token");
-  if (q) return q;
-  const auth = req.headers["authorization"];
-  if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice(7).trim();
-  const cookie = req.headers["cookie"];
-  if (typeof cookie === "string") {
-    for (const part of cookie.split(";")) {
-      const i = part.indexOf("=");
-      if (i !== -1 && part.slice(0, i).trim() === COOKIE_NAME) return part.slice(i + 1).trim();
-    }
-  }
-  return undefined;
-}
-
-/** Constant-time check that the presented token matches the session token. */
-function tokenOk(presented: string | undefined): boolean {
-  if (!token) return true; // no token configured — open (should not happen in practice)
-  if (typeof presented !== "string" || presented.length !== token.length) return false;
-  try {
-    return crypto.timingSafeEqual(Buffer.from(presented), Buffer.from(token));
-  } catch {
-    return false;
-  }
-}
-
-function handle(req: http.IncomingMessage, res: http.ServerResponse): void {
-  const url = req.url || "/";
-  const qIdx = url.indexOf("?");
-  const pathname = qIdx === -1 ? url : url.slice(0, qIdx);
-  const search = qIdx === -1 ? "" : url.slice(qIdx);
-  const method = req.method || "GET";
-  const presented = presentedToken(req, search);
-
-  // The page itself holds no secrets, so it is served WITHOUT a token. When it is
-  // opened with the valid token (the URL printed to the console), set an HttpOnly
-  // cookie so the page's same-origin API calls authenticate without a token in
-  // every URL.
-  if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-    if (token && tokenOk(presented)) {
-      res.setHeader("set-cookie", COOKIE_NAME + "=" + token + "; HttpOnly; SameSite=Strict; Path=/");
-    }
-    res.statusCode = 200;
-    res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(PAGE_HTML);
-    return;
-  }
-
-  // Everything else is the API — gated by the session token.
-  if (!tokenOk(presented)) {
-    res.statusCode = 401;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ error: "unauthorized" }));
-    return;
-  }
-
-  if (method === "GET" && pathname === "/api/agents") {
-    res.statusCode = 200;
-    res.setHeader("content-type", "application/json");
-    res.end(JSON.stringify({ agents: [...regs.keys()] }));
-    return;
-  }
-
-  const route = agentRoute(pathname);
-  if (route) {
-    const reg = regs.get(route.id);
-    if (!reg) {
-      res.statusCode = 404;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ error: "unknown agent: " + route.id }));
-      return;
-    }
-
-    if (route.tail === "stream" && method === "GET") {
-      res.statusCode = 200;
-      res.setHeader("content-type", "text/event-stream");
-      res.setHeader("cache-control", "no-cache");
-      res.setHeader("connection", "keep-alive");
-      res.write(": ok\n\n");
-      sseSend(res, { type: "output", text: reg.greeting });
-      reg.clients.add(res);
-      req.on("close", () => reg.clients.delete(res));
-      return;
-    }
-
-    if (route.tail === "message" && method === "POST") {
-      const chunks: Buffer[] = [];
-      req.on("data", (c) => chunks.push(c as Buffer));
-      req.on("end", () => {
-        let body: { text?: unknown } = {};
-        try {
-          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch {
-          /* invalid JSON -> empty */
-        }
-        const text = typeof body.text === "string" ? body.text.trim() : "";
-        if (text === "") {
-          res.statusCode = 400;
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify({ error: "empty message" }));
-          return;
-        }
-        const id = ++msgSeq;
-        reg.pending.push(id);
-        reg.deliver(text, id);
-        broadcast(reg, { type: "status", id, status: "sent" });
-        res.statusCode = 202;
-        res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ id, status: "sent" }));
-      });
-      return;
-    }
-  }
-
-  res.statusCode = 404;
-  res.end("not found");
-}
 
 /**
- * Start the one server if it isn't up yet, and resolve once it is LISTENING — so
- * an `await`ing setup announces the URL synchronously within the agent's startup
- * block (not from a later async callback). The URL carries the real bound port
- * (works for an ephemeral port 0). A bind clash degrades (server dropped) and
- * still resolves so startup never hangs.
+ * A configured token is adopted only if it's a URL/cookie-safe string of length
+ * ≥ 16; anything else is rejected in favour of a fresh random token (parity with
+ * inspector/config.ts). Keeps a too-short or malformed pinned token from becoming
+ * a weak, guessable process secret.
  */
-function ensureServer(
-  port: number,
-  host: string,
-  tokenValue: string,
-  print: (line: string) => void,
-): Promise<void> {
-  if (server) return Promise.resolve();
-  token = tokenValue; // process-level: set once, by the first agent to start the server
-  return new Promise<void>((resolve) => {
-    const s = http.createServer(handle);
-    server = s;
-    s.on("error", (err) => {
-      if (server === s) server = undefined;
-      print("✖ Web chat: could not bind " + host + ":" + port + " — " + err);
-      resolve();
-    });
-    s.listen(port, host, () => {
-      const addr = s.address();
-      const bound = addr && typeof addr === "object" ? addr.port : port;
-      // A loopback-reachable host for the printed URL (0.0.0.0/:: aren't dialable).
-      const display = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-      print("✦ Web chat: http://" + display + ":" + bound + "/?token=" + token);
-      resolve();
-    });
-  });
-}
-
-/** Close the server once the last agent has detached (refcount hits zero). */
-function maybeStopServer(): void {
-  if (regs.size === 0 && server) {
-    const s = server;
-    server = undefined;
-    try {
-      (s as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
-    } catch {
-      /* older node: best effort */
-    }
-    s.close();
-  }
+function validToken(t: unknown): t is string {
+  return typeof t === "string" && t.length >= 16 && /^[A-Za-z0-9._~+\/=-]+$/.test(t);
 }
 
 const createWeb: PluginFactory = (): Plugin => {
@@ -261,25 +64,48 @@ const createWeb: PluginFactory = (): Plugin => {
     manifest: { id: "web", version: "0.1.0" },
 
     async setup(ctx: PluginContext): Promise<void> {
+      // Destructure the only ctx members the long-lived closures need, so the rest
+      // of ctx (config, dataDir, print, …) can be GC'd once setup() returns instead
+      // of being pinned for the agent's lifetime by the closures stored in `regs`.
+      const { events, actions } = ctx;
+
       const cfg = (ctx.config ?? {}) as { port?: number; host?: string; token?: string };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
       const host = typeof cfg.host === "string" && cfg.host ? cfg.host : DEFAULT_HOST;
-      // A fresh random token per process unless one is pinned in config.
-      const tk =
-        typeof cfg.token === "string" && cfg.token
-          ? cfg.token
-          : crypto.randomBytes(24).toString("base64url");
+      // A fresh random token per process unless a VALID one is pinned in config.
+      // Accept the configured token only if it's a URL/cookie-safe string of length
+      // ≥ 16; otherwise fall back to a random token (parity with inspector — an
+      // invalid configured token is NOT adopted, so a request presenting it gets 401).
+      const tk = validToken(cfg.token)
+        ? (cfg.token as string)
+        : crypto.randomBytes(24).toString("base64url");
+
+      // Ensure the per-plugin (agent-isolated) data dir exists, then load any prior
+      // transcript so history survives a restart. Best-effort: a dir/read failure
+      // just starts the agent with an empty transcript.
+      const chatPath = path.join(ctx.dataDir, "chat.jsonl");
+      try {
+        fs.mkdirSync(ctx.dataDir, { recursive: true });
+      } catch {
+        /* best-effort: an unwritable dataDir degrades to in-memory only */
+      }
+
+      const store = await TranscriptStore.load(chatPath);
+      // Seed the module-global id counter past every persisted id so a new message
+      // can never reuse an id that survived a restart (M-8 collision).
+      seedMsgSeq(store.maxId());
 
       const r: AgentReg = {
         agentId: ctx.agentId,
+        store,
         deliver: (text, msgId) => {
           const payload: EventPayloads["input.message"] = {
             at: Date.now(),
             data: { text, channel: "web", meta: { msgId } },
           };
-          ctx.events.emit(Events.INPUT_MESSAGE, payload);
-          if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
-            ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
+          events.emit(Events.INPUT_MESSAGE, payload);
+          if (actions.has(Actions.CLOCK_FIRE_NOW)) {
+            actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
           }
         },
         clients: new Set(),
@@ -288,18 +114,21 @@ const createWeb: PluginFactory = (): Plugin => {
         greeting: "agent '" + ctx.agentId + "' is awake — type to talk.",
       };
       reg = r;
-      regs.set(ctx.agentId, r);
+      addReg(r);
 
-      // Stream this agent's replies to its browser clients.
-      const offOutput = ctx.events.on(Events.OUTPUT_MESSAGE, (payload) => {
+      // Stream this agent's replies to its browser clients, persisting each.
+      const offOutput = events.on(Events.OUTPUT_MESSAGE, (payload) => {
         const text = (payload as EventPayloads["output.message"])?.data?.text;
-        if (typeof text === "string") broadcast(r, { type: "output", text });
+        if (typeof text === "string") {
+          r.store.append({ role: "agent", text, at: Date.now() });
+          broadcast(r, { type: "output", text });
+        }
       });
 
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
       // (so an EARLIER outstanding request's return can't claim them).
-      const offRequest = ctx.events.on(Events.LLM_REQUEST, (payload) => {
+      const offRequest = events.on(Events.LLM_REQUEST, (payload) => {
         const reqId = (payload as EventPayloads["llm.request"] | undefined)?.id;
         if (typeof reqId !== "string" || r.pending.length === 0) return;
         const prior = r.inFlight.get(reqId) ?? [];
@@ -309,13 +138,18 @@ const createWeb: PluginFactory = (): Plugin => {
 
       // A request's return means the beat that carried its messages completed →
       // flip exactly those messages to "read" (not any still-pending ones).
-      const offReturn = ctx.events.on(Events.LLM_RETURN, (payload) => {
+      const offReturn = events.on(Events.LLM_RETURN, (payload) => {
         const reqId = (payload as Reply<LLMResponse> | undefined)?.id;
         if (typeof reqId !== "string") return;
         const done = r.inFlight.get(reqId);
         if (!done) return;
         r.inFlight.delete(reqId);
-        for (const id of done) broadcast(r, { type: "status", id, status: "read" });
+        for (const id of done) {
+          broadcast(r, { type: "status", id, status: "read" });
+          // Also flip the in-memory transcript so a reconnect/replay shows "read"
+          // immediately, and teardown's compacting rewrite bakes it onto disk (M-9).
+          r.store.markRead(id);
+        }
       });
 
       unsubs = [offOutput, offRequest, offReturn];
@@ -328,14 +162,15 @@ const createWeb: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       if (reg) {
-        for (const res of reg.clients) {
-          try {
-            res.end();
-          } catch {
-            /* already closed */
-          }
-        }
-        regs.delete(reg.agentId);
+        // Stop the async append chain, then synchronously rewrite the file from the
+        // in-memory transcript — compacting it to <= MAX_TRANSCRIPT entries and baking
+        // in current statuses (e.g. messages flipped to "read"), so it replays exactly
+        // after a clean restart (M-9). Best-effort.
+        reg.store.compactSync();
+        // removeReg now owns SSE-client teardown (ends each open stream), so the
+        // explicit loop that used to live here is gone. Order: unsubscribe (above)
+        // → compactSync → removeReg (ends clients) → maybeStopServer (below).
+        removeReg(reg.agentId);
         reg = undefined;
       }
       maybeStopServer();

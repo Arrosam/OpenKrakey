@@ -633,3 +633,512 @@ export default () => ({
   await assert.doesNotReject(() => agent.start());
   await agent.stop();
 });
+
+// ===========================================================================
+// EXT — CORE LOG BRIDGE: agent_instance hands the per-Agent core modules
+// (orchestrator + loader) a BUS-BRIDGING Logger, so every diagnostic line a
+// core module emits via its injected Logger (info/warn/error) is ALSO published
+// on THAT Agent's eventbus as a `log.entry` event (shared/actions Events.LOG),
+// exactly like a plugin's ctx.log.* — but tagged with a `core:<module>` source
+// in the payload's `pluginId` field ("core:orchestrator" / "core:loader").
+//
+// No new event name, no contract change: log.entry's pluginId is a plain string.
+// Console output is unchanged; plugin logs keep their plugin-id tag (regression).
+//
+// Black-box at the agent boundary: we only drive start()/stop(). To OBSERVE
+// what reaches the bus we inject plugins (written as module SOURCE strings —
+// they cannot import the test's constants, so event names are literal) that
+// subscribe to "log.entry" in setup and append every entry's
+// {level, pluginId, text} to an exported, module-level array. ESM caches by
+// resolved URL, so the test re-imports the SAME file the loader imported and
+// reads the array back. We do NOT couple to the exact core message wording.
+// ===========================================================================
+
+/**
+ * A plugin that, in setup, (a) subscribes to "log.entry" and pushes every
+ * entry's {level, pluginId, text} into the exported `logs` array, and (b)
+ * registers a context block (via ctx.setBlock) whose render() THROWS. The
+ * orchestrator renders each block in isolation during a beat; a throwing
+ * render() is caught and logged as a WARNING by the orchestrator's (now
+ * bus-bridged) logger — the deterministic, spec-level trigger for a core log.
+ */
+function throwingRenderRecorderPlugin(id: string, blockId = "boom"): string {
+  return `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+    ctx.setBlock({
+      id: ${JSON.stringify(blockId)},
+      priority: 100,
+      render() { throw new Error("render-boom"); },
+    });
+  },
+});
+`;
+}
+
+/**
+ * A pure recorder plugin: subscribes to "log.entry" and records every entry's
+ * {level, pluginId, text}. Registers NO block and logs nothing itself, so on a
+ * clean beat it must observe NO `core:*` entry (negative / regression probe).
+ */
+function logRecorderPlugin(id: string): string {
+  return `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+  },
+});
+`;
+}
+
+// ---- Cover 1 + 2: a core diagnostic reaches the bus, tagged core:orchestrator
+
+test("core-log: a throwing render() makes the orchestrator emit a log.entry tagged pluginId === 'core:orchestrator', level 'warn', non-empty text", async () => {
+  writePublicPlugin("rec-core-warn", throwingRenderRecorderPlugin("rec-core-warn"));
+  const agent = make(
+    // small interval so a beat actually fires and renders the throwing block
+    bareDef("core-warn", { intervalMs: 25, plugins: ["rec-core-warn"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-warn");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:orchestrator"),
+    1500,
+  );
+  await agent.stop();
+
+  const core = mod.logs.filter((l: any) => l.pluginId === "core:orchestrator");
+  assert.ok(
+    core.length >= 1,
+    "the orchestrator's diagnostic must reach the bus as a log.entry tagged core:orchestrator",
+  );
+  // At least one such entry must be a WARNING with real text (don't pin wording).
+  const warn = core.find((l: any) => l.level === "warn");
+  assert.ok(warn, "the caught throwing-render must be logged at level 'warn'");
+  assert.equal(typeof warn.text, "string", "core log text must be a string");
+  assert.ok(warn.text.length > 0, "core log text must be non-empty");
+});
+
+test("core-log: the orchestrator entry's pluginId is the SOURCE TAG 'core:orchestrator' (starts with 'core:')", async () => {
+  writePublicPlugin("rec-core-tag", throwingRenderRecorderPlugin("rec-core-tag"));
+  const agent = make(
+    bareDef("core-tag", { intervalMs: 25, plugins: ["rec-core-tag"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-tag");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:orchestrator"),
+    1500,
+  );
+  await agent.stop();
+
+  const core = mod.logs.filter(
+    (l: any) => typeof l.pluginId === "string" && l.pluginId.startsWith("core:"),
+  );
+  assert.ok(core.length >= 1, "at least one core-tagged log.entry must have been observed");
+  // Every core-tagged entry seen here must be the orchestrator (it is the only
+  // core module that logs on this path) — and must NOT collide with a plugin id.
+  for (const l of core) {
+    assert.equal(
+      l.pluginId,
+      "core:orchestrator",
+      "a core log.entry from the orchestrator path must be tagged exactly 'core:orchestrator'",
+    );
+    assert.notEqual(
+      l.pluginId,
+      "rec-core-tag",
+      "a core log must NOT be tagged with the observing plugin's id",
+    );
+  }
+});
+
+// ---- Cover 3: plugin logs still work / are NOT mis-tagged (regression)
+
+test("plugin-log regression: a plugin's ctx.log.info emits log.entry tagged with the PLUGIN id, never a core: tag", async () => {
+  // Emitter: logs once in setup. Recorder (separate plugin) captures the bus.
+  writePublicPlugin(
+    "emitter-info",
+    `
+export default () => ({
+  manifest: { id: "emitter-info", version: "1" },
+  setup(ctx) { ctx.log.info("hi"); },
+});
+`,
+  );
+  writePublicPlugin("rec-plugin-info", logRecorderPlugin("rec-plugin-info"));
+  // Recorder FIRST so it is subscribed before the emitter's setup runs (the
+  // loader sets plugins up in declared order).
+  const agent = make(
+    bareDef("plug-info", {
+      intervalMs: 10_000,
+      plugins: ["rec-plugin-info", "emitter-info"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-plugin-info");
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.text === "hi"),
+    1500,
+  );
+  await agent.stop();
+
+  const hi = mod.logs.filter((l: any) => l.text === "hi");
+  assert.ok(hi.length >= 1, "the plugin's ctx.log.info line must reach the bus as a log.entry");
+  for (const l of hi) {
+    assert.equal(l.pluginId, "emitter-info", "a plugin log.entry must be tagged with the plugin's id");
+    assert.equal(l.level, "info", "ctx.log.info must carry level 'info'");
+    assert.ok(
+      typeof l.pluginId === "string" && !l.pluginId.startsWith("core:"),
+      "a plugin log MUST NOT be mis-tagged with a core: source",
+    );
+  }
+});
+
+test("plugin-log regression: a plugin's ctx.print emits log.entry level 'print' tagged with the plugin id (not core:)", async () => {
+  writePublicPlugin(
+    "emitter-print",
+    `
+export default () => ({
+  manifest: { id: "emitter-print", version: "1" },
+  setup(ctx) { ctx.print("awake"); },
+});
+`,
+  );
+  writePublicPlugin("rec-plugin-print", logRecorderPlugin("rec-plugin-print"));
+  const agent = make(
+    bareDef("plug-print", {
+      intervalMs: 10_000,
+      plugins: ["rec-plugin-print", "emitter-print"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-plugin-print");
+  await waitUntil(() => mod.logs.some((l: any) => l.text === "awake"), 1500);
+  await agent.stop();
+
+  const awake = mod.logs.filter((l: any) => l.text === "awake");
+  assert.ok(awake.length >= 1, "ctx.print must reach the bus as a log.entry");
+  for (const l of awake) {
+    assert.equal(l.pluginId, "emitter-print", "ctx.print's log.entry must carry the plugin id");
+    assert.equal(l.level, "print", "ctx.print must carry level 'print'");
+    assert.ok(
+      !l.pluginId.startsWith("core:"),
+      "ctx.print must NOT be tagged with a core: source",
+    );
+  }
+});
+
+// ---- Cover 4: R3 not broken — a clean bare beat invents NO core:* logs
+
+test("R3 + no-spurious-core: a recorder-only agent (no throwing block, nothing logging) runs clean beats and records ZERO core:* log.entry", async () => {
+  writePublicPlugin("rec-clean", logRecorderPlugin("rec-clean"));
+  const agent = make(
+    // small interval so a beat or two actually fires during the window
+    bareDef("clean-beat", { intervalMs: 25, plugins: ["rec-clean"] }),
+    baseDeps(),
+  );
+
+  await assert.doesNotReject(() => agent.start(), "a recorder-only agent must start cleanly");
+  const mod = await importPublicPlugin("rec-clean");
+  // Let a beat or two pass so the orchestrator definitely ran a clean beat.
+  await waitUntil(() => false, 200);
+  await assert.doesNotReject(() => agent.stop(), "and stop cleanly");
+
+  const core = mod.logs.filter(
+    (l: any) => typeof l.pluginId === "string" && l.pluginId.startsWith("core:"),
+  );
+  assert.deepEqual(
+    core,
+    [],
+    "the bridge must NOT invent spurious core:* log.entry on a clean beat",
+  );
+});
+
+// ---- Cover 5: a core:loader entry on the plugin error path (teardown throws)
+//
+// The loader contract documents that teardown tears every loaded plugin down
+// with ISOLATED errors, and the NEW behavior says the loader logs on a plugin
+// error path via its bus-bridged Logger. A plugin whose teardown() throws is a
+// contract-level (not implementation-coupled) error path, inducible during
+// agent.stop(). Determinism note: load order is the declared order, teardown is
+// REVERSE order — so we load the RECORDER first (tears down LAST) and the
+// THROWER second (tears down FIRST). When the thrower's teardown throws, the
+// recorder is still set up and its "log.entry" listener captures the loader's
+// core:loader error. We assert ONLY pluginId + level + non-empty text.
+
+test("core-log: a plugin whose teardown() throws makes the loader emit a log.entry tagged 'core:loader', level 'error', during stop()", async () => {
+  writePublicPlugin("rec-core-loader", logRecorderPlugin("rec-core-loader"));
+  writePublicPlugin(
+    "thrower-teardown",
+    `
+export default () => ({
+  manifest: { id: "thrower-teardown", version: "1" },
+  setup(ctx) { /* nothing — no block, no log */ },
+  teardown() { throw new Error("teardown-boom"); },
+});
+`,
+  );
+  // Recorder first (teardown LAST), thrower second (teardown FIRST).
+  const agent = make(
+    bareDef("core-loader", {
+      intervalMs: 10_000,
+      plugins: ["rec-core-loader", "thrower-teardown"],
+    }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("rec-core-loader");
+  // stop() drives teardown; an isolated teardown error must NOT reject stop().
+  await assert.doesNotReject(
+    () => agent.stop(),
+    "an isolated teardown error must be caught (loader teardown is isolated), not rejected",
+  );
+  // The loader's diagnostic for that caught error must have reached the bus.
+  await waitUntil(
+    () => mod.logs.some((l: any) => l.pluginId === "core:loader"),
+    1500,
+  );
+
+  const loaderLogs = mod.logs.filter((l: any) => l.pluginId === "core:loader");
+  assert.ok(
+    loaderLogs.length >= 1,
+    "the loader's teardown-error diagnostic must reach the bus tagged core:loader",
+  );
+  const err = loaderLogs.find((l: any) => l.level === "error");
+  assert.ok(err, "the loader must log the caught teardown error at level 'error'");
+  assert.equal(typeof err.text, "string");
+  assert.ok(err.text.length > 0, "the core:loader error log must carry non-empty text");
+});
+
+// ---- Cover 6 (REGRESSION GUARD): a plugin log line is mirrored to the bus
+// EXACTLY ONCE — never duplicated as a core:* entry.
+//
+// The bug this guards against: the loader echoes plugin log lines to the console
+// through its INJECTED logger. If that loader logger is itself bus-bridged
+// (core:loader), every plugin ctx.log.* line gets mirrored a SECOND time as a
+// `core:loader` log.entry carrying the same text. The contract is: a plugin's
+// ctx.log.warn("X") yields ONE log.entry on the bus, tagged with the PLUGIN's id,
+// text "X" — and ZERO log.entry whose pluginId starts with "core:" carrying that
+// same text.
+//
+// We make the plugin self-observing: in setup it subscribes to "log.entry" FIRST
+// (so it is guaranteed to see its own subsequent line), THEN calls ctx.log.warn.
+// The log fires during setup, so no beat is needed (large interval = no noise).
+// We re-import the SAME module file (ESM URL cache) to read its exported entries.
+
+test("plugin-log dedup regression: ctx.log.warn yields EXACTLY ONE log.entry (plugin-tagged); NO core:* duplicate of the same text", async () => {
+  // Subscribe BEFORE logging so the plugin observes its own line; log in setup.
+  writePublicPlugin(
+    "dedup-warn",
+    `
+export const logs = []; // { level, pluginId, text } in arrival order
+export default () => ({
+  manifest: { id: "dedup-warn", version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push({ level: d.level, pluginId: d.pluginId, text: d.text });
+    });
+    ctx.log.warn("UNIQ-PLUGIN-LINE-7");
+  },
+});
+`,
+  );
+  const agent = make(
+    // large interval so no beat noise — the warn fires during setup
+    bareDef("dedup-plug", { intervalMs: 10_000, plugins: ["dedup-warn"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  const mod = await importPublicPlugin("dedup-warn");
+  await waitUntil(
+    () => mod.logs.some((l: any) => typeof l.text === "string" && l.text.includes("UNIQ-PLUGIN-LINE-7")),
+    1500,
+  );
+  await agent.stop();
+
+  // Every captured entry carrying our unique text.
+  const matching = mod.logs.filter(
+    (l: any) => typeof l.text === "string" && l.text.includes("UNIQ-PLUGIN-LINE-7"),
+  );
+  // EXACTLY ONE mirrored line — and it is the plugin's own, not a core: tag.
+  assert.equal(
+    matching.length,
+    1,
+    "a plugin's ctx.log.warn must be mirrored to the bus EXACTLY once (no core:loader duplicate)",
+  );
+  assert.equal(
+    matching[0].pluginId,
+    "dedup-warn",
+    "the single mirrored entry must be tagged with the PLUGIN's id",
+  );
+
+  // ZERO core:* duplicate of that same plugin line.
+  const coreDupes = mod.logs.filter(
+    (l: any) =>
+      typeof l.pluginId === "string" &&
+      l.pluginId.startsWith("core:") &&
+      typeof l.text === "string" &&
+      l.text.includes("UNIQ-PLUGIN-LINE-7"),
+  );
+  assert.deepEqual(
+    coreDupes,
+    [],
+    "a plugin log line MUST NOT be re-mirrored as a core:* (e.g. core:loader) log.entry",
+  );
+});
+
+// ---- Cover 7 (RE-ENTRANCY REGRESSION): a log.entry subscriber that itself logs
+// must NOT trigger infinite synchronous recursion / stack overflow.
+//
+// The bus `emit` is SYNCHRONOUS in-line fan-out, and a core diagnostic is mirrored
+// onto the Agent bus as a `log.entry` event. If a `log.entry` subscriber calls
+// ctx.log.* from INSIDE its handler, the unguarded path recurses forever:
+//   ctx.log -> pushLogEntry -> emit(log.entry) -> same handler -> ctx.log -> ...
+// blowing the stack ("Maximum call stack size exceeded") and crashing the agent.
+//
+// The fix adds a re-entrancy guard: a `log.entry` emit triggered from WITHIN
+// another `log.entry` emit is dropped (no recursion), while a non-re-emitting
+// subscriber keeps working. The guard must NOT permanently latch — once the
+// outermost log.entry fan-out unwinds, the NEXT independent ctx.log.* (e.g. the
+// single "kick") must still be delivered to the subscriber at least once.
+//
+// CRITICAL SAFETY: a RED (unfixed) run stack-overflows or hangs. To keep the
+// suite from hanging we run this scenario in a CHILD process (mirroring the
+// "inflight stop" test): the child builds the agent, runs start()/stop(), reports
+// { crashed, count, completed } as a RESULT JSON line, and force-exits in a
+// finally so a runaway can't keep the parent alive. The parent asserts the child
+// completed cleanly with a BOUNDED entry count.
+
+test("re-entrancy regression: a log.entry subscriber that re-logs does NOT infinitely recurse / crash; entry count stays bounded", () => {
+  const agentEntry = pathToFileURL(
+    path.resolve("packages", "agent_instance", "src", "index.ts"),
+  ).href;
+
+  // A plugin whose log.entry handler RE-LOGS on every entry. It also counts each
+  // observed entry, and kicks the chain once with a single ctx.log.info("kick").
+  // If the bus had no re-entrancy guard, the first kicked log.entry would re-enter
+  // the handler, which logs again, ... -> unbounded recursion -> stack overflow.
+  const reentrantPlugin = `
+export const logs = []; // observed log.entry payloads (texts), in arrival order
+export default () => ({
+  manifest: { id: "rec-reentrant", version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push(d.text);
+      // Re-log from INSIDE the log.entry handler. With the guard this nested
+      // emit is dropped (no recursion); without it, it recurses to a crash.
+      ctx.log.info("echo");
+    });
+    // Kick the chain exactly once now that the subscriber is wired.
+    ctx.log.info("kick");
+  },
+});
+`;
+
+  const script = `
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createAgentInstance } from ${JSON.stringify(agentEntry)};
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-reentrant-"));
+const publicPluginDir = path.join(tmp, "public_plugin");
+const agentsDir = path.join(tmp, "agents");
+const pdir = path.join(publicPluginDir, "rec-reentrant");
+fs.mkdirSync(pdir, { recursive: true });
+fs.mkdirSync(agentsDir, { recursive: true });
+fs.writeFileSync(path.join(pdir, "index.ts"), ${JSON.stringify(reentrantPlugin)}, "utf8");
+
+const result = { crashed: false, count: -1, completed: false };
+try {
+  // Large interval: the recursion is driven by the setup-time ctx.log, not a beat.
+  const agent = createAgentInstance(
+    { id: "reentrant-log", intervalMs: 10000, plugins: ["rec-reentrant"] },
+    { publicPluginDir, agentsDir },
+  );
+  await agent.start();
+  // Let any (erroneously) deferred re-emits settle.
+  await new Promise((r) => setTimeout(r, 50));
+  await agent.stop();
+
+  const mod = await import(pathToFileURL(path.join(pdir, "index.ts")).href);
+  result.count = mod.logs.length;
+  result.completed = true; // start()/stop() both returned without throwing
+} catch (e) {
+  // A stack overflow surfaces as a thrown RangeError ("Maximum call stack size
+  // exceeded"). Any throw on this path is a crash for our purposes.
+  result.crashed = true;
+  try {
+    const mod = await import(pathToFileURL(path.join(pdir, "index.ts")).href);
+    result.count = mod.logs.length;
+  } catch {}
+} finally {
+  console.log("RESULT:" + JSON.stringify(result));
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  process.exit(0); // force exit: a runaway must not hang the child (or the suite)
+}
+`;
+  // .mts forces ESM (temp dir has no package.json) so top-level await is allowed.
+  const scriptPath = path.join(tmp, "reentrant-child.mts");
+  fs.writeFileSync(scriptPath, script, "utf8");
+
+  const run = spawnSync(process.execPath, ["--import", "tsx", scriptPath], {
+    cwd: path.resolve("."), // repo root so the child resolves tsx + packages
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+
+  // A RED implementation may not even reach the RESULT line if it overflows the
+  // stack before the catch unwinds, or it may exceed the spawn timeout (hang).
+  assert.equal(run.error, undefined, "child must not time out / fail to spawn (a hang implies runaway recursion)");
+  const line = (run.stdout ?? "").split(/\r?\n/).find((l) => l.startsWith("RESULT:"));
+  assert.ok(
+    line,
+    "child must report a RESULT line (a missing line implies a hard stack-overflow crash) — stderr: " +
+      (run.stderr ?? ""),
+  );
+  const result = JSON.parse(line!.slice("RESULT:".length));
+
+  assert.equal(
+    result.crashed,
+    false,
+    "a re-logging log.entry subscriber must NOT crash the agent (no stack overflow)",
+  );
+  assert.equal(
+    result.completed,
+    true,
+    "start()/stop() must both complete without throwing despite the re-logging subscriber",
+  );
+  assert.ok(
+    result.count >= 1,
+    "the subscriber must still observe at least the initial 'kick' log.entry (the guard must not permanently latch)",
+  );
+  assert.ok(
+    result.count < 50,
+    "the observed log.entry count must stay BOUNDED (no runaway recursion) — got " + result.count,
+  );
+});

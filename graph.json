@@ -28,7 +28,8 @@
         "history",
         "web",
         "notes",
-        "toolbox"
+        "toolbox",
+        "inspector"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -222,6 +223,22 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/toolbox.md"
+    },
+    "inspector": {
+      "zone": "plugins",
+      "path": "public_plugin/inspector",
+      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (llm.request composed context) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-beat by request id. Emits nothing — never perturbs the observed agent.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [
+        "plugin"
+      ],
+      "status": "done",
+      "overview": "overviews/nodes/inspector.md"
     }
   },
   "contracts": {
@@ -338,6 +355,11 @@
     "theme": {
       "path": "shared/theme",
       "description": "Krakey brand primitives (mint/dim/bold/red painters, ✦ glyph, ✔/✖ verdict lines) shared by every console surface (cli, boot startup report); degrades plain on non-TTY/NO_COLOR.",
+      "status": "done"
+    },
+    "http-auth": {
+      "path": "shared/http-auth",
+      "description": "Per-process session-token primitives shared by the loopback HTTP plugins (web, inspector): constant-time tokenOk (openWhenUnset knob) + Bearer/query/cookie extractors (cookie decode knob, fail-closed). Plugins keep their own source precedence + token-from-config policy.",
       "status": "done"
     }
   }

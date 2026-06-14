@@ -19,9 +19,51 @@ import { createLoader } from "../../loader/src";
 
 import type { Agent, AgentDefinition } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
+import type { EventBus } from "../../../contracts/event-system";
 import { PATHS, agentPaths } from "../../../shared/config";
 import { Events } from "../../../shared/actions";
 import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
+
+/**
+ * Per-agent re-entrancy guard for the bus mirror. `bus.emit(Events.LOG, …)` fans
+ * out synchronously, so a `log.entry` subscriber that itself logs (via a
+ * bridged/ctx logger) would re-enter `mirror` and recurse without bound. The guard
+ * is only `active` during a single synchronous emit fan-out; sequential logs each
+ * emit, while a mirror triggered from inside another mirror's fan-out is dropped.
+ *
+ * The guard is created once per `createAgentInstance` call and shared by all of
+ * that agent's bridged loggers, so it serializes WITHIN one agent but one agent's
+ * emit can never suppress another agent's mirror (per-agent isolation, R6).
+ */
+type MirrorGuard = { active: boolean };
+
+/**
+ * Bridge a CORE-INTERNAL logger onto this Agent's eventbus: every line still goes
+ * to `base` (console unchanged) AND is mirrored as a `log.entry` event tagged with
+ * a `core:<module>` source, so a debug/observer plugin can see core diagnostics.
+ * The mirror is best-effort — it must never throw into the core logger call.
+ *
+ * `guard` is this agent's own re-entrancy guard; pass the same object to all of one
+ * agent's bridged loggers so they share a single guard.
+ */
+function busLogger(base: Logger, bus: EventBus, source: string, guard: MirrorGuard): Logger {
+  const mirror = (level: "info" | "warn" | "error", text: string) => {
+    if (guard.active) return; // drop a log-of-a-log; never recurse
+    guard.active = true;
+    try {
+      bus.emit(Events.LOG, { at: Date.now(), data: { level, pluginId: source, text } });
+    } catch {
+      /* a logging mirror must never break the caller */
+    } finally {
+      guard.active = false;
+    }
+  };
+  return {
+    info: (m) => { base.info(m); mirror("info", m); },
+    warn: (m) => { base.warn(m); mirror("warn", m); },
+    error: (m) => { base.error(m); mirror("error", m); },
+  };
+}
 
 /**
  * Build (but do not start) one Agent from its definition. The full per-Agent set
@@ -53,7 +95,18 @@ export function createAgentInstance(
   // The per-Agent independent set, constructed once.
   const clock = createClock({ defaultIntervalMs: def.intervalMs });
   const events = createEventSystem();
-  const orchestrator = createOrchestrator({ events, clock, log });
+  // Bridge ONLY the orchestrator's diagnostic logger onto this Agent's eventbus as
+  // `log.entry` (tagged `core:orchestrator`), keeping `log` as the base so console
+  // output is unchanged. The loader is NOT bridged here: it reuses its logger to
+  // echo every plugin's ctx.log.* line, so mirroring it would duplicate plugin
+  // logs on the bus — the loader self-reports its own diagnostics (tagged
+  // `core:loader`) directly. So the loader gets the plain agent-tagged console
+  // logger `log`.
+  // One re-entrancy guard per agent, shared by all of this agent's bridged
+  // loggers so they serialize among themselves but never across agents (R6).
+  const mirrorGuard: MirrorGuard = { active: false };
+  const orchLog = busLogger(log, events.events, "core:orchestrator", mirrorGuard);
+  const orchestrator = createOrchestrator({ events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
     def,
