@@ -356,6 +356,11 @@
       "path": "shared/theme",
       "description": "Krakey brand primitives (mint/dim/bold/red painters, ✦ glyph, ✔/✖ verdict lines) shared by every console surface (cli, boot startup report); degrades plain on non-TTY/NO_COLOR.",
       "status": "done"
+    },
+    "http-auth": {
+      "path": "shared/http-auth",
+      "description": "Per-process session-token primitives shared by the loopback HTTP plugins (web, inspector): constant-time tokenOk (openWhenUnset knob) + Bearer/query/cookie extractors (cookie decode knob, fail-closed). Plugins keep their own source precedence + token-from-config policy.",
+      "status": "done"
     }
   }
 }
