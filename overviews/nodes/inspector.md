@@ -112,3 +112,8 @@ done
   grid vs a full-screen single panel per tab, uniform `.panel h3` title bars with controls moved to
   toolbars; themed slim scrollbars; brand logo icon removed (wordmark kept). Data/SSE/render logic and
   all element ids unchanged; color theme kept.
+- 2026-06-14: added a landing "select an agent to inspect" screen (`#landing` with clickable agent
+  cards from `/api/agents`) shown whenever no agent is selected — always first now (the
+  auto-select-when-exactly-one behavior was removed). Tabs + the header agent dropdown are hidden on
+  the landing and restored once an agent is picked; selecting the dropdown's "— none —" returns to it;
+  401 still shows the lock. Replaces the previous confusing empty/"— none —" default.
