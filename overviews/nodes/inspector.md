@@ -122,3 +122,13 @@ done
   `#e7ece9`/`#7b847e` text, and a teal-green `#5cc8b0` replacing the old purple; `--green`/`--yellow`/
   `--red` kept for received/warn/error coding). Layout, markup, ids, JS, and the monospace font are
   unchanged — the dashboard is fully tokenized so `:root` reskins it.
+- 2026-06-14: code-review hardening. Security: malformed `%`-escapes in the inspector cookie / agent-id
+  path no longer crash the shared process (decodes fail closed → skip/404; router try/catch → 400);
+  `esc()` now also escapes `"`/`'` (attribute-injection XSS); token charset validated. Robustness:
+  `closeAllConnections()` frees the port on teardown; a bind clash prints a `✖ could not bind …` line
+  (not a bogus `:0` URL), printed ONCE via a dialable loopback host; numeric config validated; the hub
+  registration self-deregisters if `setup` throws; dead SSE clients dropped on write failure. Payload
+  truncation is now a structured `{__truncated,bytes,preview}` marker rendered as `⚠ truncated (N bytes)`.
+  Perf/leak: live panel re-renders coalesced to one-per-`requestAnimationFrame` (hidden tabs skipped);
+  the unbounded `seen` dedup map replaced by an O(1) `seq` high-water mark. UX: a vanished selected
+  agent returns to the picker; programmatic scrolls no longer spuriously uncheck auto-follow.
