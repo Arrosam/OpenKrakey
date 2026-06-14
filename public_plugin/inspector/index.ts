@@ -109,7 +109,15 @@ function extractToken(req: http.IncomingMessage, url: URL): string | undefined {
       const eq = part.indexOf("=");
       if (eq === -1) continue;
       const k = part.slice(0, eq).trim();
-      if (k === "inspector_token") return decodeURIComponent(part.slice(eq + 1).trim());
+      if (k === "inspector_token") {
+        // A malformed %-sequence makes decodeURIComponent throw; an unauthenticated
+        // caller must never be able to crash the shared process — skip this cookie.
+        try {
+          return decodeURIComponent(part.slice(eq + 1).trim());
+        } catch {
+          return undefined;
+        }
+      }
     }
   }
   return undefined;
@@ -127,6 +135,21 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 // ---- the single request router (handles ALL agents) -------------------------
 
 function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  // Belt-and-suspenders: any unexpected throw in routing must degrade to a 400,
+  // never bubble up to crash the shared http.Server (and the whole process).
+  try {
+    routeRequest(req, res);
+  } catch {
+    try {
+      res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      res.end("bad request");
+    } catch {
+      /* response may already be (partly) sent — nothing more we can do */
+    }
+  }
+}
+
+function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
   let url: URL;
   try {
     url = new URL(req.url || "/", "http://" + (req.headers.host || "localhost"));
@@ -171,7 +194,14 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
     const rest = path.slice("/api/agents/".length);
     const slash = rest.indexOf("/");
     if (slash !== -1) {
-      const id = decodeURIComponent(rest.slice(0, slash));
+      let id: string;
+      try {
+        id = decodeURIComponent(rest.slice(0, slash));
+      } catch {
+        // Malformed %-escape in the agent id segment → not a resolvable agent.
+        sendJson(res, 404, { error: "not found" });
+        return;
+      }
       const sub = rest.slice(slash + 1);
       const reg = hub.agents.get(id);
 
@@ -222,7 +252,7 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): voi
 async function hubRegister(
   agentId: string,
   cfg: { port: number; host: string; token: string },
-): Promise<{ reg: AgentReg; boundPort: number; token: string }> {
+): Promise<{ reg: AgentReg; boundPort: number; token: string; created: boolean }> {
   let reg = hub.agents.get(agentId);
   if (!reg) {
     reg = { ring: [], dropped: 0, sseClients: new Set() };
@@ -230,6 +260,9 @@ async function hubRegister(
   }
   hub.refs++;
 
+  // True only for the agent whose call actually created the shared server, so
+  // the startup URL gets printed exactly once.
+  const created = !hub.server;
   if (!hub.server) {
     // First agent in the process: it wins the token, host, and port.
     hub.token = cfg.token;
@@ -252,7 +285,7 @@ async function hubRegister(
   // Every joiner awaits the same listen promise (the first bound port wins).
   if (hub.listening) await hub.listening;
 
-  return { reg, boundPort: hub.boundPort, token: hub.token };
+  return { reg, boundPort: hub.boundPort, token: hub.token, created };
 }
 
 /** Deregister an agent; the LAST deregistration closes the server. */
@@ -276,6 +309,9 @@ function hubDeregister(agentId: string): void {
     hub.listening = null;
     hub.boundPort = 0;
     try {
+      // Force-drop lingering keep-alive sockets so the port frees promptly;
+      // optional-chained because closeAllConnections is Node ≥18.2 only.
+      server.closeAllConnections?.();
       server.close();
     } catch {
       /* ignore */
@@ -316,14 +352,20 @@ const factory: PluginFactory = (): Plugin => {
       ...(typeof c === "object" ? c : {}),
       ...((c && c.inspector) || {}),
     };
-    const port: number = slice.port ?? DEFAULT_PORT;
+    // Numeric config is validated, not trusted: a non-number (or non-positive
+    // size) falls back to the default rather than poisoning listen()/the ring.
+    const port: number = typeof slice.port === "number" ? slice.port : DEFAULT_PORT;
     const host: string = slice.host ?? "127.0.0.1";
     let token: string = slice.token ?? crypto.randomBytes(24).toString("base64url");
-    if (typeof token !== "string" || token.length < 16) {
+    // Reject a token that isn't a string, is too short to be a secret, or
+    // contains anything outside the URL/cookie-safe charset.
+    if (typeof token !== "string" || token.length < 16 || !/^[A-Za-z0-9._~+\/=-]+$/.test(token)) {
       token = crypto.randomBytes(24).toString("base64url");
     }
-    const bufferSize: number = slice.bufferSize ?? 1000;
-    const maxRecordBytes: number = slice.maxRecordBytes ?? 65536;
+    const bufferSize: number =
+      typeof slice.bufferSize === "number" && slice.bufferSize > 0 ? slice.bufferSize : 1000;
+    const maxRecordBytes: number =
+      typeof slice.maxRecordBytes === "number" && slice.maxRecordBytes > 0 ? slice.maxRecordBytes : 65536;
 
     // ---- join the refcounted hub (first registration listens) ----
     const joined = await hubRegister(agentId, { port, host, token });
@@ -332,6 +374,9 @@ const factory: PluginFactory = (): Plugin => {
     // The process token is whatever the first agent set; use it in our URL.
     const procToken = joined.token;
 
+    // Past this point we hold a hub reference; if anything throws before setup()
+    // returns (e.g. ctx.print), undo the registration so we don't orphan the ref.
+    try {
     // ---- capture: subscribe to every bus event ----
     const capture = (eventName: string, kind: string): void => {
       const unsub = ctx.events.on(eventName, (payload: unknown) => {
@@ -344,11 +389,13 @@ const factory: PluginFactory = (): Plugin => {
             if (typeof id === "string") corrId = id;
           }
 
+          // corrId was already extracted from the ORIGINAL payload above, so
+          // truncation here never loses correlation. Emit a STRUCTURED marker
+          // (not a string) so consumers can detect truncation explicitly.
           let recPayload: unknown = payload;
           const json = safeStringify(payload);
           if (json.length > maxRecordBytes) {
-            const slc = json.slice(0, maxRecordBytes);
-            recPayload = slc + "…[truncated " + (json.length - maxRecordBytes) + " bytes]";
+            recPayload = { __truncated: true, bytes: json.length, preview: json.slice(0, maxRecordBytes) };
           }
 
           const rec: EventRecord = {
@@ -370,13 +417,16 @@ const factory: PluginFactory = (): Plugin => {
 
             // Fan out to this agent's live SSE clients only (R6).
             const frame = "data: " + safeStringify({ type: "record", record: rec }) + "\n\n";
+            let dead: http.ServerResponse[] | null = null;
             for (const client of reg.sseClients) {
               try {
                 client.write(frame);
               } catch {
-                /* a dead client is reaped on its own close event */
+                // Reap a broken client; don't mutate the Set mid-iteration.
+                (dead || (dead = [])).push(client);
               }
             }
+            if (dead) for (const d of dead) reg.sseClients.delete(d);
           }
         } catch {
           /* best-effort: never throw out of a bus handler */
@@ -390,7 +440,22 @@ const factory: PluginFactory = (): Plugin => {
     }
 
     // ---- starting message: MUST land during setup() (before it returns) ----
-    ctx.print("✦ Inspector: http://" + host + ":" + boundPort + "/?token=" + procToken);
+    // Print exactly ONCE — only the agent that actually created the server. A
+    // 0.0.0.0/:: bind isn't dialable, so advertise loopback in the URL instead;
+    // boundPort === 0 means the listen failed (almost always a busy port).
+    if (joined.created) {
+      if (boundPort > 0) {
+        const displayHost = (host === "0.0.0.0" || host === "::") ? "127.0.0.1" : host;
+        ctx.print("✦ Inspector: http://" + displayHost + ":" + boundPort + "/?token=" + procToken);
+      } else {
+        ctx.print("✖ Inspector: could not bind " + host + ":" + port +
+          " — is the port already in use? Set config.inspector.port to a free port.");
+      }
+    }
+    } catch (e) {
+      hubDeregister(agentId);
+      throw e;
+    }
   }
 
   function teardown(): void {
