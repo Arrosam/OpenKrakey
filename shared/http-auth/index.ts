@@ -23,9 +23,15 @@ export function bearerToken(req: IncomingMessage): string | undefined {
   return undefined;
 }
 
-/** The `?token=` query parameter, or undefined. */
+/**
+ * The `?token=` query parameter, or undefined. An EMPTY `?token=` is treated as
+ * absent (returns undefined, not "") so a caller's `?? bearer ?? cookie` chain
+ * falls through to the other sources — matching both plugins' original truthy
+ * `if (q) return q;` check. Returning "" would short-circuit the chain.
+ */
 export function queryToken(params: URLSearchParams): string | undefined {
-  return params.get("token") ?? undefined;
+  const q = params.get("token");
+  return q ? q : undefined;
 }
 
 /**
