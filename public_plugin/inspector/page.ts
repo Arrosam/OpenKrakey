@@ -21,16 +21,16 @@ export const PAGE = `<!doctype html>
 <title>Krakey Inspector</title>
 <style>
   :root {
-    --bg: #0d0f12;
-    --panel: #14181d;
-    --panel-2: #1a1f26;
-    --border: #262c34;
-    --text: #d8dee9;
-    --muted: #6b7280;
-    --cyan: #6cd5d5;
+    --bg: #0d1210;
+    --panel: #171e1a;
+    --panel-2: #1c2521;
+    --border: #28322c;
+    --text: #e7ece9;
+    --muted: #7b847e;
+    --cyan: #2fd69c;
     --green: #7ec77e;
     --yellow: #e8c060;
-    --magenta: #c585c5;
+    --magenta: #5cc8b0;
     --red: #d27575;
     --mono: ui-monospace, "Consolas", "Cascadia Code", monospace;
   }
