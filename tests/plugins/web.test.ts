@@ -959,3 +959,192 @@ test("web: multiple messages replay in strict chronological order [user m1, agen
     await c.close();
   }
 });
+
+// ===========================================================================
+// NEW SECTION — REGRESSION tests for two chat-history persistence FIXES
+// ---------------------------------------------------------------------------
+// These extend the persistence suite above with two properties that the current
+// code gets WRONG (so they are RED today and GREEN once the fixes land). They
+// reuse the SAME child harness — the per-agent dataDir (path.join(WEB_DATADIR,
+// agentId)), the two-process restart pattern over a FIXED WEB_DATADIR
+// (startChild(agents, { dataDir })), the stdin command loop (req/ret + POST),
+// openSSE, and the { type:"history" } event parsing — with NO harness changes:
+//   * Reading the new message's id   -> the POST already returns { id }.
+//   * Waiting for live "read" state  -> the { type:"status", id, status:"read" }
+//                                       event openSSE already parses.
+//   * Restart / load-from-disk       -> startChild's existing opts.dataDir.
+// Only two small READ-ONLY helpers are added below; every existing caller and
+// the harness itself are untouched.
+//
+// The wire contract these rely on is the one already documented for the history
+// event above: each replayed message is
+//     { role:"user"|"agent", text:string, id?:number, status?:string }
+// so a persisted USER message carries BOTH its numeric `id` and its `status`
+// ("sent" until read, "read" after the beat that carried it completes).
+//
+// FIX M-9 — `read` status must be PERSISTED:
+//   Today the llm.return handler broadcasts { status:"read" } to live clients but
+//   never updates the STORED transcript, so a message that was read replays as
+//   "sent" after a restart. After the fix the in-memory transcript entry is set
+//   to status:"read" on llm.return and persisted (compacting rewrite on
+//   teardown), so a clean restart replays it as "read".
+//
+// FIX M-8 — msgSeq must be SEEDED from persisted history:
+//   Today msgSeq is module-global and resets to 0 each process, so after a
+//   restart a new message reuses ids (1,2,…) that COLLIDE with replayed
+//   historical ids. After the fix msgSeq is seeded from the max persisted id at
+//   load, so a new message's id is strictly greater than every replayed id.
+// ===========================================================================
+
+/** The first replayed history message whose text === `text` (or undefined). */
+function historyMsgByText(events: any[], text: string): any | undefined {
+  const h = historyEvent(events);
+  if (!h || !Array.isArray(h.messages)) return undefined;
+  return h.messages.find((m) => m && m.text === text);
+}
+
+/** The max numeric `id` across a history event's replayed messages (-Infinity if none). */
+function maxHistoryId(events: any[]): number {
+  const h = historyEvent(events);
+  if (!h || !Array.isArray(h.messages)) return -Infinity;
+  return h.messages.reduce(
+    (mx, m) => (m && typeof m.id === "number" ? Math.max(mx, m.id) : mx),
+    -Infinity,
+  );
+}
+
+// --- Test M-9: a READ message replays as "read" (not "sent") after a clean restart ---
+test("web: read status survives a clean restart (a read message replays as 'read', not 'sent')", async () => {
+  // One FIXED root shared by both child processes (per-agent subdirs live under it).
+  const fixed = fs.mkdtempSync(path.join(TMP, "read-persist-"));
+
+  // --- child #1: post a message, drive its beat to completion so it is marked
+  // read LIVE, confirm the live "read" status, then quit (teardown persists). ---
+  const c1 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c1);
+    const live = await openSSE(c1, "alice");
+    await waitEvents(live.events, (e) => e.some((x) => x.type === "output")); // greeting
+
+    const res = await fetch(api(c1, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "read-me" }),
+    });
+    assert.equal(res.status, 202);
+    const { id } = (await res.json()) as { id: number };
+
+    // It starts life "sent"...
+    assert.ok(
+      await waitEvents(live.events, (e) =>
+        e.some((x) => x.type === "status" && x.id === id && x.status === "sent"),
+      ),
+      "the message is acked 'sent' live",
+    );
+
+    // ...then the beat that carried it (its llm.request) returns -> flips to "read".
+    c1.send("req alice R1");
+    c1.send("ret alice R1");
+    assert.ok(
+      await waitEvents(live.events, (e) =>
+        e.some((x) => x.type === "status" && x.id === id && x.status === "read"),
+      ),
+      "the message flips to 'read' live when its request returns (precondition for persisting read)",
+    );
+    live.close();
+  } finally {
+    await c1.close(); // process exits; teardown must persist the READ status
+  }
+
+  // --- child #2: SAME root, brand-new process. The replayed message must be
+  // status:"read" — NOT "sent". This is the regression: today read is never
+  // written to the stored transcript, so it replays as "sent" (RED). ---
+  const c2 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c2);
+    const fresh = await openSSE(c2, "alice");
+    assert.ok(
+      await waitEvents(fresh.events, (e) => historyMsgByText(e, "read-me") !== undefined),
+      "child #2 must replay the persisted 'read-me' message in its history",
+    );
+    const msg = historyMsgByText(fresh.events, "read-me");
+    assert.equal(msg.role, "user", "the replayed message is the user message");
+    assert.equal(
+      msg.status,
+      "read",
+      "a message that was READ before the restart must replay as 'read', not 'sent' (got " +
+        JSON.stringify(msg.status) + ")",
+    );
+    fresh.close();
+  } finally {
+    await c2.close();
+  }
+});
+
+// --- Test M-8: a NEW message's id does not collide with replayed ids after restart ---
+test("web: a new message's id does not collide with replayed ids after a restart (msgSeq seeded from history)", async () => {
+  // One FIXED root shared by both child processes.
+  const fixed = fs.mkdtempSync(path.join(TMP, "seq-persist-"));
+
+  // --- child #1: post TWO messages (ids ~1 and ~2), then quit (persist). ---
+  const c1 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c1);
+    const post = async (text: string): Promise<number> => {
+      const r = await fetch(api(c1, "/api/agents/alice/message"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      assert.equal(r.status, 202, "POST " + text + " accepted");
+      const { id } = (await r.json()) as { id: number };
+      assert.equal(typeof id, "number", "a numeric id is assigned to " + text);
+      return id;
+    };
+    const id1 = await post("first");
+    const id2 = await post("second");
+    assert.ok(id2 > id1, "ids are monotonically increasing within a process (" + id1 + " < " + id2 + ")");
+  } finally {
+    await c1.close(); // process exits; the two ids are persisted to disk
+  }
+
+  // --- child #2: SAME root, brand-new process. POST a NEW message; its id must
+  // be STRICTLY GREATER than the max id replayed from child #1's history.
+  // Today msgSeq resets to 0 each process, so the new id is 1 and COLLIDES with a
+  // replayed id (RED). After the fix msgSeq is seeded from the max persisted id,
+  // so the new id is > every replayed id (GREEN). ---
+  const c2 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c2);
+
+    // First, learn the max id present in the replayed history (must be >= 2).
+    const fresh = await openSSE(c2, "alice");
+    assert.ok(
+      await waitEvents(fresh.events, (e) => historyEvent(e) !== undefined && historyEvent(e)!.messages.length >= 2),
+      "child #2 must replay both prior messages so we can read their ids",
+    );
+    const replayedMax = maxHistoryId(fresh.events);
+    assert.ok(
+      Number.isFinite(replayedMax) && replayedMax >= 2,
+      "the replayed history must carry numeric ids (max >= 2); got " + replayedMax,
+    );
+    fresh.close();
+
+    // Now POST a brand-new message and inspect its assigned id.
+    const r = await fetch(api(c2, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "after-restart" }),
+    });
+    assert.equal(r.status, 202);
+    const { id: newId } = (await r.json()) as { id: number };
+    assert.equal(typeof newId, "number", "the new message gets a numeric id");
+    assert.ok(
+      newId > replayedMax,
+      "a new message's id must be strictly greater than every replayed id (so it cannot collide); " +
+        "new id " + newId + " must be > replayed max " + replayedMax,
+    );
+  } finally {
+    await c2.close();
+  }
+});
