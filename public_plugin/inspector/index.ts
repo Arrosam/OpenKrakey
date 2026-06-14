@@ -143,17 +143,8 @@ const factory: PluginFactory = (): Plugin => {
       }
     }
     unsubs = [];
-    // End this agent's SSE clients and drop us from the hub; the hub closes the
-    // server once the last agent leaves.
-    if (reg) {
-      for (const client of reg.sseClients) {
-        try {
-          client.end();
-        } catch {
-          /* ignore */
-        }
-      }
-    }
+    // Drop us from the hub; hubDeregister owns SSE-client teardown (it ends every
+    // client) and closes the server once the last agent leaves.
     if (agentId) hubDeregister(agentId);
     reg = null;
   }
