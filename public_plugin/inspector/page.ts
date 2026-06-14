@@ -85,6 +85,24 @@ export const PAGE = `<!doctype html>
   }
   #lock h2 { color: var(--red); }
 
+  /* ---- landing: shown whenever no agent is selected ---- */
+  #landing { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; overflow: auto; }
+  .landing-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 24px 28px; max-width: 560px; width: 100%;
+  }
+  .landing-card h2 { margin: 0 0 4px; font-size: 16px; color: var(--text); }
+  .landing-hint { margin: 0 0 16px; font-size: 12px; color: var(--muted); }
+  .agent-list { display: flex; flex-direction: column; gap: 8px; }
+  .agent-card {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    cursor: pointer; color: var(--text); font: 13px var(--mono); text-align: left;
+  }
+  .agent-card:hover { border-color: var(--cyan); color: var(--cyan); }
+  .agent-card .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: 0 0 auto; }
+  .agent-card .id { font-weight: bold; }
+
   /* ---- main: tabbed views via data-view (single render targets) ---- */
   main {
     flex: 1; overflow: hidden; padding: 12px;
@@ -198,7 +216,7 @@ export const PAGE = `<!doctype html>
     <button class="tab-btn" data-view="beats">Per-beat</button>
     <button class="tab-btn" data-view="logs">Logs</button>
   </nav>
-  <label style="color:var(--muted);font-size:12px;">agent <select id="agentSel"><option value="">— none —</option></select></label>
+  <label id="agentPicker" style="color:var(--muted);font-size:12px;">agent <select id="agentSel"><option value="">— none —</option></select></label>
   <span class="status-bar" id="status">idle</span>
 </header>
 
@@ -206,6 +224,14 @@ export const PAGE = `<!doctype html>
   <h2>Locked</h2>
   <p>A valid access token is required. Append <code>?token=…</code> to the URL
   (the inspector printed the full URL on startup).</p>
+</div>
+
+<div id="landing" style="display:none">
+  <div class="landing-card">
+    <h2>Select an agent to inspect</h2>
+    <p class="landing-hint">Choose which running Agent's bus to observe.</p>
+    <div id="agentList" class="agent-list"><div class="empty">Waiting for agents…</div></div>
+  </div>
 </div>
 
 <main id="main" data-view="overview">
@@ -246,6 +272,10 @@ export const PAGE = `<!doctype html>
   var $ = function (id) { return document.getElementById(id); };
   var statusEl = $("status");
   var agentSel = $("agentSel");
+  var landingEl = document.getElementById("landing");
+  var agentListEl = document.getElementById("agentList");
+  var tabsNav = document.querySelector(".tabs");
+  var agentPicker = document.getElementById("agentPicker");
 
   function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -581,11 +611,52 @@ export const PAGE = `<!doctype html>
     if (state && state.es) { try { state.es.close(); } catch (e) {} state.es = null; }
   }
 
+  // ---- landing screen (shown whenever no agent is selected) ----
+  function renderAgentList(ids) {
+    agentListEl.innerHTML = "";
+    if (!ids.length) {
+      agentListEl.innerHTML = '<div class="empty">Waiting for agents…</div>';
+      return;
+    }
+    for (var i = 0; i < ids.length; i++) {
+      (function (id) {
+        var btn = document.createElement("button");
+        btn.className = "agent-card";
+        btn.setAttribute("data-id", id);
+        btn.innerHTML = '<span class="dot"></span><span class="id">' + esc(id) + '</span>';
+        btn.addEventListener("click", function () { select(id); });
+        agentListEl.appendChild(btn);
+      })(ids[i]);
+    }
+  }
+
+  function showLanding() {
+    document.getElementById("main").style.display = "none";
+    document.getElementById("lock").style.display = "none";
+    landingEl.style.display = "flex";
+    if (tabsNav) tabsNav.style.display = "none";
+    if (agentPicker) agentPicker.style.display = "none";
+    setStatus("select an agent");
+  }
+  function showDashboard() {
+    landingEl.style.display = "none";
+    document.getElementById("main").style.display = "";
+    if (tabsNav) tabsNav.style.display = "";
+    if (agentPicker) agentPicker.style.display = "";
+  }
+
   function select(id) {
     disconnect();
     resetPanels();
-    if (!id) { state = null; setStatus("idle"); return; }
+    if (!id) {
+      state = null;
+      agentSel.value = "";
+      showLanding();
+      return;
+    }
+    showDashboard();
     state = freshState(id);
+    agentSel.value = id;
     setStatus("loading…");
 
     // 1) backfill via snapshot, THEN open the live stream (no replay overlap)
@@ -634,6 +705,7 @@ export const PAGE = `<!doctype html>
 
   function showLock() {
     document.getElementById("main").style.display = "none";
+    landingEl.style.display = "none";
     document.getElementById("lock").style.display = "block";
     setStatus("locked", "err");
   }
@@ -662,7 +734,6 @@ export const PAGE = `<!doctype html>
       })
       .then(function (data) {
         var ids = (data && data.agents) || [];
-        var cur = agentSel.value;
         var existing = {};
         for (var i = 0; i < agentSel.options.length; i++) existing[agentSel.options[i].value] = true;
         for (var j = 0; j < ids.length; j++) {
@@ -672,13 +743,18 @@ export const PAGE = `<!doctype html>
             agentSel.appendChild(o);
           }
         }
-        if (!cur && ids.length === 1) { agentSel.value = ids[0]; select(ids[0]); }
+        // landing cards mirror the live agent list
+        renderAgentList(ids);
+        // no agent selected → keep (or refresh) the landing screen on screen
+        if (!state) showLanding();
       })
       .catch(function (e) {
         if (String(e.message) !== "401") setStatus("error: " + e.message, "err");
       });
   }
 
+  // Open on the landing screen (no agent selected); loadAgents() refreshes it.
+  showLanding();
   loadAgents();
   setInterval(loadAgents, 5000);
 })();
