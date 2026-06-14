@@ -132,3 +132,12 @@ done
   Perf/leak: live panel re-renders coalesced to one-per-`requestAnimationFrame` (hidden tabs skipped);
   the unbounded `seen` dedup map replaced by an O(1) `seq` high-water mark. UX: a vanished selected
   agent returns to the picker; programmatic scrolls no longer spuriously uncheck auto-follow.
+- 2026-06-15: SRP refactor (pure — no behavior change, page byte-identical at 33320). The 489-line
+  `index.ts` split by responsibility into: `hub.ts` (the process resource — refcounted http server,
+  the token-gated router, per-agent record ring + SSE fan-out `pushRecord`, `hubRegister`/`hubDeregister`);
+  `config.ts` (`resolveConfig(ctx)` — nested-over-flat merge + numeric/token validation); and a slim
+  `index.ts` (the factory's real job: subscribe every `Events.*`, map each into an `EventRecord`, hand
+  it to `pushRecord`, print the startup URL once). The 839-line `page.ts` split into `page.style.ts`
+  (CSS), `page.script.ts` (the dashboard IIFE), and `page.ts` (assembles `PAGE` byte-identically). Token
+  auth moved to the new `shared/http-auth` primitives (Bearer→query→cookie precedence composed locally;
+  constant-time `tokenOk`, closed-when-unset). Entry point + default export unchanged.
