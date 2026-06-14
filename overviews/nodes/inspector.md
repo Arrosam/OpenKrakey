@@ -117,3 +117,8 @@ done
   auto-select-when-exactly-one behavior was removed). Tabs + the header agent dropdown are hidden on
   the landing and restored once an agent is picked; selecting the dropdown's "— none —" returns to it;
   401 still shows the lock. Replaces the previous confusing empty/"— none —" default.
+- 2026-06-14: reskinned to the **web chat's green theme** (recolor the `:root` design tokens only —
+  mint `#2fd69c` primary accent (web's `--mint`), green-tinted `#0d1210`/`#171e1a` bg/surfaces +
+  `#e7ece9`/`#7b847e` text, and a teal-green `#5cc8b0` replacing the old purple; `--green`/`--yellow`/
+  `--red` kept for received/warn/error coding). Layout, markup, ids, JS, and the monospace font are
+  unchanged — the dashboard is fully tokenized so `:root` reskins it.
