@@ -69,6 +69,8 @@ test.after(() => {
 const CHILD = `
 import { createEventSystem } from ${JSON.stringify(EVENT_SYSTEM_URL)};
 import * as readline from "node:readline";
+import * as fs from "node:fs";
+import * as path from "node:path";
 function emit(s){ process.stdout.write(s + "\\n"); }
 
 const AGENTS = (process.env.WEB_AGENTS || "alice,bob").split(",").filter(Boolean);
@@ -79,12 +81,18 @@ function makeCtx(agentId, port){
   const blocks = new Map();
   sys.actions.register(${JSON.stringify(Actions.CLOCK_FIRE_NOW)}, async () => { emit("FIRED:" + agentId); });
   sys.events.on(${JSON.stringify(Events.INPUT_MESSAGE)}, (p) => { emit("GOT_INPUT:" + agentId + ":" + JSON.stringify(p)); });
+  // PER-AGENT dataDir: each agent gets its OWN isolated subdir under WEB_DATADIR.
+  // This (a) isolates one agent's persisted transcript from another's (R6), and
+  // (b) lets a SECOND child process reuse the same WEB_DATADIR to load an agent's
+  // prior transcript from disk (the "survives restart" property).
+  const agentDataDir = path.join(process.env.WEB_DATADIR, agentId);
+  fs.mkdirSync(agentDataDir, { recursive: true });
   return { sys, ctx: {
     agentId,
     events: sys.events,
     actions: sys.actions,
     config: { port },
-    dataDir: process.env.WEB_DATADIR,
+    dataDir: agentDataDir,
     llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
     setBlock: (b) => { blocks.set(b.id, b); },
     getBlock: (id) => blocks.get(id),
@@ -153,8 +161,16 @@ interface Child {
   notImplemented: boolean;
 }
 
-async function startChild(agents: string[]): Promise<Child> {
-  const dataDir = fs.mkdtempSync(path.join(TMP, "data-"));
+async function startChild(
+  agents: string[],
+  opts: { dataDir?: string } = {},
+): Promise<Child> {
+  // Each agent gets its OWN subdir under this WEB_DATADIR (created in the child).
+  // Default: a FRESH temp dir (existing callers stay isolated & unchanged).
+  // Pass opts.dataDir to REUSE a fixed root across two child processes — the
+  // restart test points child #1 and child #2 at the same root so child #2
+  // loads child #1's persisted transcript from disk.
+  const dataDir = opts.dataDir ?? fs.mkdtempSync(path.join(TMP, "data-"));
   const scriptPath = path.join(fs.mkdtempSync(path.join(TMP, "child-")), "web-harness.mts");
   fs.writeFileSync(scriptPath, CHILD, "utf8");
 
@@ -670,6 +686,275 @@ test("web: GET / serves the page WITHOUT a token (the page holds no secrets)", a
     assertUp(c);
     const res = await fetch(base(c) + "/");
     assert.equal(res.status, 200, "the page itself is not token-gated");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// NEW SECTION — PERSISTENT per-agent chat history (RED until `web` implements it)
+// ---------------------------------------------------------------------------
+// Surface under test is derived ONLY from the development spec for this feature
+// (the wire contract below) — NO implementation was read; the behavior does not
+// exist yet, so every scenario here fails on a clean assertion until it does.
+//
+//   The web plugin PERSISTS each agent's chat transcript under its `ctx.dataDir`
+//   (agent-isolated) and REPLAYS it to the browser on connect, so history survives
+//   agent-switches AND process restarts.
+//     - PERSISTED: each USER message (on POST /api/agents/:id/message) and each
+//       AGENT message (on output.message), to a file under that agent's ctx.dataDir.
+//       (On-disk format is the impl's choice — we assert only observable SSE behavior.)
+//     - REPLAY ON CONNECT: opening GET /api/agents/:id/stream sends — BEFORE the
+//       greeting — exactly ONE event:
+//          { type:"history",
+//            messages:[ { role:"user"|"agent", text:string, id?:number, status?:string }, ... ] }
+//       listing the stored transcript in chronological order (oldest first). Then
+//       the existing greeting { type:"output", text:<greeting> }, then live events.
+//       An agent with no stored messages still gets the history event (messages:[]).
+//     - LOAD ON SETUP: a freshly-constructed web instance whose ctx.dataDir already
+//       holds a prior transcript replays it on the next connect (loads from disk at
+//       setup) — the "survives restart" property.
+//     - R6: an agent's history contains ONLY its own messages.
+//
+// Harness changes that back these tests (see above):
+//   * The child now gives each agent its OWN dataDir subdir
+//     (path.join(WEB_DATADIR, agentId), created on construction) — per-agent
+//     isolation, and lets a second child reuse the same WEB_DATADIR.
+//   * startChild(agents, { dataDir }) accepts a caller-provided fixed root so two
+//     child processes can share one WEB_DATADIR (restart test). Default is a fresh
+//     temp dir, so every existing caller is unchanged.
+// ===========================================================================
+
+/** The single { type:"history" } event from a stream's parsed events (or undefined). */
+function historyEvent(events: any[]): { type: "history"; messages: any[] } | undefined {
+  return events.find((e) => e && e.type === "history");
+}
+
+/** All { type:"history" } events seen on a stream (to assert there is EXACTLY one). */
+function historyEvents(events: any[]): any[] {
+  return events.filter((e) => e && e.type === "history");
+}
+
+/** Reduce a history event's messages to ordered [role, text] pairs for comparison. */
+function transcript(h: { messages: any[] } | undefined): Array<[string, string]> {
+  if (!h || !Array.isArray(h.messages)) return [];
+  return h.messages.map((m) => [m.role, m.text] as [string, string]);
+}
+
+/** True once a history event whose transcript matches `want` exactly has arrived. */
+const historyMatches = (events: any[], want: Array<[string, string]>): boolean => {
+  const h = historyEvent(events);
+  if (!h) return false;
+  const got = transcript(h);
+  if (got.length !== want.length) return false;
+  return got.every(([r, t], i) => r === want[i][0] && t === want[i][1]);
+};
+
+// --- Test H1: history event SHAPE on a fresh agent (sent BEFORE the greeting) ---
+test("web: a fresh agent's stream sends { type:'history', messages:[] } FIRST, before the greeting", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const a = await openSSE(c, "alice");
+    assert.equal(a.status, 200);
+
+    // The very first decoded event is the (empty) history event.
+    assert.ok(
+      await waitEvents(a.events, (e) => e.length >= 1),
+      "the stream must emit at least one event on connect",
+    );
+    assert.equal(a.events[0]?.type, "history", "the FIRST event must be the history event");
+    assert.deepEqual(a.events[0]?.messages, [], "a fresh agent replays an EMPTY history (messages:[])");
+
+    // ...and the existing greeting still arrives, AFTER the history event.
+    assert.ok(
+      await waitEvents(a.events, (e) => e.some((x) => x.type === "output")),
+      "the greeting output event must still arrive after the history event",
+    );
+    const hIdx = a.events.findIndex((x) => x.type === "history");
+    const gIdx = a.events.findIndex((x) => x.type === "output");
+    assert.ok(hIdx !== -1 && gIdx !== -1 && hIdx < gIdx, "history must precede the greeting");
+
+    // Exactly ONE history event per connection.
+    assert.equal(historyEvents(a.events).length, 1, "exactly one history event per connect");
+    a.close();
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test H2: replay WITHIN a session (a user msg + an agent msg, in order) ---
+test("web: a new stream replays this session's user + agent messages in order via the history event", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    // Watcher stream open FIRST so we can confirm the live agent output round-trips
+    // (i.e. the server handled output.message, which is also when it persists).
+    const live = await openSSE(c, "alice");
+    await waitEvents(live.events, (e) => e.some((x) => x.type === "output")); // greeting
+
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hello-1" }),
+    });
+    assert.equal(res.status, 202, "the user message is accepted (and persisted on POST)");
+
+    c.send("out alice reply-1");
+    assert.ok(
+      await waitEvents(live.events, (e) => e.some((x) => x.type === "output" && x.text === "reply-1")),
+      "the agent output round-tripped live (so the server has handled & persisted it)",
+    );
+    live.close();
+
+    // A brand-new connection must REPLAY both, oldest-first: user 'hello-1', agent 'reply-1'.
+    const fresh = await openSSE(c, "alice");
+    assert.ok(
+      await waitEvents(fresh.events, (e) =>
+        historyMatches(e, [["user", "hello-1"], ["agent", "reply-1"]]),
+      ),
+      "history must replay [user hello-1, agent reply-1] in chronological order; got " +
+        JSON.stringify(transcript(historyEvent(fresh.events))),
+    );
+    fresh.close();
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test H3: survives RESTART — child #2 loads child #1's transcript from disk ---
+test("web: history survives a RESTART (a new process loads the prior transcript from ctx.dataDir)", async () => {
+  // One FIXED root shared by both child processes; per-agent subdirs live under it.
+  const fixed = fs.mkdtempSync(path.join(TMP, "persist-"));
+
+  // --- child #1: write a user message and an agent message, confirm stored, quit. ---
+  const c1 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c1);
+    const live = await openSSE(c1, "alice");
+    await waitEvents(live.events, (e) => e.some((x) => x.type === "output")); // greeting
+
+    const res = await fetch(api(c1, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "persist-me" }),
+    });
+    assert.equal(res.status, 202);
+
+    c1.send("out alice persisted-reply");
+    assert.ok(
+      await waitEvents(live.events, (e) => e.some((x) => x.type === "output" && x.text === "persisted-reply")),
+      "the agent output round-tripped live in child #1 (so it has been persisted to disk)",
+    );
+    live.close();
+  } finally {
+    await c1.close(); // process exits; nothing in-memory survives
+  }
+
+  // --- child #2: SAME root, brand-new process. It must load the transcript at setup. ---
+  const c2 = await startChild(["alice"], { dataDir: fixed });
+  try {
+    assertUp(c2);
+    const fresh = await openSSE(c2, "alice");
+    assert.ok(
+      await waitEvents(fresh.events, (e) =>
+        historyMatches(e, [["user", "persist-me"], ["agent", "persisted-reply"]]),
+      ),
+      "a freshly-started process must replay the on-disk transcript [user persist-me, agent persisted-reply]; got " +
+        JSON.stringify(transcript(historyEvent(fresh.events))),
+    );
+    fresh.close();
+  } finally {
+    await c2.close();
+  }
+});
+
+// --- Test H4: R6 isolation — agent B's history excludes agent A's messages ---
+test("web: an agent's history contains ONLY its own messages (R6 isolation)", async () => {
+  const c = await startChild(["alice", "bob"]);
+  try {
+    assertUp(c);
+
+    // Drive activity on ALICE only, confirming it round-trips (and persists) live.
+    const aLive = await openSSE(c, "alice");
+    await waitEvents(aLive.events, (e) => e.some((x) => x.type === "output")); // greeting
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "for-A" }),
+    });
+    assert.equal(res.status, 202);
+    c.send("out alice only-A");
+    assert.ok(
+      await waitEvents(aLive.events, (e) => e.some((x) => x.type === "output" && x.text === "only-A")),
+      "alice's output round-tripped (and persisted) live",
+    );
+    aLive.close();
+
+    // BOB's history must NOT contain any of alice's messages.
+    const bFresh = await openSSE(c, "bob");
+    assert.ok(
+      await waitEvents(bFresh.events, (e) => historyEvent(e) !== undefined),
+      "bob's stream must still send a history event",
+    );
+    const bMsgs = historyEvent(bFresh.events)!.messages;
+    const bTexts = (Array.isArray(bMsgs) ? bMsgs : []).map((m: any) => m.text);
+    assert.ok(!bTexts.includes("for-A"), "bob's history must NOT carry alice's user message 'for-A'");
+    assert.ok(!bTexts.includes("only-A"), "bob's history must NOT carry alice's agent message 'only-A'");
+    bFresh.close();
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test H5: ordering — interleaved messages replay in strict chronological order ---
+test("web: multiple messages replay in strict chronological order [user m1, agent r1, user m2, agent r2]", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    // Live watcher lets us SERIALIZE persistence: only post the next item once the
+    // previous agent reply has round-tripped, pinning the on-disk order.
+    const live = await openSSE(c, "alice");
+    await waitEvents(live.events, (e) => e.some((x) => x.type === "output")); // greeting
+
+    const post = async (text: string) => {
+      const r = await fetch(api(c, "/api/agents/alice/message"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      assert.equal(r.status, 202, "POST " + text + " accepted");
+    };
+    const reply = async (text: string) => {
+      c.send("out alice " + text);
+      assert.ok(
+        await waitEvents(live.events, (e) => e.some((x) => x.type === "output" && x.text === text)),
+        "agent reply " + text + " round-tripped live (persisted in order)",
+      );
+    };
+
+    await post("m1");
+    await reply("r1");
+    await post("m2");
+    await reply("r2");
+    live.close();
+
+    const fresh = await openSSE(c, "alice");
+    assert.ok(
+      await waitEvents(fresh.events, (e) =>
+        historyMatches(e, [
+          ["user", "m1"],
+          ["agent", "r1"],
+          ["user", "m2"],
+          ["agent", "r2"],
+        ]),
+      ),
+      "history must be exactly [user m1, agent r1, user m2, agent r2]; got " +
+        JSON.stringify(transcript(historyEvent(fresh.events))),
+    );
+    fresh.close();
   } finally {
     await c.close();
   }
