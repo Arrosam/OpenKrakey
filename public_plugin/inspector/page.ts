@@ -150,7 +150,13 @@ export const PAGE = `<!doctype html>
   </section>
 
   <section class="panel">
-    <h2>Event stream <span class="count" id="cEvents">0</span></h2>
+    <h2>Event stream <span class="count" id="cEvents">0</span>
+      <span class="controls">
+        <label style="display:flex;gap:4px;align-items:center;color:var(--dim);font:11px var(--mono);">
+          <input type="checkbox" id="autoFollow" checked /> auto-follow
+        </label>
+      </span>
+    </h2>
     <div class="body" id="events"><div class="empty">No events yet.</div></div>
   </section>
 
@@ -284,13 +290,25 @@ export const PAGE = `<!doctype html>
     }
   }
 
-  // ---- panel 2: event stream (auto-scroll, pause on scroll up) ----
+  // ---- caps: bound retained state + DOM so a long session never degrades ----
+  var CAP_EVENTS = 600;   // event-stream rows (records[] and DOM .row nodes)
+  var CAP_PROMPTS = 200;  // prompt pairs (promptOrder + prompts map)
+  var CAP_LOGS = 600;     // log records
+  var CAP_BEATS = 200;    // beat groups
+
+  // ---- panel 2: event stream (explicit auto-follow toggle is the master) ----
   var eventsBody = $("events");
-  var pinned = true;
+  var autoFollow = $("autoFollow");
+  // The checkbox is the source of truth. Manually scrolling up is a nicety that
+  // unchecks it; checking it again snaps back to the latest.
   eventsBody.addEventListener("scroll", function () {
-    pinned = (eventsBody.scrollHeight - eventsBody.scrollTop - eventsBody.clientHeight) < 24;
+    var atBottom = (eventsBody.scrollHeight - eventsBody.scrollTop - eventsBody.clientHeight) < 24;
+    if (!atBottom && autoFollow.checked) autoFollow.checked = false;
   });
-  function renderEventRow(rec) {
+  autoFollow.addEventListener("change", function () {
+    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
+  });
+  function makeEventRow(rec) {
     var div = document.createElement("div");
     div.className = "row";
     var cls = KIND_CLASS[rec.kind] || "";
@@ -299,6 +317,30 @@ export const PAGE = `<!doctype html>
       + '<span class="kind ' + cls + '">' + esc(rec.kind) + '</span>'
       + esc(summarize(rec));
     return div;
+  }
+  // Full rebuild from state — used once after a backfill (NOT per record).
+  function renderEvents(s) {
+    eventsBody.innerHTML = "";
+    if (!s.records.length) {
+      eventsBody.innerHTML = '<div class="empty">No events yet.</div>';
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < s.records.length; i++) frag.appendChild(makeEventRow(s.records[i]));
+    eventsBody.appendChild(frag);
+    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
+  }
+  // Cheap incremental append for a single LIVE record; trims oldest DOM rows.
+  function appendEventRow(rec) {
+    var emptyEv = eventsBody.querySelector(".empty");
+    if (emptyEv) emptyEv.remove();
+    eventsBody.appendChild(makeEventRow(rec));
+    var rows = eventsBody.querySelectorAll(".row");
+    while (rows.length > CAP_EVENTS) {
+      rows[0].remove();
+      rows = eventsBody.querySelectorAll(".row");
+    }
+    if (autoFollow.checked) eventsBody.scrollTop = eventsBody.scrollHeight;
   }
 
   // ---- panel 1: prompts ----
@@ -398,34 +440,33 @@ export const PAGE = `<!doctype html>
     }
   }
 
-  // ---- record routing ----
-  function ingest(s, rec) {
+  // ---- record routing: STATE ONLY (never touches the DOM) ----
+  // Updates seen/records/prompts/promptOrder/logs/beats and enforces the caps.
+  // Returns true if the record was new (false if it was a dedup'd duplicate), so
+  // callers can decide whether a re-render is warranted.
+  function applyRecord(s, rec) {
     var key = rec.seq;
-    if (s.seen[key]) return;
+    if (s.seen[key]) return false;
     s.seen[key] = true;
-    s.records.push(rec);
 
-    // event stream
-    var emptyEv = eventsBody.querySelector(".empty");
-    if (emptyEv) emptyEv.remove();
-    eventsBody.appendChild(renderEventRow(rec));
-    if (pinned) eventsBody.scrollTop = eventsBody.scrollHeight;
-    $("cEvents").textContent = s.records.length;
+    s.records.push(rec);
+    if (s.records.length > CAP_EVENTS) s.records.shift();
 
     // prompts pairing
     if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) {
       if (!s.prompts[rec.corrId]) { s.prompts[rec.corrId] = {}; s.promptOrder.push(rec.corrId); }
       if (rec.kind === "prompt.sent") s.prompts[rec.corrId].sent = rec;
       else s.prompts[rec.corrId].received = rec;
-      renderPrompts(s);
-      $("cPrompts").textContent = s.promptOrder.length;
+      while (s.promptOrder.length > CAP_PROMPTS) {
+        var drop = s.promptOrder.shift();
+        delete s.prompts[drop];
+      }
     }
 
     // logs
     if (rec.kind === "log") {
       s.logs.push(rec);
-      renderLogs(s);
-      $("cLogs").textContent = s.logs.length;
+      if (s.logs.length > CAP_LOGS) s.logs.shift();
     }
 
     // beats: a new beat opens at tick/gather; everything else joins the current
@@ -437,8 +478,38 @@ export const PAGE = `<!doctype html>
       if (!s.beats.length) s.beats.push({ seq: rec.seq, at: rec.at, label: "pre-beat", records: [] });
       s.beats[s.beats.length - 1].records.push(rec);
     }
-    renderBeats(s);
+    if (s.beats.length > CAP_BEATS) s.beats.shift();
+
+    return true;
+  }
+
+  // Refresh the four count badges from current (capped) state.
+  function renderCounts(s) {
+    $("cEvents").textContent = s.records.length;
+    $("cPrompts").textContent = s.promptOrder.length;
+    $("cLogs").textContent = s.logs.length;
     $("cBeats").textContent = s.beats.length;
+  }
+
+  // BACKFILL: apply ALL records to state, then render every panel exactly ONCE.
+  function ingestSnapshot(s, recs) {
+    for (var i = 0; i < recs.length; i++) applyRecord(s, recs[i]);
+    renderEvents(s);
+    renderPrompts(s);
+    renderLogs(s);
+    renderBeats(s);
+    renderCounts(s);
+  }
+
+  // LIVE (SSE): one record — append the event row incrementally and refresh the
+  // other panels. Cheap only because state + DOM are capped.
+  function ingestLive(s, rec) {
+    if (!applyRecord(s, rec)) return;
+    appendEventRow(rec);
+    if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) renderPrompts(s);
+    if (rec.kind === "log") renderLogs(s);
+    renderBeats(s);
+    renderCounts(s);
   }
 
   function resetPanels() {
@@ -474,7 +545,8 @@ export const PAGE = `<!doctype html>
       .then(function (data) {
         if (!state || state.id !== id) return; // selection changed mid-flight
         var recs = (data && data.records) || [];
-        for (var i = 0; i < recs.length; i++) ingest(state, recs[i]);
+        // Batch the whole snapshot: state first, then render each panel ONCE.
+        ingestSnapshot(state, recs);
         if (data && data.dropped) {
           var d = document.createElement("div");
           d.className = "dropped";
@@ -498,7 +570,7 @@ export const PAGE = `<!doctype html>
     es.onmessage = function (ev) {
       try {
         var msg = JSON.parse(ev.data);
-        if (msg && msg.type === "record" && state && msg.record) ingest(state, msg.record);
+        if (msg && msg.type === "record" && state && msg.record) ingestLive(state, msg.record);
       } catch (e) {}
     };
     es.onerror = function () {

@@ -55,6 +55,12 @@ interface Hub {
   refs: number;
 }
 
+/**
+ * Default loopback port. Deliberately distinct from web's default (7717) so the
+ * inspector never collides with it on a stock config.
+ */
+const DEFAULT_PORT = 7788;
+
 // Module-level singleton (ESM caches the module, so this is one per process).
 const hub: Hub = {
   server: null,
@@ -310,7 +316,7 @@ const factory: PluginFactory = (): Plugin => {
       ...(typeof c === "object" ? c : {}),
       ...((c && c.inspector) || {}),
     };
-    const port: number = slice.port ?? 7718;
+    const port: number = slice.port ?? DEFAULT_PORT;
     const host: string = slice.host ?? "127.0.0.1";
     let token: string = slice.token ?? crypto.randomBytes(24).toString("base64url");
     if (typeof token !== "string" || token.length < 16) {
