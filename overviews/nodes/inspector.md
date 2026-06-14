@@ -62,10 +62,13 @@ That non-interference is its defining invariant.
     backfill scrollback on connect/reconnect). Unknown id → 404.
   - `GET /api/agents/:id/stream` → SSE; streams each new `Record` as `{ type:"record", record }`.
     Unknown id → 404. (Page calls `/snapshot` first, then opens `/stream`, deduping by `seq`.)
-- **Dashboard page** (dependency-free, like web's): an agent selector driving four coordinated panels
-  off one SSE feed — **Prompts** (sent composed `context.text` ↔ received `content`/`toolCalls`/`usage`
+- **Dashboard page** (dependency-free, like web's): a KrakeyBot-style **tabbed shell** — brand header +
+  `tab-btn` nav + status pill, with `main[data-view]` switching between an **Overview** (the 2×2 grid of
+  all panels) and a full-screen single-panel view per tab; **uniform `.panel h3` title bars** with the
+  per-panel controls moved into toolbars below. One agent selector drives four coordinated panels off
+  one SSE feed — **Prompts** (sent composed `context.text` ↔ received `content`/`toolCalls`/`usage`
   or `error`, keyed by `corrId`), **Event stream** (the live timeline / "queue", every record by
-  `seq`, color-coded, auto-scroll w/ pause-on-scroll-up), **Logs** (level + `pluginId` filter), and a
+  `seq`, color-coded, auto-follow toggle), **Logs** (level + `pluginId` filter), and a
   **per-beat timeline** that groups records between `tick`/`gather` boundaries and joins
   `prompt.sent → prompt.received → output/tool.result` by `corrId`.
 - **teardown:** unsubscribe ALL stored `Unsub`s; end this agent's SSE clients; deregister from the hub;
@@ -104,3 +107,8 @@ done
   FIFO-capped: 600 events / 200 prompts / 600 logs / 200 beats). Added an explicit "auto-follow"
   checkbox to the Event-stream panel (default on; master scroll control). Default port moved 7718→7788
   so it never collides with web's 7717.
+- 2026-06-14: dashboard shell redesigned to the KrakeyBot tabbed pattern — brand header + tab nav
+  (Overview · Prompts · Event stream · Per-beat · Logs), `main[data-view]` switching the Overview 2×2
+  grid vs a full-screen single panel per tab, uniform `.panel h3` title bars with controls moved to
+  toolbars; themed slim scrollbars; brand logo icon removed (wordmark kept). Data/SSE/render logic and
+  all element ids unchanged; color theme kept.
