@@ -25,6 +25,15 @@ import { Events } from "../../../shared/actions";
 import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
 
 /**
+ * Re-entrancy guard for the bus mirror. `bus.emit(Events.LOG, …)` fans out
+ * synchronously, so a `log.entry` subscriber that itself logs (via a bridged/ctx
+ * logger) would re-enter `mirror` and recurse without bound. This flag is only
+ * true during a single synchronous emit fan-out; sequential logs each emit, while
+ * a mirror triggered from inside another mirror's fan-out is dropped.
+ */
+let mirroring = false;
+
+/**
  * Bridge a CORE-INTERNAL logger onto this Agent's eventbus: every line still goes
  * to `base` (console unchanged) AND is mirrored as a `log.entry` event tagged with
  * a `core:<module>` source, so a debug/observer plugin can see core diagnostics.
@@ -32,10 +41,14 @@ import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
  */
 function busLogger(base: Logger, bus: EventBus, source: string): Logger {
   const mirror = (level: "info" | "warn" | "error", text: string) => {
+    if (mirroring) return; // drop a log-of-a-log; never recurse
+    mirroring = true;
     try {
       bus.emit(Events.LOG, { at: Date.now(), data: { level, pluginId: source, text } });
     } catch {
       /* a logging mirror must never break the caller */
+    } finally {
+      mirroring = false;
     }
   };
   return {
