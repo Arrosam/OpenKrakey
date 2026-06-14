@@ -52,6 +52,12 @@ test("queryToken: reads ?token=", () => {
   assert.equal(auth.queryToken(new URLSearchParams("a=1")), undefined);
 });
 
+test("queryToken: empty ?token= is treated as absent (falls through the ?? chain)", () => {
+  // Must be undefined, not "" — else `queryToken(p) ?? bearer ?? cookie` would
+  // short-circuit on an empty ?token= and skip the other sources.
+  assert.equal(auth.queryToken(new URLSearchParams("token=")), undefined);
+});
+
 test("cookieToken: picks the named cookie (decoded by default)", () => {
   const r = req({ cookie: "other=1; krakey_token=ab%20cd; z=2" });
   assert.equal(auth.cookieToken(r, "krakey_token"), "ab cd"); // %20 decoded
