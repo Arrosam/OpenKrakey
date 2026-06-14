@@ -25,30 +25,37 @@ import { Events } from "../../../shared/actions";
 import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
 
 /**
- * Re-entrancy guard for the bus mirror. `bus.emit(Events.LOG, …)` fans out
- * synchronously, so a `log.entry` subscriber that itself logs (via a bridged/ctx
- * logger) would re-enter `mirror` and recurse without bound. This flag is only
- * true during a single synchronous emit fan-out; sequential logs each emit, while
- * a mirror triggered from inside another mirror's fan-out is dropped.
+ * Per-agent re-entrancy guard for the bus mirror. `bus.emit(Events.LOG, …)` fans
+ * out synchronously, so a `log.entry` subscriber that itself logs (via a
+ * bridged/ctx logger) would re-enter `mirror` and recurse without bound. The guard
+ * is only `active` during a single synchronous emit fan-out; sequential logs each
+ * emit, while a mirror triggered from inside another mirror's fan-out is dropped.
+ *
+ * The guard is created once per `createAgentInstance` call and shared by all of
+ * that agent's bridged loggers, so it serializes WITHIN one agent but one agent's
+ * emit can never suppress another agent's mirror (per-agent isolation, R6).
  */
-let mirroring = false;
+type MirrorGuard = { active: boolean };
 
 /**
  * Bridge a CORE-INTERNAL logger onto this Agent's eventbus: every line still goes
  * to `base` (console unchanged) AND is mirrored as a `log.entry` event tagged with
  * a `core:<module>` source, so a debug/observer plugin can see core diagnostics.
  * The mirror is best-effort — it must never throw into the core logger call.
+ *
+ * `guard` is this agent's own re-entrancy guard; pass the same object to all of one
+ * agent's bridged loggers so they share a single guard.
  */
-function busLogger(base: Logger, bus: EventBus, source: string): Logger {
+function busLogger(base: Logger, bus: EventBus, source: string, guard: MirrorGuard): Logger {
   const mirror = (level: "info" | "warn" | "error", text: string) => {
-    if (mirroring) return; // drop a log-of-a-log; never recurse
-    mirroring = true;
+    if (guard.active) return; // drop a log-of-a-log; never recurse
+    guard.active = true;
     try {
       bus.emit(Events.LOG, { at: Date.now(), data: { level, pluginId: source, text } });
     } catch {
       /* a logging mirror must never break the caller */
     } finally {
-      mirroring = false;
+      guard.active = false;
     }
   };
   return {
@@ -95,7 +102,10 @@ export function createAgentInstance(
   // logs on the bus — the loader self-reports its own diagnostics (tagged
   // `core:loader`) directly. So the loader gets the plain agent-tagged console
   // logger `log`.
-  const orchLog = busLogger(log, events.events, "core:orchestrator");
+  // One re-entrancy guard per agent, shared by all of this agent's bridged
+  // loggers so they serialize among themselves but never across agents (R6).
+  const mirrorGuard: MirrorGuard = { active: false };
+  const orchLog = busLogger(log, events.events, "core:orchestrator", mirrorGuard);
   const orchestrator = createOrchestrator({ events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
