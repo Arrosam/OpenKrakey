@@ -87,11 +87,17 @@ function makeCtx(agentId, port){
   // prior transcript from disk (the "survives restart" property).
   const agentDataDir = path.join(process.env.WEB_DATADIR, agentId);
   fs.mkdirSync(agentDataDir, { recursive: true });
+  // Optional CONFIGURED token, injected via WEB_TOKEN, lands FLAT on ctx.config —
+  // web reads its per-plugin slice flat (ctx.config.token), as the loader delivers
+  // it. Left unset by default so every existing caller keeps the random-token path.
+  // An empty WEB_TOKEN ("") is forwarded verbatim (a falsy configured token).
+  const cfg = { port };
+  if (process.env.WEB_TOKEN !== undefined) cfg.token = process.env.WEB_TOKEN;
   return { sys, ctx: {
     agentId,
     events: sys.events,
     actions: sys.actions,
-    config: { port },
+    config: cfg,
     dataDir: agentDataDir,
     llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
     setBlock: (b) => { blocks.set(b.id, b); },
@@ -163,7 +169,7 @@ interface Child {
 
 async function startChild(
   agents: string[],
-  opts: { dataDir?: string } = {},
+  opts: { dataDir?: string; token?: string } = {},
 ): Promise<Child> {
   // Each agent gets its OWN subdir under this WEB_DATADIR (created in the child).
   // Default: a FRESH temp dir (existing callers stay isolated & unchanged).
@@ -176,8 +182,25 @@ async function startChild(
 
   const proc = spawn(process.execPath, ["--import", "tsx", scriptPath], {
     cwd: REPO,
-    env: { ...process.env, WEB_AGENTS: agents.join(","), WEB_DATADIR: dataDir },
+    env: {
+      ...process.env,
+      WEB_AGENTS: agents.join(","),
+      WEB_DATADIR: dataDir,
+      // Forward a CONFIGURED token only when the caller asked for one (so the
+      // child sets config.web.token). Unset by default → child omits it → the
+      // server mints a random token, exactly as every existing test expects.
+      ...(opts.token !== undefined ? { WEB_TOKEN: opts.token } : {}),
+    },
     stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  // Writing to a child that has already exited (e.g. it CRASHED on a malformed
+  // request, which is exactly what the FIX-1 robustness tests provoke) surfaces
+  // EPIPE as an async 'error' event on stdin — which would otherwise become an
+  // uncaught exception attributed to an unrelated finishing test. Swallow it; a
+  // crash is then observed cleanly by the follow-up health-check probe instead.
+  proc.stdin.on("error", () => {
+    /* child already gone */
   });
 
   const lines: string[] = [];
@@ -223,6 +246,10 @@ async function startChild(
     notImplemented: false,
     close: () =>
       new Promise<void>((resolve) => {
+        // If the child already exited (e.g. it crashed on a malformed request),
+        // 'close' will never fire again — resolve immediately so the test's
+        // finally never hangs and we don't write to a dead stdin.
+        if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
         const done = () => resolve();
         proc.once("close", done);
         try {
@@ -322,6 +349,30 @@ const waitEvents = async (events: any[], pred: (e: any[]) => boolean, ms = 6000)
   }
   return true;
 };
+
+/**
+ * Fetch and report whether the server ANSWERED vs DROPPED the connection. A
+ * crashed/killed process yields a rejected fetch (ECONNREFUSED / ECONNRESET /
+ * socket hang up) — that rejection is the "dropped" signal a crash detector
+ * needs. Never throws; resolves to a small descriptor. (Mirrors inspector's
+ * probe(): drain the body so the socket is released and keep-alive can't wedge.)
+ */
+async function probe(
+  url: string,
+  init?: RequestInit,
+): Promise<{ ok: boolean; status: number; error?: string }> {
+  try {
+    const res = await fetch(url, init);
+    try {
+      await res.arrayBuffer();
+    } catch {
+      /* body errored after headers — still counts as "answered" */
+    }
+    return { ok: true, status: res.status };
+  } catch (e) {
+    return { ok: false, status: 0, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 // ===========================================================================
 // Scenario 1 — GET /api/agents lists the online agents
@@ -1146,5 +1197,245 @@ test("web: a new message's id does not collide with replayed ids after a restart
     );
   } finally {
     await c2.close();
+  }
+});
+
+// ###########################################################################
+// SECURITY REGRESSION — robustness & token-from-config hardening (mirror of the
+// inspector fixes). These reuse the SAME child harness (startChild / assertUp /
+// base / api / c.token / probe) as every test above. Two of the three are RED on
+// today's code and GREEN once the fixes land; the third is a guard that should
+// already hold.
+//
+//   FIX 1 (RED today) — a MALFORMED percent-escape in the :id path segment must
+//     not crash the shared process. The token-gated routes decode the id with
+//     decodeURIComponent, which THROWS a URIError on a bad escape ("%", a
+//     truncated multibyte like "%E0%A4%A"). Pre-fix that throw is uncaught and
+//     takes down the whole process — every Agent sharing it. The route should
+//     instead fail closed as a normal unknown-id 404, and the server must stay up.
+//
+//   FIX 2 — the config.web.token adopt policy must mirror inspector's: a
+//     configured token is adopted only if it is a string of length >= 16 matching
+//     ^[A-Za-z0-9._~+/=-]+$; anything else is DISCARDED and a fresh random token
+//     is used. Two halves, asserted independently:
+//       (a) an INVALID configured value must NOT authenticate (401);
+//       (b) a VALID configured value MUST be adopted (200).
+//     (b) is RED today — the current code does not adopt config.web.token at all
+//     (it always mints a random token), so the configured valid token is ignored.
+//     (a) is a guard that holds both before and after the fix (an unadopted bogus
+//     value, and a discarded one, are both rejected) — it pins the rejection side
+//     so a future "adopt verbatim" regression would turn it RED.
+// ###########################################################################
+
+// ===========================================================================
+// FIX 1 — a malformed %-escape in the :id must yield a 4xx and NOT crash the
+// server (the decisive assertion: a subsequent normal request still succeeds).
+// ===========================================================================
+
+// Each malformed id segment is an invalid percent-escape that decodeURIComponent
+// rejects with a URIError: a lone "%" and a truncated multibyte "%E0%A4%A".
+const MALFORMED_IDS = ["%", "%E0%A4%A"];
+
+for (const badId of MALFORMED_IDS) {
+  test(
+    "web(security): GET /api/agents/<malformed id '" + badId + "'>/stream is a 4xx and does NOT crash the server",
+    async () => {
+      const c = await startChild(["alice"]);
+      try {
+        assertUp(c);
+
+        // The token-gated stream route with a malformed :id. It must ANSWER
+        // (not drop the socket) and resolve to a normal unknown-id 404 — a
+        // malformed id is certainly not a live agent. Guard the fetch so a crash
+        // surfaces as a clean assertion failure, not a hung test.
+        const bad = await probe(api(c, "/api/agents/" + badId + "/stream"));
+        assert.ok(
+          bad.ok,
+          "GET /api/agents/" + badId + "/stream must return a response, not drop the connection " +
+            "(network error: " + (bad.error || "") + ")",
+        );
+        assert.ok(
+          bad.status >= 400 && bad.status < 500,
+          "a malformed percent-encoded id must be a 4xx, got " + bad.status,
+        );
+        assert.equal(bad.status, 404, "a malformed id resolves to a normal 404 (unknown agent)");
+
+        // THE crash detector: a subsequent well-formed authed request must still
+        // be served. Pre-fix the process is gone and this fetch is refused.
+        const after = await probe(api(c, "/api/agents"));
+        assert.ok(
+          after.ok,
+          "the server must still be alive after the malformed stream id (the follow-up " +
+            "request was dropped — the process crashed: " + (after.error || "") + ")",
+        );
+        assert.equal(after.status, 200, "a normal GET /api/agents after the malformed id returns 200 (server survived)");
+
+        // The per-agent state survived too.
+        const body = (await fetch(api(c, "/api/agents")).then((r) => r.json())) as { agents: string[] };
+        assert.deepEqual(body.agents, ["alice"], "the agent is still registered after the malformed id");
+      } finally {
+        await c.close();
+      }
+    },
+  );
+
+  test(
+    "web(security): POST /api/agents/<malformed id '" + badId + "'>/message is a 4xx and does NOT crash the server",
+    async () => {
+      const c = await startChild(["alice"]);
+      try {
+        assertUp(c);
+
+        const bad = await probe(api(c, "/api/agents/" + badId + "/message"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ text: "hi" }),
+        });
+        assert.ok(
+          bad.ok,
+          "POST /api/agents/" + badId + "/message must return a response, not drop the connection " +
+            "(network error: " + (bad.error || "") + ")",
+        );
+        assert.ok(
+          bad.status >= 400 && bad.status < 500,
+          "a malformed percent-encoded id must be a 4xx, got " + bad.status,
+        );
+        assert.equal(bad.status, 404, "a malformed id resolves to a normal 404 (unknown agent)");
+
+        // Crash detector + the malformed POST must NOT have reached any bus.
+        const after = await probe(api(c, "/api/agents"));
+        assert.ok(
+          after.ok,
+          "the server must still be alive after the malformed POST id (follow-up dropped — crashed: " +
+            (after.error || "") + ")",
+        );
+        assert.equal(after.status, 200, "a normal GET /api/agents after the malformed POST id returns 200 (server survived)");
+        assert.ok(
+          !c.lines.some((l) => l.startsWith("GOT_INPUT:")),
+          "a malformed-id POST must never reach an agent's bus",
+        );
+      } finally {
+        await c.close();
+      }
+    },
+  );
+}
+
+// ===========================================================================
+// FIX 2 — an INVALID configured token is discarded (a fresh random token is
+// used), so a request presenting the configured value gets 401; a VALID long
+// configured token IS adopted (a request presenting it gets 200).
+// ===========================================================================
+
+/**
+ * Read the session-cookie NAME the server sets on GET /?token=<valid>. Grounding
+ * the cookie vector in the server's OWN Set-Cookie avoids hard-coding a name.
+ * Returns undefined if no cookie is set (then the cookie vector is skipped).
+ */
+async function discoverCookieName(c: Child, validToken: string): Promise<string | undefined> {
+  const sep = "?";
+  const res = await fetch(base(c) + "/" + sep + "token=" + encodeURIComponent(validToken));
+  const sc = res.headers.get("set-cookie");
+  if (!sc) return undefined;
+  const eq = sc.indexOf("=");
+  return eq === -1 ? undefined : sc.slice(0, eq).trim();
+}
+
+// Each INVALID configured token violates the adopt policy (length >= 16 AND
+// charset ^[A-Za-z0-9._~+/=-]+$): "x" is too short; "bad token!" has a space and
+// "!" (and is too short). Neither may be adopted.
+const INVALID_TOKENS: Array<{ label: string; value: string }> = [
+  { label: "too short", value: "x" },
+  { label: "illegal characters", value: "bad token!" },
+];
+
+for (const { label, value } of INVALID_TOKENS) {
+  test(
+    "web(security): an INVALID configured token (" + label + ") is rejected with 401 (not adopted)",
+    async () => {
+      const c = await startChild(["alice"], { token: value });
+      try {
+        assertUp(c);
+
+        // The server must have minted a DIFFERENT (random, valid) token — never
+        // the bogus configured value. (child.token is parsed from the printed URL.)
+        assert.notEqual(
+          c.token,
+          value,
+          "an invalid configured token must NOT be adopted as the live token (printed token=" +
+            JSON.stringify(c.token) + ")",
+        );
+        assert.ok(
+          c.token.length >= 16 && /^[A-Za-z0-9._~+/=-]+$/.test(c.token),
+          "the replacement token must be a valid random token: " + JSON.stringify(c.token),
+        );
+
+        // Presenting the bogus configured value via ?token= -> 401.
+        const viaQuery = await fetch(
+          base(c) + "/api/agents?token=" + encodeURIComponent(value),
+        );
+        assert.equal(viaQuery.status, 401, "the invalid configured token must be rejected via ?token=");
+
+        // ...via Authorization: Bearer -> 401.
+        const viaBearer = await fetch(base(c) + "/api/agents", {
+          headers: { authorization: "Bearer " + value },
+        });
+        assert.equal(viaBearer.status, 401, "the invalid configured token must be rejected via Bearer");
+
+        // ...via the session cookie (name discovered from the server's own
+        // Set-Cookie on a valid token) -> 401. web reads its cookie raw.
+        const cookieName = await discoverCookieName(c, c.token);
+        if (cookieName) {
+          const viaCookie = await fetch(base(c) + "/api/agents", {
+            headers: { cookie: cookieName + "=" + value },
+          });
+          assert.equal(viaCookie.status, 401, "the invalid configured token must be rejected via cookie");
+        }
+
+        // Sanity: the ACTUAL minted token still authenticates (the gate works).
+        const viaReal = await fetch(api(c, "/api/agents"));
+        assert.equal(viaReal.status, 200, "the real (random) token still authenticates");
+      } finally {
+        await c.close();
+      }
+    },
+  );
+}
+
+test("web(security): a VALID long configured token IS adopted (a request presenting it gets 200)", async () => {
+  // 24 chars, all within ^[A-Za-z0-9._~+/=-]+$ — satisfies the adopt policy.
+  const good = "Abc123._~-valid-token-okk";
+  assert.ok(good.length >= 16 && /^[A-Za-z0-9._~+/=-]+$/.test(good), "test token must satisfy the policy");
+
+  const c = await startChild(["alice"], { token: good });
+  try {
+    assertUp(c);
+
+    // The server must have adopted the configured token verbatim — so it is the
+    // token printed in the startup URL.
+    assert.equal(c.token, good, "a valid configured token must be adopted as the live token");
+
+    // A request presenting the configured token authenticates (all three vectors).
+    const viaQuery = await fetch(base(c) + "/api/agents?token=" + encodeURIComponent(good));
+    assert.equal(viaQuery.status, 200, "the adopted token authenticates via ?token=");
+
+    const viaBearer = await fetch(base(c) + "/api/agents", {
+      headers: { authorization: "Bearer " + good },
+    });
+    assert.equal(viaBearer.status, 200, "the adopted token authenticates via Bearer");
+
+    const cookieName = await discoverCookieName(c, good);
+    if (cookieName) {
+      const viaCookie = await fetch(base(c) + "/api/agents", {
+        headers: { cookie: cookieName + "=" + good },
+      });
+      assert.equal(viaCookie.status, 200, "the adopted token authenticates via cookie");
+    }
+
+    // And a DIFFERENT (wrong) token is still rejected — the gate is real.
+    const wrong = await fetch(base(c) + "/api/agents?token=" + encodeURIComponent(good + "X"));
+    assert.equal(wrong.status, 401, "a token differing from the adopted one is still rejected");
+  } finally {
+    await c.close();
   }
 });
