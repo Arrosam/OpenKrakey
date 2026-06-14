@@ -1008,3 +1008,137 @@ export default () => ({
     "a plugin log line MUST NOT be re-mirrored as a core:* (e.g. core:loader) log.entry",
   );
 });
+
+// ---- Cover 7 (RE-ENTRANCY REGRESSION): a log.entry subscriber that itself logs
+// must NOT trigger infinite synchronous recursion / stack overflow.
+//
+// The bus `emit` is SYNCHRONOUS in-line fan-out, and a core diagnostic is mirrored
+// onto the Agent bus as a `log.entry` event. If a `log.entry` subscriber calls
+// ctx.log.* from INSIDE its handler, the unguarded path recurses forever:
+//   ctx.log -> pushLogEntry -> emit(log.entry) -> same handler -> ctx.log -> ...
+// blowing the stack ("Maximum call stack size exceeded") and crashing the agent.
+//
+// The fix adds a re-entrancy guard: a `log.entry` emit triggered from WITHIN
+// another `log.entry` emit is dropped (no recursion), while a non-re-emitting
+// subscriber keeps working. The guard must NOT permanently latch — once the
+// outermost log.entry fan-out unwinds, the NEXT independent ctx.log.* (e.g. the
+// single "kick") must still be delivered to the subscriber at least once.
+//
+// CRITICAL SAFETY: a RED (unfixed) run stack-overflows or hangs. To keep the
+// suite from hanging we run this scenario in a CHILD process (mirroring the
+// "inflight stop" test): the child builds the agent, runs start()/stop(), reports
+// { crashed, count, completed } as a RESULT JSON line, and force-exits in a
+// finally so a runaway can't keep the parent alive. The parent asserts the child
+// completed cleanly with a BOUNDED entry count.
+
+test("re-entrancy regression: a log.entry subscriber that re-logs does NOT infinitely recurse / crash; entry count stays bounded", () => {
+  const agentEntry = pathToFileURL(
+    path.resolve("packages", "agent_instance", "src", "index.ts"),
+  ).href;
+
+  // A plugin whose log.entry handler RE-LOGS on every entry. It also counts each
+  // observed entry, and kicks the chain once with a single ctx.log.info("kick").
+  // If the bus had no re-entrancy guard, the first kicked log.entry would re-enter
+  // the handler, which logs again, ... -> unbounded recursion -> stack overflow.
+  const reentrantPlugin = `
+export const logs = []; // observed log.entry payloads (texts), in arrival order
+export default () => ({
+  manifest: { id: "rec-reentrant", version: "1" },
+  setup(ctx) {
+    ctx.events.on("log.entry", (p) => {
+      const d = p && p.data ? p.data : {};
+      logs.push(d.text);
+      // Re-log from INSIDE the log.entry handler. With the guard this nested
+      // emit is dropped (no recursion); without it, it recurses to a crash.
+      ctx.log.info("echo");
+    });
+    // Kick the chain exactly once now that the subscriber is wired.
+    ctx.log.info("kick");
+  },
+});
+`;
+
+  const script = `
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createAgentInstance } from ${JSON.stringify(agentEntry)};
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-reentrant-"));
+const publicPluginDir = path.join(tmp, "public_plugin");
+const agentsDir = path.join(tmp, "agents");
+const pdir = path.join(publicPluginDir, "rec-reentrant");
+fs.mkdirSync(pdir, { recursive: true });
+fs.mkdirSync(agentsDir, { recursive: true });
+fs.writeFileSync(path.join(pdir, "index.ts"), ${JSON.stringify(reentrantPlugin)}, "utf8");
+
+const result = { crashed: false, count: -1, completed: false };
+try {
+  // Large interval: the recursion is driven by the setup-time ctx.log, not a beat.
+  const agent = createAgentInstance(
+    { id: "reentrant-log", intervalMs: 10000, plugins: ["rec-reentrant"] },
+    { publicPluginDir, agentsDir },
+  );
+  await agent.start();
+  // Let any (erroneously) deferred re-emits settle.
+  await new Promise((r) => setTimeout(r, 50));
+  await agent.stop();
+
+  const mod = await import(pathToFileURL(path.join(pdir, "index.ts")).href);
+  result.count = mod.logs.length;
+  result.completed = true; // start()/stop() both returned without throwing
+} catch (e) {
+  // A stack overflow surfaces as a thrown RangeError ("Maximum call stack size
+  // exceeded"). Any throw on this path is a crash for our purposes.
+  result.crashed = true;
+  try {
+    const mod = await import(pathToFileURL(path.join(pdir, "index.ts")).href);
+    result.count = mod.logs.length;
+  } catch {}
+} finally {
+  console.log("RESULT:" + JSON.stringify(result));
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  process.exit(0); // force exit: a runaway must not hang the child (or the suite)
+}
+`;
+  // .mts forces ESM (temp dir has no package.json) so top-level await is allowed.
+  const scriptPath = path.join(tmp, "reentrant-child.mts");
+  fs.writeFileSync(scriptPath, script, "utf8");
+
+  const run = spawnSync(process.execPath, ["--import", "tsx", scriptPath], {
+    cwd: path.resolve("."), // repo root so the child resolves tsx + packages
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+
+  // A RED implementation may not even reach the RESULT line if it overflows the
+  // stack before the catch unwinds, or it may exceed the spawn timeout (hang).
+  assert.equal(run.error, undefined, "child must not time out / fail to spawn (a hang implies runaway recursion)");
+  const line = (run.stdout ?? "").split(/\r?\n/).find((l) => l.startsWith("RESULT:"));
+  assert.ok(
+    line,
+    "child must report a RESULT line (a missing line implies a hard stack-overflow crash) — stderr: " +
+      (run.stderr ?? ""),
+  );
+  const result = JSON.parse(line!.slice("RESULT:".length));
+
+  assert.equal(
+    result.crashed,
+    false,
+    "a re-logging log.entry subscriber must NOT crash the agent (no stack overflow)",
+  );
+  assert.equal(
+    result.completed,
+    true,
+    "start()/stop() must both complete without throwing despite the re-logging subscriber",
+  );
+  assert.ok(
+    result.count >= 1,
+    "the subscriber must still observe at least the initial 'kick' log.entry (the guard must not permanently latch)",
+  );
+  assert.ok(
+    result.count < 50,
+    "the observed log.entry count must stay BOUNDED (no runaway recursion) — got " + result.count,
+  );
+});
