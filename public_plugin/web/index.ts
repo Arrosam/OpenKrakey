@@ -46,6 +46,16 @@ import { TranscriptStore } from "./transcript-store";
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
 
+/**
+ * A configured token is adopted only if it's a URL/cookie-safe string of length
+ * ≥ 16; anything else is rejected in favour of a fresh random token (parity with
+ * inspector/config.ts). Keeps a too-short or malformed pinned token from becoming
+ * a weak, guessable process secret.
+ */
+function validToken(t: unknown): t is string {
+  return typeof t === "string" && t.length >= 16 && /^[A-Za-z0-9._~+\/=-]+$/.test(t);
+}
+
 const createWeb: PluginFactory = (): Plugin => {
   let reg: AgentReg | undefined;
   let unsubs: Array<() => void> = [];
@@ -54,14 +64,21 @@ const createWeb: PluginFactory = (): Plugin => {
     manifest: { id: "web", version: "0.1.0" },
 
     async setup(ctx: PluginContext): Promise<void> {
+      // Destructure the only ctx members the long-lived closures need, so the rest
+      // of ctx (config, dataDir, print, …) can be GC'd once setup() returns instead
+      // of being pinned for the agent's lifetime by the closures stored in `regs`.
+      const { events, actions } = ctx;
+
       const cfg = (ctx.config ?? {}) as { port?: number; host?: string; token?: string };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
       const host = typeof cfg.host === "string" && cfg.host ? cfg.host : DEFAULT_HOST;
-      // A fresh random token per process unless one is pinned in config.
-      const tk =
-        typeof cfg.token === "string" && cfg.token
-          ? cfg.token
-          : crypto.randomBytes(24).toString("base64url");
+      // A fresh random token per process unless a VALID one is pinned in config.
+      // Accept the configured token only if it's a URL/cookie-safe string of length
+      // ≥ 16; otherwise fall back to a random token (parity with inspector — an
+      // invalid configured token is NOT adopted, so a request presenting it gets 401).
+      const tk = validToken(cfg.token)
+        ? (cfg.token as string)
+        : crypto.randomBytes(24).toString("base64url");
 
       // Ensure the per-plugin (agent-isolated) data dir exists, then load any prior
       // transcript so history survives a restart. Best-effort: a dir/read failure
@@ -86,9 +103,9 @@ const createWeb: PluginFactory = (): Plugin => {
             at: Date.now(),
             data: { text, channel: "web", meta: { msgId } },
           };
-          ctx.events.emit(Events.INPUT_MESSAGE, payload);
-          if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
-            ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
+          events.emit(Events.INPUT_MESSAGE, payload);
+          if (actions.has(Actions.CLOCK_FIRE_NOW)) {
+            actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
           }
         },
         clients: new Set(),
@@ -100,7 +117,7 @@ const createWeb: PluginFactory = (): Plugin => {
       addReg(r);
 
       // Stream this agent's replies to its browser clients, persisting each.
-      const offOutput = ctx.events.on(Events.OUTPUT_MESSAGE, (payload) => {
+      const offOutput = events.on(Events.OUTPUT_MESSAGE, (payload) => {
         const text = (payload as EventPayloads["output.message"])?.data?.text;
         if (typeof text === "string") {
           r.store.append({ role: "agent", text, at: Date.now() });
@@ -111,7 +128,7 @@ const createWeb: PluginFactory = (): Plugin => {
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
       // (so an EARLIER outstanding request's return can't claim them).
-      const offRequest = ctx.events.on(Events.LLM_REQUEST, (payload) => {
+      const offRequest = events.on(Events.LLM_REQUEST, (payload) => {
         const reqId = (payload as EventPayloads["llm.request"] | undefined)?.id;
         if (typeof reqId !== "string" || r.pending.length === 0) return;
         const prior = r.inFlight.get(reqId) ?? [];
@@ -121,7 +138,7 @@ const createWeb: PluginFactory = (): Plugin => {
 
       // A request's return means the beat that carried its messages completed →
       // flip exactly those messages to "read" (not any still-pending ones).
-      const offReturn = ctx.events.on(Events.LLM_RETURN, (payload) => {
+      const offReturn = events.on(Events.LLM_RETURN, (payload) => {
         const reqId = (payload as Reply<LLMResponse> | undefined)?.id;
         if (typeof reqId !== "string") return;
         const done = r.inFlight.get(reqId);
@@ -150,13 +167,9 @@ const createWeb: PluginFactory = (): Plugin => {
         // in current statuses (e.g. messages flipped to "read"), so it replays exactly
         // after a clean restart (M-9). Best-effort.
         reg.store.compactSync();
-        for (const res of reg.clients) {
-          try {
-            res.end();
-          } catch {
-            /* already closed */
-          }
-        }
+        // removeReg now owns SSE-client teardown (ends each open stream), so the
+        // explicit loop that used to live here is gone. Order: unsubscribe (above)
+        // → compactSync → removeReg (ends clients) → maybeStopServer (below).
         removeReg(reg.agentId);
         reg = undefined;
       }
