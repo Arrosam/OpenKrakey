@@ -11,9 +11,8 @@ import type { PluginContext } from "../../contracts/plugin";
 
 /**
  * Default loopback port. Deliberately distinct from web's default (7717) so the
- * inspector never collides with it on a stock config.
- *
- * Mirrors hub.ts's DEFAULT_PORT; kept here too so resolveConfig is self-contained.
+ * inspector never collides with it on a stock config. Single source of truth —
+ * the port default belongs to config resolution, not the hub.
  */
 const DEFAULT_PORT = 7788;
 

@@ -52,12 +52,6 @@ interface Hub {
   refs: number;
 }
 
-/**
- * Default loopback port. Deliberately distinct from web's default (7717) so the
- * inspector never collides with it on a stock config.
- */
-export const DEFAULT_PORT = 7788;
-
 // Module-level singleton (ESM caches the module, so this is one per process).
 const hub: Hub = {
   server: null,
