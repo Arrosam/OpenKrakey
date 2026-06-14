@@ -48,7 +48,7 @@ That non-interference is its defining invariant.
   `core:orchestrator` / `core:loader`) once `agent_instance` bridges the core logger to the bus.
 - **setup(ctx):**
   - Register this agent with the hub. The FIRST registration starts the server on the configured port
-    (`config.inspector.port`, default 7718) bound to loopback (`config.inspector.host`, default
+    (`config.inspector.port`, default 7788 — clear of web's 7717) bound to loopback (`config.inspector.host`, default
     `127.0.0.1`) and AWAITS the bind, then `ctx.print`s `✦ Inspector: http://127.0.0.1:<port>/?token=…`
     inside the agent startup block (as web's bind-await fix established).
   - Subscribe every `Events.*` above; each handler pushes a `Record` into this agent's ring and streams
@@ -79,7 +79,7 @@ That non-interference is its defining invariant.
   first wins (later listen errors degrade, not crash), as in web.
 
 ## Config slice
-`config["inspector"]` = `{ port?: number (7718), host?: string ("127.0.0.1"), token?: string,
+`config["inspector"]` = `{ port?: number (7788), host?: string ("127.0.0.1"), token?: string,
 bufferSize?: number (1000), maxRecordBytes?: number (~65536) }`. Opt-in install (a debug tool); list
 it in an agent's `plugins`. Placement doesn't matter — read-only, no `provides`/`requires`.
 
@@ -98,3 +98,9 @@ done
   http hub, per-agent SSE, bounded in-memory record ring (live + scrollback), subscribes to all
   well-known bus events, correlates prompts by request id; consumes the core-log-to-bus bridge added in
   `agent_instance`.
+- 2026-06-14: dashboard hardening — fixed an O(N²) freeze when selecting an agent with a large ring
+  (record handling split into a DOM-free state update + render; snapshot backfill now updates all
+  records then renders each panel ONCE; live updates append incrementally; retained state/DOM is
+  FIFO-capped: 600 events / 200 prompts / 600 logs / 200 beats). Added an explicit "auto-follow"
+  checkbox to the Event-stream panel (default on; master scroll control). Default port moved 7718→7788
+  so it never collides with web's 7717.
