@@ -43,16 +43,30 @@ export function createLoader(deps: LoaderDeps): Loader {
   const printSink = deps.print ?? ((text: string) => console.log(text));
   const loaded: Array<{ plugin: Plugin; ctx: PluginContext }> = [];
 
-  /** Mirror one plugin console line onto this Agent's own bus (Events.LOG). */
+  /**
+   * Mirror one plugin console line onto this Agent's own bus (Events.LOG).
+   * Re-entrancy guard: Events.LOG fans out synchronously, so a `log.entry`
+   * subscriber that calls ctx.log.* would recurse forever (ctx.log →
+   * pushLogEntry → emit → handler → ctx.log → …). The flag is only true during
+   * a single synchronous fan-out, so sequential logs still each emit; only a
+   * log triggered from inside a log.entry handler is dropped.
+   */
+  let emittingLog = false;
   const pushLogEntry = (
     level: "info" | "warn" | "error" | "print",
     pluginId: string,
     text: string,
   ): void => {
-    deps.events.events.emit(Events.LOG, {
-      at: Date.now(),
-      data: { level, pluginId, text },
-    });
+    if (emittingLog) return;
+    emittingLog = true;
+    try {
+      deps.events.events.emit(Events.LOG, {
+        at: Date.now(),
+        data: { level, pluginId, text },
+      });
+    } finally {
+      emittingLog = false;
+    }
   };
 
   /** A simple plugin name: no path separators, no `.`/`..`. */
@@ -204,6 +218,9 @@ export function createLoader(deps: LoaderDeps): Loader {
         loaded.push({ plugin, ctx });
       }
     } catch (err) {
+      // Surface load/dependency failures on the bus too, so the inspector's
+      // Logs feed shows them. Mirror before rollback; load stays all-or-nothing.
+      pushLogEntry("error", "core:loader", "load failed: " + err);
       await rollback();
       throw err;
     }
