@@ -147,7 +147,7 @@ agents/
 .claude/modular-dev-queue-*.json
 .claude/agents/_*.md
 .claude/launch.json
-
+overviews/
 # build output
 .dist/
 
