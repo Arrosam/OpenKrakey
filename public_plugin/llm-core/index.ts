@@ -5,8 +5,9 @@
  * communicator from the key-less `ctx.llm` library, reads the conversation from the
  * `llm.request` event's `messages` and builds the chat request from `{ context,
  * messages }` (with any registered tools), and reports the normalized result back as
- * `llm.return`. On success it also surfaces the assistant's text as an `output.message`
- * so channels can show it.
+ * `llm.return`. Right before dispatching it also emits `llm.request.sent` carrying the
+ * assembled request, so observers (the inspector) can show what was actually sent. On
+ * success it surfaces the assistant's text as an `output.message` so channels can show it.
  *
  * It doubles as the tool-registration hub via the `llm.register_tool` action: tool
  * plugins declare the L1 `ToolDef`s that ride along on every chat request. The core
@@ -22,6 +23,7 @@ import type { Unsub } from "../../contracts/event-system";
 import type {
   ToolDef,
   Communicator,
+  LLMRequest,
   LLMResponse,
   Message,
 } from "../../contracts/llm";
@@ -92,7 +94,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
         ? { system: context.text, messages: turns }
         : { messages: [{ role: "user" as const, content: context.text }] };
 
-    const chatReq = {
+    const chatReq: LLMRequest = {
       ...base,
       ...(tools.size > 0 ? { tools: [...tools.values()] } : {}),
       ...(config.temperature !== undefined
@@ -100,6 +102,16 @@ const createLLMCore: PluginFactory = (): Plugin => {
         : {}),
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     };
+
+    // Surface the EXACT request being dispatched (system + messages + tools + params)
+    // so observers (the inspector) can show what was actually sent — fire-and-forget,
+    // same corrId (`id`) as this beat's llm.request / llm.return.
+    const sent: Request<{ request: LLMRequest }> = {
+      id,
+      at: Date.now(),
+      data: { request: chatReq },
+    };
+    ctx!.events.emit(Events.LLM_REQUEST_SENT, sent);
 
     try {
       const response = await communicator.chat(chatReq);
