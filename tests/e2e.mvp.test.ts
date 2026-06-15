@@ -2,17 +2,17 @@
  * E2E — the crown-jewel MVP integration test.
  *
  * A REAL `agent_instance` runs the REAL `public_plugin/` code (llm-core, persona,
- * history, web, notes, toolbox) against a LOCAL stub LLM server, driven through the
+ * web, notes, toolbox) against a LOCAL stub LLM server, driven through the
  * WEB channel over HTTP. This is the full Phase-1 loop end-to-end:
  *
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
  *     -> web: input.message Notify (channel "web") + clock.fire_now
- *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona 10000+
- *        on top, history 100 with the folded input) -> llm.request
+ *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona 10000+,
+ *        wrapped as <persona>…</persona>) -> llm.request
  *     -> llm-core: chat({ messages:[{role:"user", content: context.text}], tools })
  *     -> stub server: FIRST call returns a time.now tool_call; orchestrator dispatches
- *        the tool -> tool.result -> history folds "assistant -> tool" + "tool -> {…}"
- *     -> LATER beat: context now carries the tool result -> chat #2+ -> "E2E-FINAL-REPLY"
+ *        the tool -> tool.result (no plugin folds it back — history removed, rewritten later)
+ *     -> LATER beat -> chat #2+ -> "E2E-FINAL-REPLY"
  *     -> llm.return (ok + content) -> llm-core emits output.message
  *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser
  *
@@ -164,7 +164,7 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "history", "web", "notes", "toolbox"],
+    plugins: ["llm-core", "persona", "web", "notes", "toolbox"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
@@ -399,28 +399,19 @@ test("e2e/2: the stub LLM server received >= 2 chat requests (the beat loop turn
 });
 
 // ===========================================================================
-// Assertion 3 — request #1 composition: persona on top, history folded the input,
-// and the four MVP tool defs (toolbox + notes) are present.
+// Assertion 3 — request #1 composition: the persona block (wrapped as <persona>)
+// is present, and the four MVP tool defs (toolbox + notes) are present.
 // ===========================================================================
 
-test("e2e/3: request #1 carries the persona block + the folded user line, plus the MVP tool defs", () => {
+test("e2e/3: request #1 carries the persona block wrapped as <persona>…</persona>, plus the MVP tool defs", () => {
   const r = result();
   assert.ok(r.requests.length >= 1, "no chat request reached the server at all");
 
   const text = firstMessageText(r.requests[0]);
   assert.match(
     text,
-    /PERSONA-MARK/,
-    "messages[0].content must contain the persona block text (priority 10000+, top of context)",
-  );
-  assert.match(
-    text,
-    /hello krakey/,
-    "messages[0].content must contain the folded user input (history block)",
-  );
-  assert.ok(
-    text.indexOf("PERSONA-MARK") < text.indexOf("hello krakey"),
-    "persona (priority 10000+) must be rendered above the history input line (priority 100)",
+    /<persona>\s*PERSONA-MARK\s*<\/persona>/,
+    "messages[0].content must contain the persona block ENCAPSULATED as <persona>PERSONA-MARK</persona>",
   );
 
   const names = toolNames(r.requests[0]);
@@ -433,33 +424,11 @@ test("e2e/3: request #1 carries the persona block + the folded user line, plus t
 });
 
 // ===========================================================================
-// Assertion 4 — tool-result folding: SOME later request's context shows the
-// time.now result line history recorded.
-// ===========================================================================
-
-test("e2e/4: a later request's context shows the time.now tool result folded back in", () => {
-  const r = result();
-  assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the folded tool result");
-
-  const folded = r.requests.slice(1).some((req) => {
-    const text = firstMessageText(req);
-    const mentionsTool = text.includes("time.now");
-    const mentionsPayload =
-      /"?iso"?\s*[:=]/.test(text) || /epochMs/.test(text) || /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text);
-    return mentionsTool && mentionsPayload;
-  });
-  assert.ok(
-    folded,
-    "no later request's messages[0].content contained the folded 'time.now' tool result (iso/epoch payload)",
-  );
-});
-
-// ===========================================================================
-// Assertion 5 — the reply reaches the browser: the agent's SSE stream delivered
+// Assertion 4 — the reply reaches the browser: the agent's SSE stream delivered
 // an output event carrying "E2E-FINAL-REPLY" (llm.return -> output.message -> web SSE).
 // ===========================================================================
 
-test("e2e/5: the final reply travels llm.return -> output.message -> web SSE stream", () => {
+test("e2e/4: the final reply travels llm.return -> output.message -> web SSE stream", () => {
   const r = result();
   assert.ok(
     r.sseOutputs.some((t) => t.includes("E2E-FINAL-REPLY")),

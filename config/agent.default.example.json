@@ -1,7 +1,6 @@
 {
   "intervalMs": 30000,
   "plugins": [
-    "history",
     "llm-core",
     "notes",
     "persona",
@@ -9,7 +8,6 @@
     "web"
   ],
   "privatePlugins": [
-    "history",
     "notes"
   ],
   "config": {
