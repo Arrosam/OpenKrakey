@@ -84,6 +84,7 @@ export const SCRIPT = `
     "input": "k-input",
     "output": "k-output",
     "tool.result": "k-tool",
+    "conversation": "k-conversation",
     "log": "k-log"
   };
 
@@ -116,6 +117,7 @@ export const SCRIPT = `
       case "tick": return "seq=" + (get(p, ["data", "seq"]));
       case "gather": return "seq=" + (get(p, ["data", "seq"]));
       case "agent.start": return get(p, ["data", "agentId"]) || "";
+      case "conversation": { var msgs = get(p, ["data", "messages"]); return (Array.isArray(msgs) ? msgs.length : 0) + " turns"; }
       default: return "";
     }
   }
