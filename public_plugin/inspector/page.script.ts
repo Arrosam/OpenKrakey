@@ -6,7 +6,7 @@
  * /snapshot then live-streams /stream over SSE, and renders the four panels.
  * page.ts re-wraps it in the <script> tags so the assembled PAGE is byte-identical.
  */
-import { formatRequest } from "./page.format";
+import { formatRequest, chooseSent } from "./page.format";
 
 export const SCRIPT = `
 (function () {
@@ -54,6 +54,7 @@ export const SCRIPT = `
     return cur;
   }
   var formatRequest = ${formatRequest.toString()};
+  var chooseSent = ${chooseSent.toString()};
 
   // ---- token-gated fetch ----
   function api(path) {
@@ -324,7 +325,7 @@ export const SCRIPT = `
     // prompts pairing
     if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) {
       if (!s.prompts[rec.corrId]) { s.prompts[rec.corrId] = {}; s.promptOrder.push(rec.corrId); }
-      if (rec.kind === "prompt.sent") s.prompts[rec.corrId].sent = rec;
+      if (rec.kind === "prompt.sent") s.prompts[rec.corrId].sent = chooseSent(s.prompts[rec.corrId].sent, rec);
       else s.prompts[rec.corrId].received = rec;
       while (s.promptOrder.length > CAP_PROMPTS) {
         var drop = s.promptOrder.shift();
