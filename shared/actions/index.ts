@@ -25,8 +25,6 @@ export const Actions = {
   CLOCK_SET_INTERVAL: "clock.set_interval",
   CLOCK_SET_DEFAULT_INTERVAL: "clock.set_default_interval",
   CLOCK_FIRE_NOW: "clock.fire_now",
-  /** Returns the current conversation as `ConversationMessage[]` (registered by `history`). */
-  CONVERSATION_GET: "conversation.get",
 } as const;
 
 /** Well-known generic events emitted on the eventbus to activate plugins. */
@@ -39,6 +37,7 @@ export const Events = {
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
   TOOL_RESULT: "tool.result",
+  CONVERSATION_SNAPSHOT: "conversation.snapshot",
   LOG: "log.entry",
 } as const;
 
@@ -70,8 +69,10 @@ export interface Reply<T = unknown> {
  * One turn of conversation history in Hermes chat shape: an `llm` Message PLUS
  * provenance. `source` = where the turn came from (the input channel for a user turn,
  * "assistant" for an LLM turn, the tool name for a tool turn); `at` = epoch-ms.
- * Returned by the `conversation.get` action; consumers strip `at`/`source` to get the
- * wire `Message` (a user turn's `source` is surfaced to the model via `Message.name`).
+ * `history` builds these internally (and persists them as JSONL); before contributing
+ * the conversation to the orchestrator via `conversation.snapshot` it STRIPS `at`/`source`
+ * down to the wire `Message[]` (a user turn's `source` is already surfaced to the model
+ * via `Message.name`).
  */
 export interface ConversationMessage extends Message {
   at: number;
@@ -86,12 +87,20 @@ export interface EventPayloads {
   "agent.start": Notify<{ agentId: string }>;
   "clock.tick": Notify<{ seq: number }>;
   "prompt.gather": Notify<{ seq: number }>;
-  "llm.request": Request<{ context: ComposedContext }>;
+  "llm.request": Request<{ context: ComposedContext; messages: Message[] }>;
   "llm.return": Reply<LLMResponse>;
   "input.message": Notify<{ text: string; from?: string; channel?: string; meta?: Record<string, unknown> }>;
   "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
   /** Emitted by the orchestrator as each dispatched tool call settles (id = ToolCall id). */
   "tool.result": Reply<unknown> & { name: string };
+  /**
+   * A conversation provider (history) contributes the current conversation — as
+   * wire-ready `Message[]` (provenance already stripped) — in response to
+   * `prompt.gather`. The orchestrator captures the latest and forwards it as the
+   * `messages` of the beat's `llm.request`; it only transports these, never builds
+   * or inspects them.
+   */
+  "conversation.snapshot": Notify<{ messages: Message[] }>;
   /**
    * A plugin console line mirrored onto the bus by the loader-built ctx:
    * ctx.log.* carries its level; ctx.print carries level "print" (the plugin's
