@@ -5,10 +5,11 @@
  * ROLE-SEPARATED turns — user / assistant (+ its toolCalls) / tool (+ its toolCallId)
  * — each carrying provenance (`source`) and a timestamp (`at`). It folds three generic
  * events into turns: user input, the LLM's return, and each settled tool result; and
- * persists every turn to `<dataDir>/history.jsonl` so memory survives restarts. The
- * current conversation is exposed via the well-known `conversation.get` action, which
- * llm-core calls to send the turns as the real `messages[]`. Public install = shared
- * memory across agents; private install = agent-isolated.
+ * persists every turn to `<dataDir>/history.jsonl` so memory survives restarts. On every
+ * `prompt.gather` it CONTRIBUTES the current conversation to the orchestrator by emitting
+ * `conversation.snapshot` as wire-ready `Message[]` (provenance `at`/`source` stripped),
+ * which the orchestrator forwards as the beat's `llm.request` messages. Public install =
+ * shared memory across agents; private install = agent-isolated.
  *
  * The default export is a PluginFactory — the loader calls it once per Agent, so the
  * turns and Unsubs live in this closure, never in shared module scope.
@@ -18,9 +19,8 @@ import { join } from "node:path";
 
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Unsub } from "../../contracts/event-system";
-import type { LLMResponse, ToolCall } from "../../contracts/llm";
+import type { LLMResponse, Message, ToolCall } from "../../contracts/llm";
 import {
-  Actions,
   Events,
   type ConversationMessage,
   type Notify,
@@ -46,10 +46,9 @@ function isTurn(x: unknown): x is ConversationMessage {
 const createHistory: PluginFactory = (): Plugin => {
   let context: PluginContext | undefined;
   let unsubs: Unsub[] = [];
-  let unregister: Unsub | undefined;
 
   return {
-    manifest: { id: "history", version: "0.1.0", provides: ["conversation.get"] },
+    manifest: { id: "history", version: "0.1.0" },
 
     setup(ctx: PluginContext) {
       context = ctx;
@@ -146,15 +145,23 @@ const createHistory: PluginFactory = (): Plugin => {
         }),
       );
 
-      // Expose the current conversation for llm-core to assemble into messages[].
-      unregister = ctx.actions.register(Actions.CONVERSATION_GET, async () =>
-        turns.map((t) => ({ ...t })),
+      // On every gather, contribute the current conversation to the orchestrator as
+      // wire-ready Message[] — strip provenance (at/source); a user turn's source is
+      // already surfaced via Message.name. The orchestrator captures this snapshot
+      // and forwards it as the beat's llm.request messages.
+      unsubs.push(
+        ctx.events.on(Events.PROMPT_GATHER, () => {
+          const messages: Message[] = turns.map(({ at, source, ...m }) => m);
+          const snap: Notify<{ messages: Message[] }> = {
+            at: Date.now(),
+            data: { messages },
+          };
+          ctx.events.emit(Events.CONVERSATION_SNAPSHOT, snap);
+        }),
       );
     },
 
     teardown() {
-      unregister?.();
-      unregister = undefined;
       for (const off of unsubs) off();
       unsubs = [];
       context = undefined;
