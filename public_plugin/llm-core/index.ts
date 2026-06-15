@@ -22,13 +22,16 @@ import type {
   ToolDef,
   Communicator,
   LLMResponse,
+  Message,
 } from "../../contracts/llm";
 import type { ComposedContext } from "../../contracts/context";
 import {
+  Actions,
   Events,
   type Request,
   type Reply,
   type Notify,
+  type ConversationMessage,
 } from "../../shared/actions";
 
 /** The config slice this plugin reads (everything optional). */
@@ -81,8 +84,25 @@ const createLLMCore: PluginFactory = (): Plugin => {
       return;
     }
 
+    // Pull the conversation (Hermes turns) from whoever provides it; absent → [].
+    let conversation: ConversationMessage[] = [];
+    try {
+      const got = await ctx!.actions.invoke(Actions.CONVERSATION_GET);
+      if (Array.isArray(got)) conversation = got as ConversationMessage[];
+    } catch {
+      // No conversation provider (e.g. no history plugin) — fall back below.
+    }
+    // Strip provenance (at/source) to the wire Message[]; a user turn's source is
+    // already surfaced via Message.name. With a conversation, the composed context
+    // becomes the `system`; without one, fall back to the single-user-message shape.
+    const turns: Message[] = conversation.map(({ at, source, ...m }) => m);
+    const base =
+      turns.length > 0
+        ? { system: context.text, messages: turns }
+        : { messages: [{ role: "user" as const, content: context.text }] };
+
     const chatReq = {
-      messages: [{ role: "user" as const, content: context.text }],
+      ...base,
       ...(tools.size > 0 ? { tools: [...tools.values()] } : {}),
       ...(config.temperature !== undefined
         ? { temperature: config.temperature }

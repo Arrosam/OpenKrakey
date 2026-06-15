@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createEventSystem } from "../../packages/event-system/src";
-import { Events } from "../../shared/actions";
+import { Actions, Events } from "../../shared/actions";
 import type {
   Communicator,
   CommunicatorLibrary,
@@ -660,4 +660,59 @@ test("config: with neither set, temperature and maxTokens are absent on the requ
   await settle();
   assert.equal(com.calls[0].temperature, undefined);
   assert.equal(com.calls[0].maxTokens, undefined);
+});
+
+// ===========================================================================
+// 11. conversation history -> system + messages[] (Hermes assembly)
+// ===========================================================================
+//
+// When a `conversation.get` provider (history) is present, the composed context
+// rides the `system` field and the conversation turns become the real messages[]
+// (with the provenance fields at/source stripped to the wire Message). With no
+// provider, llm-core falls back to the single-user-message shape (covered above).
+
+test("conversation: context becomes `system` and provided turns become messages[]", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
+  actions.register(Actions.CONVERSATION_GET, async () => [
+    { role: "user", content: "hi", name: "web", source: "web", at: 1 },
+    { role: "assistant", content: "yo", source: "assistant", at: 2 },
+  ]);
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYSTEM-CTX"));
+  await settle();
+  assert.equal(com.calls.length, 1);
+  assert.equal(com.calls[0].system, "SYSTEM-CTX", "composed context rides the system field");
+  assert.deepEqual(
+    com.calls[0].messages,
+    [
+      { role: "user", content: "hi", name: "web" },
+      { role: "assistant", content: "yo" },
+    ],
+    "turns become messages[]; at/source stripped, source kept on the wire via name",
+  );
+});
+
+test("conversation: tool turns keep toolCallId/name and assistant toolCalls pass through", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
+  actions.register(Actions.CONVERSATION_GET, async () => [
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "time.now", arguments: {} }], source: "assistant", at: 1 },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now", source: "time.now", at: 2 },
+  ]);
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [
+    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "time.now", arguments: {} }] },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+  ]);
+});
+
+test("conversation: an EMPTY conversation falls back to a single user message (no system)", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
+  actions.register(Actions.CONVERSATION_GET, async () => []);
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  await settle();
+  assert.equal(com.calls[0].system, undefined, "no system when there is no conversation");
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
 });
