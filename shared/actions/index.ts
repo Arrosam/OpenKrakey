@@ -11,7 +11,7 @@
  *    registered at setup, so they are NOT enumerated here.
  */
 import type { ComposedContext } from "../../contracts/context";
-import type { LLMResponse, Message } from "../../contracts/llm";
+import type { LLMRequest, LLMResponse, Message } from "../../contracts/llm";
 
 /**
  * Well-known actions invoked on the actionbus. (LLM access is NOT an action —
@@ -33,6 +33,7 @@ export const Events = {
   CLOCK_TICK: "clock.tick",
   PROMPT_GATHER: "prompt.gather",
   LLM_REQUEST: "llm.request",
+  LLM_REQUEST_SENT: "llm.request.sent",
   LLM_RETURN: "llm.return",
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
@@ -88,6 +89,14 @@ export interface EventPayloads {
   "clock.tick": Notify<{ seq: number }>;
   "prompt.gather": Notify<{ seq: number }>;
   "llm.request": Request<{ context: ComposedContext; messages: Message[] }>;
+  /**
+   * The EXACT request `llm-core` dispatches to the provider — system + messages +
+   * tools + temperature/maxTokens, the assembled `LLMRequest` — surfaced so observers
+   * (the inspector) can show what was actually sent. Carries the same `id` (corrId) as
+   * the beat's `llm.request`. `llm-core` emits it fire-and-forget; it depends on no one
+   * consuming it.
+   */
+  "llm.request.sent": Request<{ request: LLMRequest }>;
   "llm.return": Reply<LLMResponse>;
   "input.message": Notify<{ text: string; from?: string; channel?: string; meta?: Record<string, unknown> }>;
   "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
