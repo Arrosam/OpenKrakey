@@ -90,7 +90,9 @@ function mapContentPart(part: ContentPart): unknown {
 /** Map message content (string | ContentPart[]) onto OpenAI content. */
 function mapContent(content: string | ContentPart[]): unknown {
   if (typeof content === "string") return content;
-  return content.map(mapContentPart);
+  // Defensive: a malformed message (missing / non-array content) must not crash the
+  // whole request — treat it as empty rather than throwing.
+  return Array.isArray(content) ? content.map(mapContentPart) : "";
 }
 
 /** Map our messages onto OpenAI messages. */
@@ -114,7 +116,13 @@ function mapMessages(messages: Message[]): unknown[] {
         })),
       };
     }
-    return { role: m.role, content: mapContent(m.content) };
+    const mapped: Record<string, unknown> = {
+      role: m.role,
+      content: mapContent(m.content),
+    };
+    // Forward the optional participant name (e.g. a user turn's source channel).
+    if (m.name !== undefined) mapped.name = m.name;
+    return mapped;
   });
 }
 
