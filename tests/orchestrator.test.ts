@@ -318,10 +318,10 @@ test("beat: PROMPT_GATHER runs before compose — a block added in the gather ha
 });
 
 // ===========================================================================
-// Behavior 4 — compose orders by priority DESC and joins with "\n"
+// Behavior 4 — compose orders by priority DESC and wraps each block in <label>…</label>
 // ===========================================================================
 
-test("compose: blocks are ordered by priority DESC and joined with newlines", async (t) => {
+test("compose: blocks are ordered by priority DESC and each wrapped in its label", async (t) => {
   const { orc, events } = freshOrc(t);
   const texts = captureContextTexts(events);
 
@@ -333,7 +333,11 @@ test("compose: blocks are ordered by priority DESC and joined with newlines", as
   await settle();
 
   assert.equal(texts.length, 1);
-  assert.equal(texts[0], "TOP\nbot", "higher priority renders first, joined by \\n");
+  assert.equal(
+    texts[0],
+    "<top>\nTOP\n</top>\n\n<bot>\nbot\n</bot>",
+    "higher priority first; each block wrapped in <label> (defaults to id), joined by a blank line",
+  );
 });
 
 test("compose: ordering is by priority value regardless of insertion order", async (t) => {
@@ -349,7 +353,11 @@ test("compose: ordering is by priority value regardless of insertion order", asy
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
 
-  assert.equal(texts[0], "HI\nMID\nLO", "compose must sort by priority DESC, not insertion order");
+  assert.equal(
+    texts[0],
+    "<hi>\nHI\n</hi>\n\n<mid>\nMID\n</mid>\n\n<lo>\nLO\n</lo>",
+    "compose must sort by priority DESC, not insertion order",
+  );
 });
 
 test("compose: a single block composes to exactly that block's text (no stray separators)", async (t) => {
@@ -362,7 +370,11 @@ test("compose: a single block composes to exactly that block's text (no stray se
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
 
-  assert.equal(texts[0], "ONLY", "single block: no leading/trailing newline");
+  assert.equal(
+    texts[0],
+    "<only>\nONLY\n</only>",
+    "single block: just its <label> wrapper, no leading/trailing separators",
+  );
 });
 
 // ===========================================================================
@@ -400,7 +412,11 @@ test("compose: a render() returning a Promise is awaited and its resolved text i
   await settle();
 
   assert.equal(texts.length, 1);
-  assert.equal(texts[0], "async", "the awaited async render result must be the composed text");
+  assert.equal(
+    texts[0],
+    "<async>\nasync\n</async>",
+    "the awaited async render result must be wrapped and composed",
+  );
 });
 
 test("compose: mixes sync and async renders, preserving priority order", async (t) => {
@@ -420,8 +436,62 @@ test("compose: mixes sync and async renders, preserving priority order", async (
 
   assert.equal(
     texts[0],
-    "SYNC\nASYNC",
-    "async block must be awaited and still placed per its priority",
+    "<sync-top>\nSYNC\n</sync-top>\n\n<async-bot>\nASYNC\n</async-bot>",
+    "async block must be awaited and still placed (wrapped) per its priority",
+  );
+});
+
+// ===========================================================================
+// Behavior 6b — block ENCAPSULATION: each block wrapped in <label>…</label>
+// (label = block.label ?? block.id); empty/failed renders contribute nothing
+// ===========================================================================
+
+test("compose: a block is wrapped in its NOMINATED label, not its id", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+
+  orc.setBlock({ id: "persona", label: "identity", priority: 100, render: () => "I am X" });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(
+    texts[0],
+    "<identity>\nI am X\n</identity>",
+    "the nominated label takes precedence over the block id in the wrapper",
+  );
+});
+
+test("compose: a block WITHOUT a label falls back to wrapping with its id", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+
+  orc.setBlock(block("notes", 100, "NOTE"));
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(texts[0], "<notes>\nNOTE\n</notes>", "no label => the wrapper uses the block id");
+});
+
+test("compose: an empty-rendering block contributes NOTHING (no empty wrapper, no stray separators)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+
+  orc.setBlock(block("top", 100, "TOP"));
+  orc.setBlock(block("blank", 50, ""));
+  orc.setBlock(block("bot", 1, "BOT"));
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(
+    texts[0],
+    "<top>\nTOP\n</top>\n\n<bot>\nBOT\n</bot>",
+    "an empty-rendering block is omitted entirely — no <blank></blank>, no extra blank line",
   );
 });
 
@@ -671,7 +741,7 @@ test("beat: a throwing PROMPT_GATHER listener does not abort compose/LLM_REQUEST
   await settle();
 
   assert.equal(texts.length, 1, "compose + LLM_REQUEST should still happen");
-  assert.equal(texts[0], "BASE");
+  assert.equal(texts[0], "<base>\nBASE\n</base>");
 });
 
 // ===========================================================================
@@ -776,7 +846,7 @@ test("compose reflects block-store edits made between beats (removal + replaceme
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
-  assert.equal(texts[0], "A1\nB", "first beat composes both blocks");
+  assert.equal(texts[0], "<a>\nA1\n</a>\n\n<b>\nB\n</b>", "first beat composes both blocks");
 
   // Mutate the store between beats: replace a, remove b.
   orc.setBlock(block("a", 100, "A2"));
@@ -784,7 +854,7 @@ test("compose reflects block-store edits made between beats (removal + replaceme
 
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
   await settle();
-  assert.equal(texts[1], "A2", "second beat reflects the replacement and the removal");
+  assert.equal(texts[1], "<a>\nA2\n</a>", "second beat reflects the replacement and the removal");
 });
 
 // ===========================================================================

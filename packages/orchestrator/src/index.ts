@@ -44,17 +44,24 @@ export function createOrchestrator(deps: {
     const sorted = [...blocks.values()].sort((a, b) => b.priority - a.priority);
     // Render every block in ISOLATION: a block whose render() throws or rejects
     // degrades to "" for this beat (logged); it never drops the others or the beat.
+    // ENCAPSULATE each non-empty block in its label — `<label>…</label>`, where
+    // label = block.label ?? block.id — so every plugin's contribution is a bounded,
+    // labelled block. Empty/failed blocks contribute nothing; blocks join by a blank line.
     const parts = await Promise.all(
       sorted.map(async (b) => {
+        let text: string;
         try {
-          return await b.render();
+          text = await b.render();
         } catch (err) {
           log.warn(`block render failed: ${b.id}: ${err}`);
-          return "";
+          text = "";
         }
+        if (text === "") return "";
+        const label = b.label ?? b.id;
+        return `<${label}>\n${text}\n</${label}>`;
       }),
     );
-    return { text: parts.join("\n") };
+    return { text: parts.filter((p) => p !== "").join("\n\n") };
   }
 
   // ---- the beat ----
