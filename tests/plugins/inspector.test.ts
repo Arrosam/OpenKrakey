@@ -112,6 +112,7 @@ const E = {
   CLOCK_TICK: "clock.tick",
   PROMPT_GATHER: "prompt.gather",
   LLM_REQUEST: "llm.request",
+  LLM_REQUEST_SENT: "llm.request.sent",
   LLM_RETURN: "llm.return",
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
@@ -186,6 +187,24 @@ rl.on("line", async (line) => {
     if (op === "req") {
       const [id, rid, text] = splitN(rest, 3);
       busEmit(id, E.LLM_REQUEST, { id: rid, at: Date.now(), data: { context: { text: text || "" } } });
+    } else if (op === "reqsent") {
+      // emit llm.request.sent{ id:reqId, data:{ request: LLMRequest } } — the
+      // DISPATCHED request (new vocabulary). Mirrors the "req" op but carries the
+      // full Request<{ request }> envelope so the captured payload exposes
+      // data.request.{system,messages,tools,temperature}.
+      const [id, rid] = splitN(rest, 2);
+      busEmit(id, E.LLM_REQUEST_SENT, {
+        id: rid,
+        at: Date.now(),
+        data: {
+          request: {
+            system: "SYS",
+            messages: [{ role: "user", content: "hi", name: "web" }],
+            tools: [{ name: "time.now" }],
+            temperature: 0.7,
+          },
+        },
+      });
     } else if (op === "ret") {
       const [id, rid, content] = splitN(rest, 3);
       busEmit(id, E.LLM_RETURN, { id: rid, at: Date.now(), ok: true, data: { content: content || "", toolCalls: [] } });
@@ -667,6 +686,39 @@ test("inspector: a live /stream emits the prompt.sent record as { type:'record',
     );
     assert.ok(ok, "the live record arrives over SSE as {type:'record',record}: " + flat(s.events));
     s.close();
+  } finally {
+    await c.close();
+  }
+});
+
+test("inspector: llm.request.sent is captured as a 'prompt.sent' record carrying data.request (corrId = id)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // Emit the DISPATCHED request (new `llm.request.sent` vocabulary). It maps to
+    // the SAME dashboard kind ("prompt.sent") as `llm.request`, with corrId=id and
+    // the full LLMRequest carried under payload.data.request, so it pairs by corrId.
+    await sendAndWait(c, "reqsent alice RS1", "reqsent");
+    const recs = await waitSnapshot(c, "alice", (rs) =>
+      rs.some(
+        (r) =>
+          r.kind === "prompt.sent" &&
+          r.corrId === "RS1" &&
+          r.payload &&
+          r.payload.data &&
+          r.payload.data.request,
+      ),
+    );
+    const sent = recs.find((r) => r.kind === "prompt.sent" && r.corrId === "RS1");
+    assert.ok(sent, "a prompt.sent record with corrId RS1 must appear: " + flat(recs));
+    assert.equal(sent.agentId, "alice", "the record is tagged with the emitting agent");
+    assert.ok(
+      sent.payload && sent.payload.data && sent.payload.data.request,
+      "the record payload carries the dispatched request under data.request: " + flat(sent.payload),
+    );
+    const req = sent.payload.data.request;
+    assert.equal(req.messages.length, 1, "the captured request carries its one message");
+    assert.equal(req.tools.length, 1, "the captured request carries its one tool");
   } finally {
     await c.close();
   }
