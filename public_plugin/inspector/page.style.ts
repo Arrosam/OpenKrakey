@@ -153,6 +153,7 @@ export const STYLE = `
   .k-input { color: var(--yellow); }
   .k-output { color: var(--green); }
   .k-tool { color: var(--magenta); }
+  .k-conversation { color: var(--cyan); }
   .k-log { color: var(--muted); }
   .k-start { color: var(--green); }
 
