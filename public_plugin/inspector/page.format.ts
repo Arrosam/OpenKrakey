@@ -60,3 +60,21 @@ export function formatRequest(payload: unknown, mode: "readable" | "raw"): strin
   if (pp.length) parts.push("params: " + pp.join(" · "));
   return parts.join("\n\n");
 }
+
+/**
+ * Pick which of two corrId-paired "prompt.sent" records is the authoritative request
+ * to display. The orchestrator's plain `llm.request` and llm-core's assembled
+ * `llm.request.sent` share a corrId and can arrive in EITHER order (the sent event is
+ * emitted re-entrantly during the request emit). Prefer the assembled one — the record
+ * carrying `payload.data.request` — so a plain request never overwrites it.
+ */
+export function chooseSent(current: unknown, incoming: unknown): unknown {
+  var has = function (r: any): boolean {
+    return !!(r && r.payload && r.payload.data && r.payload.data.request);
+  };
+  if (!incoming) return current;
+  if (!current) return incoming;
+  if (has(incoming)) return incoming;
+  if (has(current)) return current;
+  return incoming;
+}
