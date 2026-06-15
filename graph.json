@@ -25,6 +25,7 @@
       "nodes": [
         "llm-core",
         "persona",
+        "history",
         "web",
         "notes",
         "toolbox",
@@ -169,6 +170,19 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/persona.md"
+    },
+    "history": {
+      "zone": "plugins",
+      "path": "public_plugin/history",
+      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; exposes the turns via the conversation.get action for llm-core to send as messages[].",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/history.md"
     },
     "web": {
       "zone": "plugins",
