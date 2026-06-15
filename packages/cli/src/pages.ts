@@ -111,6 +111,7 @@ const providerLabel = (id: string | undefined): string =>
 const PLUGIN_SUMMARIES: Record<string, string> = {
   "llm-core": "talks to the AI service (required for replies)",
   persona: "the agent's identity / system prompt",
+  history: "conversation memory (Hermes-format messages)",
   notes: "lets the agent save and read named notes",
   toolbox: "clock tools — read the time, set its own pace",
   web: "chat with the agent from your browser",
@@ -940,8 +941,8 @@ export async function runInteractiveLoop(
       if (err instanceof CliError) {
         const available = await guard(() => cli.listAvailablePlugins(), []);
         // Data-carrying plugins default to independent copies so each agent
-        // gets its own notes (shared code, private data — R6).
-        const privateByDefault = available.filter((p) => p === "notes");
+        // gets its own history/notes (shared code, private data — R6).
+        const privateByDefault = available.filter((p) => p === "history" || p === "notes");
         await guard(async () => {
           await cli.writeDefault({
             intervalMs: 30000,
