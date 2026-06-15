@@ -64,6 +64,7 @@ export const SCRIPT = `
 
   // ---- per-selection state ----
   var state = null; // { id, lastSeq, records, es, prompts, ... }
+  var promptView = "readable";
 
   function freshState(id) {
     return {
@@ -96,6 +97,14 @@ export const SCRIPT = `
     if (p && p.__truncated) return "⚠ truncated (" + p.bytes + " bytes)";
     switch (rec.kind) {
       case "prompt.sent": {
+        var rq = get(p, ["data", "request"]);
+        if (rq) {
+          var mc = Array.isArray(rq.messages) ? rq.messages.length : 0;
+          var tc = Array.isArray(rq.tools) ? rq.tools.length : 0;
+          return "messages=" + mc + (tc ? (", tools=" + tc) : "");
+        }
+        var ms = get(p, ["data", "messages"]);
+        if (Array.isArray(ms)) return "messages=" + ms.length;
         var t = get(p, ["data", "context", "text"]);
         return t != null ? ("len=" + String(t).length) : "(context)";
       }
@@ -208,7 +217,7 @@ export const SCRIPT = `
       var sentText;
       if (!pr.sent) sentText = "(no request captured)";
       else if (pr.sent.payload && pr.sent.payload.__truncated) sentText = "⚠ truncated (" + pr.sent.payload.bytes + " bytes)";
-      else sentText = formatRequest(get(pr.sent.payload, ["data"]));
+      else sentText = formatRequest(pr.sent.payload, promptView);
       var recvBlock = "(awaiting response…)";
       if (pr.received) {
         var rp = pr.received.payload;
@@ -549,6 +558,20 @@ export const SCRIPT = `
       }
     });
   });
+
+  var pvToggle = document.getElementById("pvToggle");
+  if (pvToggle) {
+    pvToggle.addEventListener("click", function (e) {
+      var btn = e.target;
+      if (!btn || typeof btn.getAttribute !== "function") return;
+      var pv = btn.getAttribute("data-pv");
+      if (!pv || pv === promptView) return;
+      promptView = pv;
+      var bs = pvToggle.querySelectorAll(".pv-btn");
+      for (var i = 0; i < bs.length; i++) bs[i].classList.toggle("active", bs[i].getAttribute("data-pv") === pv);
+      if (state) renderPrompts(state);
+    });
+  }
 
   // ---- agent list (poll lightly so new agents appear) ----
   function loadAgents() {
