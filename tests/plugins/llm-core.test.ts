@@ -4,13 +4,14 @@ import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createEventSystem } from "../../packages/event-system/src";
-import { Actions, Events } from "../../shared/actions";
+import { Events } from "../../shared/actions";
 import type {
   Communicator,
   CommunicatorLibrary,
   LLMRequest,
   LLMResponse,
   Capability,
+  Message,
 } from "../../contracts/llm";
 import type { Plugin, PluginContext } from "../../contracts/plugin";
 import type { ContextBlock } from "../../contracts/context";
@@ -196,9 +197,20 @@ function settle(ms = 20): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Build an llm.request Request envelope. */
-function llmRequest(id: string, text: string) {
-  return { id, at: Date.now(), data: { context: { text } } };
+/**
+ * Build an llm.request Request envelope.
+ *
+ * `messages` is the conversation now carried ON THE EVENT (Request<{ context;
+ * messages }>). When omitted the `messages` key is left OFF the payload entirely
+ * (the spec's "empty or absent" branch), so the no-arg form exercises the
+ * single-user-message fallback. Pass an array to drive the messages branch.
+ */
+function llmRequest(id: string, text: string, messages?: Message[]) {
+  const data: { context: { text: string }; messages?: Message[] } = {
+    context: { text },
+  };
+  if (messages !== undefined) data.messages = messages;
+  return { id, at: Date.now(), data };
 }
 
 // ===========================================================================
@@ -663,56 +675,188 @@ test("config: with neither set, temperature and maxTokens are absent on the requ
 });
 
 // ===========================================================================
-// 11. conversation history -> system + messages[] (Hermes assembly)
+// 11. messages carried ON THE EVENT -> system + messages[] (no conversation action)
 // ===========================================================================
 //
-// When a `conversation.get` provider (history) is present, the composed context
-// rides the `system` field and the conversation turns become the real messages[]
-// (with the provenance fields at/source stripped to the wire Message). With no
-// provider, llm-core falls back to the single-user-message shape (covered above).
+// The conversation now rides the `llm.request` payload itself
+// (Request<{ context: ComposedContext; messages: Message[] }>). llm-core no longer
+// reads any conversation action — it merely TRANSPORTS the event's `messages` onto
+// the chat request.
+//
+//  • messages is a NON-EMPTY array -> chat request gets `system = context.text`
+//    and `messages` deep-equal to the event's messages (verbatim, untouched).
+//  • messages is EMPTY or ABSENT -> single-user-message fallback
+//    (`messages:[{role:"user", content: context.text}]`) and NO `system` key.
+//
+// No conversation-history action is registered anywhere — that action no longer exists.
 
-test("conversation: context becomes `system` and provided turns become messages[]", async (t) => {
+// ---- positive: non-empty messages branch -----------------------------------
+
+test("messages: a non-empty event array becomes the chat messages, context.text becomes system", async (t) => {
   const com = chatCommunicator({ response: { content: "ok" } });
-  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
-  actions.register(Actions.CONVERSATION_GET, async () => [
-    { role: "user", content: "hi", name: "web", source: "web", at: 1 },
-    { role: "assistant", content: "yo", source: "assistant", at: 2 },
-  ]);
-  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYSTEM-CTX"));
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [
+    { role: "user", content: "hi", name: "web" },
+    { role: "assistant", content: "yo" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYSTEM-CTX", convo));
   await settle();
   assert.equal(com.calls.length, 1);
-  assert.equal(com.calls[0].system, "SYSTEM-CTX", "composed context rides the system field");
+  assert.equal(
+    com.calls[0].system,
+    "SYSTEM-CTX",
+    "composed context rides the system field when messages are supplied",
+  );
   assert.deepEqual(
     com.calls[0].messages,
     [
       { role: "user", content: "hi", name: "web" },
       { role: "assistant", content: "yo" },
     ],
-    "turns become messages[]; at/source stripped, source kept on the wire via name",
+    "the event's messages are transported verbatim onto the chat request",
   );
 });
 
-test("conversation: tool turns keep toolCallId/name and assistant toolCalls pass through", async (t) => {
+test("messages: the event array is used VERBATIM, not derived from context.text", async (t) => {
+  // context.text differs from every message's content: llm-core must NOT inject a
+  // user turn built from context.text when messages are present — it only sets system.
   const com = chatCommunicator({ response: { content: "ok" } });
-  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
-  actions.register(Actions.CONVERSATION_GET, async () => [
-    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "time.now", arguments: {} }], source: "assistant", at: 1 },
-    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now", source: "time.now", at: 2 },
-  ]);
-  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [{ role: "user", content: "actual turn", name: "cli" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "DIFFERENT-CONTEXT", convo));
   await settle();
   assert.deepEqual(com.calls[0].messages, [
-    { role: "assistant", content: "", toolCalls: [{ id: "c1", name: "time.now", arguments: {} }] },
-    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+    { role: "user", content: "actual turn", name: "cli" },
   ]);
+  assert.equal(com.calls[0].system, "DIFFERENT-CONTEXT");
 });
 
-test("conversation: an EMPTY conversation falls back to a single user message (no system)", async (t) => {
+test("messages: tool turns keep toolCallId/name and assistant toolCalls pass through verbatim", async (t) => {
   const com = chatCommunicator({ response: { content: "ok" } });
-  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
-  actions.register(Actions.CONVERSATION_GET, async () => []);
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "time.now", arguments: {} }],
+    },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "time.now", arguments: {} }],
+    },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+  ]);
+  assert.equal(com.calls[0].system, "CTX");
+});
+
+// ---- BVA: single-element messages array (boundary between empty and many) ----
+
+test("messages: a single-element array is the boundary non-empty case (system set)", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [{ role: "user", content: "only" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "only" }]);
+  assert.equal(com.calls[0].system, "CTX", "one supplied turn already counts as non-empty");
+});
+
+// ---- fallback: empty / absent messages -> single user message, NO system -----
+
+test("messages: an EMPTY array falls back to a single user message with NO system key", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", []));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "the system key must be OMITTED (not just undefined) when there are no messages",
+  );
+});
+
+test("messages: an ABSENT messages key falls back to a single user message with NO system key", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  // llmRequest with no `messages` arg leaves the key off the payload entirely.
   events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
   await settle();
-  assert.equal(com.calls[0].system, undefined, "no system when there is no conversation");
   assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "the system key must be OMITTED when messages are absent",
+  );
+});
+
+// ---- negative / error-guessing: messages present but not an array ------------
+
+test("messages: a non-array `messages` is treated as absent (single-user fallback, no throw)", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  // `messages` is neither an array nor absent — it is not a "non-empty array",
+  // so the spec's fallback branch applies; the request must not throw.
+  const bad = { id: "1", at: Date.now(), data: { context: { text: "CTX" }, messages: "nope" } };
+  assert.doesNotThrow(() => events.emit(Events.LLM_REQUEST, bad));
+  await settle();
+  assert.equal(com.calls.length, 1, "a non-array messages must not block the chat call");
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "no system when messages is not a non-empty array",
+  );
+});
+
+// ---- combined flow: messages + tools + temperature + maxTokens together ------
+
+test("messages: event messages + registered tools + temperature + maxTokens all flow on one request", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, {
+    config: { temperature: 0.7, maxTokens: 128 },
+    llm: library([com]),
+  });
+  await actions.invoke("llm.register_tool", { name: "t1", description: "d", parameters: { type: "object" } });
+  const convo: Message[] = [
+    { role: "user", content: "q", name: "web" },
+    { role: "assistant", content: "a" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYS", convo));
+  await settle();
+  assert.equal(com.calls.length, 1);
+  const req = com.calls[0];
+  assert.equal(req.system, "SYS", "context.text -> system");
+  assert.deepEqual(
+    req.messages,
+    [
+      { role: "user", content: "q", name: "web" },
+      { role: "assistant", content: "a" },
+    ],
+    "the event's messages are carried through alongside tools/temp/maxTokens",
+  );
+  assert.ok(Array.isArray(req.tools));
+  assert.equal(req.tools!.length, 1);
+  assert.equal(req.tools![0].name, "t1");
+  assert.equal(req.temperature, 0.7);
+  assert.equal(req.maxTokens, 128);
+});
+
+test("messages: success with event messages still emits output.message from the response content", async (t) => {
+  // The assistant reply text comes from the RESPONSE, independent of the request's
+  // messages — confirm output.message rides response.content, not the convo.
+  const com = chatCommunicator({ response: { content: "assistant says" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const outs = collect(events, Events.OUTPUT_MESSAGE) as any[];
+  const convo: Message[] = [{ role: "user", content: "hi", name: "web" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.equal(outs.length, 1);
+  assert.equal(outs[0].data.text, "assistant says");
 });
