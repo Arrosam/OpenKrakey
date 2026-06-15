@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-11T00:00:00Z"
+    "updated_at": "2026-06-15T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -25,7 +25,6 @@
       "nodes": [
         "llm-core",
         "persona",
-        "history",
         "web",
         "notes",
         "toolbox",
@@ -170,20 +169,6 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/persona.md"
-    },
-    "history": {
-      "zone": "plugins",
-      "path": "public_plugin/history",
-      "description": "Conversation memory: folds input.message / llm.return / tool.result into a bounded low-priority context block; persists JSONL under dataDir (survives restarts; public=shared, private=isolated).",
-      "depends_on_contracts": [
-        "plugin",
-        "event-system",
-        "context",
-        "llm"
-      ],
-      "implements_contracts": [],
-      "status": "done",
-      "overview": "overviews/nodes/history.md"
     },
     "web": {
       "zone": "plugins",
