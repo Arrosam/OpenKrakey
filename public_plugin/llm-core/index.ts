@@ -2,10 +2,11 @@
  * Plugin: llm-core — the LLM round-trip, and nothing else.
  *
  * It is the only thing that answers the orchestrator's `llm.request`: it picks a
- * communicator from the key-less `ctx.llm` library, sends the composed context as a
- * single user message (with any registered tools), and reports the normalized result
- * back as `llm.return`. On success it also surfaces the assistant's text as an
- * `output.message` so channels can show it.
+ * communicator from the key-less `ctx.llm` library, reads the conversation from the
+ * `llm.request` event's `messages` and builds the chat request from `{ context,
+ * messages }` (with any registered tools), and reports the normalized result back as
+ * `llm.return`. On success it also surfaces the assistant's text as an `output.message`
+ * so channels can show it.
  *
  * It doubles as the tool-registration hub via the `llm.register_tool` action: tool
  * plugins declare the L1 `ToolDef`s that ride along on every chat request. The core
@@ -26,12 +27,10 @@ import type {
 } from "../../contracts/llm";
 import type { ComposedContext } from "../../contracts/context";
 import {
-  Actions,
   Events,
   type Request,
   type Reply,
   type Notify,
-  type ConversationMessage,
 } from "../../shared/actions";
 
 /** The config slice this plugin reads (everything optional). */
@@ -66,7 +65,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
   }
 
   async function answer(
-    req: Request<{ context: ComposedContext }>,
+    req: Request<{ context: ComposedContext; messages: Message[] }>,
     context: ComposedContext,
   ): Promise<void> {
     const { id } = req;
@@ -84,18 +83,10 @@ const createLLMCore: PluginFactory = (): Plugin => {
       return;
     }
 
-    // Pull the conversation (Hermes turns) from whoever provides it; absent → [].
-    let conversation: ConversationMessage[] = [];
-    try {
-      const got = await ctx!.actions.invoke(Actions.CONVERSATION_GET);
-      if (Array.isArray(got)) conversation = got as ConversationMessage[];
-    } catch {
-      // No conversation provider (e.g. no history plugin) — fall back below.
-    }
-    // Strip provenance (at/source) to the wire Message[]; a user turn's source is
-    // already surfaced via Message.name. With a conversation, the composed context
-    // becomes the `system`; without one, fall back to the single-user-message shape.
-    const turns: Message[] = conversation.map(({ at, source, ...m }) => m);
+    // The conversation rides the llm.request event as wire-ready Message[] (the
+    // provider already stripped provenance). With turns, the composed context becomes
+    // the `system`; without, fall back to the single-user-message shape.
+    const turns: Message[] = Array.isArray(req.data?.messages) ? req.data.messages : [];
     const base =
       turns.length > 0
         ? { system: context.text, messages: turns }
@@ -160,7 +151,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
       unsubRequest = pluginCtx.events.on(Events.LLM_REQUEST, (payload: unknown) => {
         // Ignore malformed requests silently — never throw out of a listener.
         if (payload === null || typeof payload !== "object") return;
-        const req = payload as Request<{ context: ComposedContext }>;
+        const req = payload as Request<{ context: ComposedContext; messages: Message[] }>;
         const context = req.data?.context;
         if (context === null || typeof context !== "object") return;
         if (typeof context.text !== "string") return;
