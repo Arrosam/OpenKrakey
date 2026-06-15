@@ -11,7 +11,7 @@
  *    registered at setup, so they are NOT enumerated here.
  */
 import type { ComposedContext } from "../../contracts/context";
-import type { LLMResponse } from "../../contracts/llm";
+import type { LLMResponse, Message } from "../../contracts/llm";
 
 /**
  * Well-known actions invoked on the actionbus. (LLM access is NOT an action —
@@ -25,6 +25,8 @@ export const Actions = {
   CLOCK_SET_INTERVAL: "clock.set_interval",
   CLOCK_SET_DEFAULT_INTERVAL: "clock.set_default_interval",
   CLOCK_FIRE_NOW: "clock.fire_now",
+  /** Returns the current conversation as `ConversationMessage[]` (registered by `history`). */
+  CONVERSATION_GET: "conversation.get",
 } as const;
 
 /** Well-known generic events emitted on the eventbus to activate plugins. */
@@ -62,6 +64,18 @@ export interface Reply<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
+}
+
+/**
+ * One turn of conversation history in Hermes chat shape: an `llm` Message PLUS
+ * provenance. `source` = where the turn came from (the input channel for a user turn,
+ * "assistant" for an LLM turn, the tool name for a tool turn); `at` = epoch-ms.
+ * Returned by the `conversation.get` action; consumers strip `at`/`source` to get the
+ * wire `Message` (a user turn's `source` is surfaced to the model via `Message.name`).
+ */
+export interface ConversationMessage extends Message {
+  at: number;
+  source: string;
 }
 
 /**
