@@ -197,6 +197,11 @@ test("setup({}) registers exactly one block (the persona block)", async (t) => {
   assert.equal(store.size, 1, "persona setup should add exactly one block");
 });
 
+test("setup({}) nominates the block label 'persona' (orchestrator wraps it as <persona>…</persona>)", async (t) => {
+  const { block } = await setupAndGetBlock({}, t);
+  assert.equal((block as any).label, PERSONA_ID, "persona must nominate its block label");
+});
+
 test("render() is callable repeatedly and stable (default)", async (t) => {
   const { block } = await setupAndGetBlock({}, t);
   const a = await renderOf(block);
