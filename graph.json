@@ -60,7 +60,7 @@
     "orchestrator": {
       "zone": "core",
       "path": "packages/orchestrator",
-      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather→compose→llm.request; dispatch tool calls from llm.return.",
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks; a conversation provider emits conversation.snapshot) → compose → llm.request{context,messages} (transports the captured messages, never inspects them); dispatch tool calls from llm.return.",
       "depends_on_contracts": [
         "event-system",
         "clock",
@@ -147,7 +147,7 @@
     "llm-core": {
       "zone": "plugins",
       "path": "public_plugin/llm-core",
-      "description": "The LLM round-trip plugin: llm.request -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Reads the conversation from the event's messages (no conversation.get). Provides the llm.register_tool action other plugins call to declare ToolDefs.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -174,7 +174,7 @@
     "history": {
       "zone": "plugins",
       "path": "public_plugin/history",
-      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; exposes the turns via the conversation.get action for llm-core to send as messages[].",
+      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; contributes the turns to the orchestrator via the conversation.snapshot event on prompt.gather (provenance stripped to wire Message[]), which the orchestrator forwards as the beat's llm.request messages.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
