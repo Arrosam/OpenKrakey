@@ -147,7 +147,7 @@
     "llm-core": {
       "zone": "plugins",
       "path": "public_plugin/llm-core",
-      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Reads the conversation from the event's messages (no conversation.get). Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Provides the llm.register_tool action other plugins call to declare ToolDefs.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -226,7 +226,7 @@
     "inspector": {
       "zone": "plugins",
       "path": "public_plugin/inspector",
-      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (llm.request composed context) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-beat by request id. Emits nothing — never perturbs the observed agent.",
+      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-beat by request id. Emits nothing — never perturbs the observed agent.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
