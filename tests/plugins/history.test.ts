@@ -485,7 +485,7 @@ test("reload: corrupt or foreign-schema lines are skipped (never poison the conv
   fs.writeFileSync(
     path.join(dataDir, "history.jsonl"),
     [
-      JSON.stringify({ role: "user", content: "keep", source: "web", at: 1 }), // valid
+      JSON.stringify({ role: "user", content: "keep", name: "web", source: "web", at: 1 }), // valid (history persists user turns with BOTH name + source)
       JSON.stringify({ at: 2, kind: "user", text: "old-schema (no role/content)" }), // foreign schema
       JSON.stringify({ role: "wizard", content: "unknown role", source: "x", at: 3 }), // unknown role
       JSON.stringify({ role: "assistant", content: 12345, source: "assistant", at: 4 }), // non-string content
