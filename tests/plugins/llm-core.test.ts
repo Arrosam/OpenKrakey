@@ -860,3 +860,245 @@ test("messages: success with event messages still emits output.message from the 
   assert.equal(outs.length, 1);
   assert.equal(outs[0].data.text, "assistant says");
 });
+
+// ===========================================================================
+// 12. llm.request.sent — the EXACT dispatched request, mirrored on the bus
+// ===========================================================================
+//
+// SPEC: on EVERY real dispatch (a chat-capable communicator EXISTS and chat() is
+// invoked), llm-core emits `Events.LLM_REQUEST_SENT` carrying the assembled
+// LLMRequest — surfaced so observers (the inspector) can show what was actually
+// sent. Envelope is Request<{ request: LLMRequest }>:
+//
+//     { id: <the llm.request id>, at: <number>, data: { request: chatReq } }
+//
+// Invariants under test:
+//   • data.request DEEP-EQUALS the very object handed to communicator.chat(...).
+//   • id is the SAME corrId as the llm.request (and the eventual llm.return).
+//   • emitted on success, on the fallback (no event messages) path, AND when
+//     chat() later REJECTS (the request was still sent).
+//   • NOT emitted when there is no chat-capable communicator (early ok:false
+//     return that dispatches nothing).
+//
+// `data.request` is asserted against the captured `chat` argument by deepEqual so
+// the test is agnostic to whether llm-core forwards the same reference or a clone
+// and to the field ORDER of the assembled request.
+
+/** Collect llm.request.sent payloads, typed for the Request<{request}> envelope. */
+function collectSent(events: Harness["events"]): Array<{
+  id: string;
+  at: number;
+  data: { request: LLMRequest };
+}> {
+  return collect(events, Events.LLM_REQUEST_SENT) as Array<{
+    id: string;
+    at: number;
+    data: { request: LLMRequest };
+  }>;
+}
+
+// ---- positive: full assembly (messages + tools + temperature + maxTokens) ----
+
+test("request.sent: data.request deep-equals the chat() arg; id matches; carries system/messages/tools/temperature/maxTokens", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, {
+    config: { temperature: 0.7, maxTokens: 128 },
+    llm: library([com]),
+  });
+  const sent = collectSent(events);
+  await actions.invoke("llm.register_tool", {
+    name: "t1",
+    description: "d",
+    parameters: { type: "object" },
+  });
+  const convo: Message[] = [
+    { role: "user", content: "q", name: "web" },
+    { role: "assistant", content: "a" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("req-42", "SYS", convo));
+  await settle();
+
+  // the provider was actually called…
+  assert.equal(com.calls.length, 1, "chat() must be invoked exactly once");
+  // …and exactly one mirror event fired with the matching corrId.
+  assert.equal(sent.length, 1, "exactly one llm.request.sent");
+  assert.equal(sent[0].id, "req-42", "corrId equals the llm.request id");
+  assert.equal(typeof sent[0].at, "number", "envelope carries a numeric at");
+
+  // The mirrored request IS the dispatched request.
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "data.request must deep-equal the object passed to communicator.chat(...)",
+  );
+
+  // And it is the fully-assembled request, as the spec enumerates.
+  const req = sent[0].data.request;
+  assert.equal(req.system, "SYS", "context.text rides system when messages supplied");
+  assert.deepEqual(
+    req.messages,
+    [
+      { role: "user", content: "q", name: "web" },
+      { role: "assistant", content: "a" },
+    ],
+    "event messages are mirrored verbatim",
+  );
+  assert.ok(Array.isArray(req.tools), "tools present");
+  assert.equal(req.tools!.length, 1);
+  assert.equal(req.tools![0].name, "t1");
+  assert.equal(req.temperature, 0.7);
+  assert.equal(req.maxTokens, 128);
+});
+
+test("request.sent: id matches across the trio — llm.request.sent, llm.return and the request all share the corrId", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("corr-1", "CTX"));
+  await settle();
+  assert.equal(sent.length, 1);
+  assert.equal(replies.length, 1);
+  assert.equal(sent[0].id, "corr-1");
+  assert.equal(replies[0].id, "corr-1");
+  assert.equal(sent[0].id, replies[0].id, "sent and return share the same corrId");
+});
+
+// ---- fallback: no event messages -> single-user request, NO system -----------
+
+test("request.sent: fallback path mirrors {messages:[{role:'user',content:context.text}]} with no system", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  // no `messages` arg -> fallback branch
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  await settle();
+
+  assert.equal(com.calls.length, 1);
+  assert.equal(sent.length, 1);
+
+  // mirror equals the dispatched fallback request…
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "fallback request must be mirrored exactly as dispatched",
+  );
+  // …which is the single-user message and carries NO system key.
+  assert.deepEqual(sent[0].data.request.messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(sent[0].data.request, "system"),
+    false,
+    "no system key on the fallback request (mirror must reflect the omission)",
+  );
+});
+
+// ---- rejection: the request was still SENT -----------------------------------
+
+test("request.sent: STILL emitted when chat() rejects (alongside the ok:false llm.return)", async (t) => {
+  const com = chatCommunicator({ reject: new Error("boom") });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("4", "CTX"));
+  await settle();
+
+  // chat was attempted, the mirror fired, the request still failed.
+  assert.equal(com.calls.length, 1, "chat() was invoked");
+  assert.equal(sent.length, 1, "request.sent fires even though chat() rejected");
+  assert.equal(sent[0].id, "4", "mirror carries the corrId of the failed beat");
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "the mirrored request equals the one that was dispatched-then-rejected",
+  );
+
+  // and the failure is still reported on llm.return.
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "4");
+  assert.equal(replies[0].ok, false);
+});
+
+// ---- negative: no chat-capable communicator -> nothing dispatched ------------
+
+test("request.sent: NOT emitted when there is no chat-capable communicator (embed-only library)", async (t) => {
+  const { events } = await setupPlugin(t, { llm: library([embedOnlyCommunicator()]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("9", "CTX"));
+  await settle();
+
+  assert.equal(sent.length, 0, "no dispatch -> no llm.request.sent");
+  // the beat still resolves as a failure on llm.return.
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "9");
+  assert.equal(replies[0].ok, false);
+});
+
+test("request.sent: NOT emitted when the chosen communicator lacks a chat() method", async (t) => {
+  // withCapability('chat') names it, but there is no chat method to dispatch to,
+  // so nothing is sent and no mirror event must fire.
+  const { events } = await setupPlugin(t, { llm: library([noChatCommunicator("broken")]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("5", "CTX"));
+  await settle();
+
+  assert.equal(sent.length, 0, "no chat() to dispatch to -> no llm.request.sent");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "5");
+  assert.equal(replies[0].ok, false);
+});
+
+test("request.sent: NOT emitted for a malformed llm.request (nothing is dispatched)", async (t) => {
+  // A payload missing data.context is the spec's ignore case: no chat call, hence
+  // no request was sent and no mirror event must fire.
+  const com = chatCommunicator({});
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  assert.doesNotThrow(() =>
+    events.emit(Events.LLM_REQUEST, { id: "1", at: 0, data: {} }),
+  );
+  await settle();
+  assert.equal(com.calls.length, 0, "malformed payload must not call chat");
+  assert.equal(sent.length, 0, "malformed payload must not emit llm.request.sent");
+});
+
+// ---- ordering / multiplicity: one mirror per real dispatch -------------------
+
+test("request.sent: exactly one mirror per dispatch across a failing-then-succeeding pair", async (t) => {
+  // The listener survives a rejection; each real dispatch emits its own mirror,
+  // each tagged with that beat's corrId.
+  let n = 0;
+  const com: ChatStub = {
+    name: "flaky",
+    provider: "stub",
+    model: "m",
+    capabilities: ["chat"],
+    input: ["text"],
+    output: ["text"],
+    calls: [],
+    chat(req: LLMRequest) {
+      com.calls.push(req);
+      n += 1;
+      if (n === 1) return Promise.reject(new Error("first-fails"));
+      return Promise.resolve({ content: "recovered" });
+    },
+  };
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  events.emit(Events.LLM_REQUEST, llmRequest("a", "CTX1"));
+  await settle();
+  events.emit(Events.LLM_REQUEST, llmRequest("b", "CTX2"));
+  await settle();
+
+  assert.equal(com.calls.length, 2, "both beats dispatched");
+  assert.equal(sent.length, 2, "one mirror per dispatch (the rejection still sent)");
+  assert.deepEqual(
+    sent.map((s) => s.id),
+    ["a", "b"],
+    "mirrors are tagged with each beat's corrId, in order",
+  );
+  // each mirror equals the request dispatched on that beat.
+  assert.deepEqual(sent[0].data.request, com.calls[0]);
+  assert.deepEqual(sent[1].data.request, com.calls[1]);
+});
