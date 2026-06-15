@@ -6,6 +6,8 @@
  * /snapshot then live-streams /stream over SSE, and renders the four panels.
  * page.ts re-wraps it in the <script> tags so the assembled PAGE is byte-identical.
  */
+import { formatRequest } from "./page.format";
+
 export const SCRIPT = `
 (function () {
   "use strict";
@@ -51,6 +53,7 @@ export const SCRIPT = `
     }
     return cur;
   }
+  var formatRequest = ${formatRequest.toString()};
 
   // ---- token-gated fetch ----
   function api(path) {
@@ -205,7 +208,7 @@ export const SCRIPT = `
       var sentText;
       if (!pr.sent) sentText = "(no request captured)";
       else if (pr.sent.payload && pr.sent.payload.__truncated) sentText = "⚠ truncated (" + pr.sent.payload.bytes + " bytes)";
-      else sentText = get(pr.sent.payload, ["data", "context", "text"]) || "";
+      else sentText = formatRequest(get(pr.sent.payload, ["data"]));
       var recvBlock = "(awaiting response…)";
       if (pr.received) {
         var rp = pr.received.payload;
