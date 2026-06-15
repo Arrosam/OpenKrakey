@@ -51,7 +51,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { formatRequest } from "../../public_plugin/inspector/page.format";
+import { formatRequest, chooseSent } from "../../public_plugin/inspector/page.format";
 
 const MSG_HEADER = (n: number) => `— messages (${n}) —`;
 const TOOL_HEADER = (n: number) => `— tools (${n}) —`;
@@ -703,4 +703,156 @@ test("normalize: payload.data not an object (string) -> d={} -> fallback empty",
   // d must be an object; a string data falls back to {} per spec.
   assert.equal(formatRequest({ data: "nope" }, "readable"), "");
   assert.equal(formatRequest({ data: "nope" }, "raw"), "{}");
+});
+
+// ===========================================================================
+// chooseSent(current, incoming) — authoritative "sent" record selection
+// ===========================================================================
+//
+// The inspector pairs two "prompt.sent" records per beat by corrId: the
+// orchestrator's plain `llm.request` ({ data: { context, messages } }, NO
+// tools) and llm-core's `llm.request.sent` ({ data: { request: <LLMRequest> } },
+// WITH tools). They can arrive in EITHER order. chooseSent decides which record
+// stays the authoritative "sent" so the assembled one (carrying data.request)
+// is never overwritten by the plain one.
+//
+// A record is "assembled" IFF record.payload.data.request is truthy.
+// Decision order (returns the record to KEEP):
+//   1. incoming falsy        -> current   (don't drop a record for falsy incoming)
+//   2. current falsy         -> incoming  (first record wins by default)
+//   3. incoming assembled    -> incoming  (assembled always wins)
+//   4. current assembled     -> current   (never overwrite assembled with plain)
+//   5. both plain            -> incoming  (latest plain wins)
+//
+// Assertions use identity (assert.equal === Object.is for object refs): they
+// pin which RECORD OBJECT is returned, not a structural clone. The spec is pure
+// reference selection — chooseSent must return one of its two arguments.
+
+// PLAIN: orchestrator's llm.request — payload.data.request is ABSENT.
+const plain = (n: number) => ({
+  seq: n,
+  kind: "prompt.sent",
+  corrId: "c",
+  payload: { data: { context: { text: "ctx" }, messages: [] } },
+});
+
+// ASSEMBLED: llm-core's llm.request.sent — payload.data.request is TRUTHY.
+const asm = (n: number) => ({
+  seq: n,
+  kind: "prompt.sent",
+  corrId: "c",
+  payload: { data: { request: { system: "s", messages: [], tools: [{ name: "t" }] } } },
+});
+
+// --- positive: bootstrapping (current falsy) -> incoming wins (rule 2) -----
+
+test("chooseSent: current undefined, incoming plain -> incoming", () => {
+  const incoming = plain(1);
+  assert.equal(chooseSent(undefined, incoming), incoming);
+});
+
+test("chooseSent: current undefined, incoming assembled -> incoming", () => {
+  const incoming = asm(1);
+  assert.equal(chooseSent(undefined, incoming), incoming);
+});
+
+// --- positive: assembled wins over plain regardless of arrival order ------
+
+test("chooseSent: current plain, incoming assembled -> incoming (assembled wins, rule 3)", () => {
+  const current = plain(1);
+  const incoming = asm(2);
+  assert.equal(chooseSent(current, incoming), incoming);
+});
+
+test("chooseSent: current assembled, incoming plain -> current (BUG FIX: plain must NOT overwrite assembled, rule 4)", () => {
+  // The reason chooseSent exists: the re-entrant sent event can land in either
+  // order. If the assembled record is already 'current', a later plain record
+  // must NOT clobber it (data.request would be lost).
+  const current = asm(1);
+  const incoming = plain(2);
+  assert.equal(chooseSent(current, incoming), current);
+});
+
+// --- state transition: latest-of-same-kind wins (rules 5 & 3) -------------
+
+test("chooseSent: current plain, incoming plain -> incoming (latest plain wins, rule 5)", () => {
+  const current = plain(1);
+  const incoming = plain(2);
+  assert.equal(chooseSent(current, incoming), incoming);
+});
+
+test("chooseSent: current assembled, incoming assembled -> incoming (latest assembled wins, rule 3)", () => {
+  // incoming is assembled -> rule 3 fires before rule 4 is consulted.
+  const current = asm(1);
+  const incoming = asm(2);
+  assert.equal(chooseSent(current, incoming), incoming);
+});
+
+// --- negative / guard: falsy incoming must not drop the kept record (rule 1)
+
+test("chooseSent: current plain, incoming undefined -> current (don't drop for falsy incoming, rule 1)", () => {
+  const current = plain(1);
+  assert.equal(chooseSent(current, undefined), current);
+});
+
+test("chooseSent: current plain, incoming null -> current (null is falsy, rule 1)", () => {
+  const current = plain(1);
+  assert.equal(chooseSent(current, null), current);
+});
+
+test("chooseSent: current assembled, incoming undefined -> current (rule 1 before any kind check)", () => {
+  // Rule 1 short-circuits regardless of current's kind.
+  const current = asm(1);
+  assert.equal(chooseSent(current, undefined), current);
+});
+
+test("chooseSent: both falsy -> rule 1 returns current (undefined)", () => {
+  // incoming falsy -> return current; here current is also undefined.
+  assert.equal(chooseSent(undefined, undefined), undefined);
+});
+
+test("chooseSent: current null, incoming null -> rule 1 returns current (null)", () => {
+  // incoming falsy fires first (rule 1) -> returns current, which is null.
+  assert.equal(chooseSent(null, null), null);
+});
+
+// --- EDGE: "assembled" is defined purely by truthiness of data.request ----
+
+test("chooseSent EDGE: record with payload.data.request = {} counts as assembled and beats a plain current", () => {
+  // {} is truthy, so a record whose data.request is the empty object is
+  // 'assembled' and wins over a plain current via rule 3.
+  const current = plain(1);
+  const incoming = {
+    seq: 2,
+    kind: "prompt.sent",
+    corrId: "c",
+    payload: { data: { request: {} } },
+  };
+  assert.equal(chooseSent(current, incoming), incoming);
+});
+
+test("chooseSent EDGE: record whose payload.data lacks request counts as plain (latest plain wins, rule 5)", () => {
+  // payload.data = {} -> data.request is undefined (falsy) -> plain. Two plains
+  // -> rule 5 -> incoming.
+  const current = plain(1);
+  const incoming = {
+    seq: 2,
+    kind: "prompt.sent",
+    corrId: "c",
+    payload: { data: {} },
+  };
+  assert.equal(chooseSent(current, incoming), incoming);
+});
+
+test("chooseSent EDGE: assembled current vs plain-via-empty-data incoming -> current (rule 4 holds)", () => {
+  // incoming.payload.data = {} -> not assembled; current IS assembled ->
+  // rule 4 keeps current (the empty-data plain must not overwrite it).
+  const current = asm(1);
+  const incoming = {
+    seq: 2,
+    kind: "prompt.sent",
+    corrId: "c",
+    payload: { data: {} },
+  };
+  assert.equal(chooseSent(current, incoming), current);
 });
