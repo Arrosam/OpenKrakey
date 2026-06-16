@@ -107,9 +107,19 @@ function makeCtx(agentId, port){
     config: cfg,
     dataDir: agentDataDir,
     llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
-    setBlock: (b) => { blocks.set(b.id, b); },
+    setBlock: (b) => {
+      blocks.set(b.id, b);
+      // Surface the registered block (BLOCK_SET:<agent>:<json>) so a test can assert
+      // web's guidance block — id/label/priority + rendered text. render() is sync
+      // here; if a future block renders async, text is reported null (fine for web).
+      let text = null;
+      try { const r = b.render(); if (typeof r === "string") text = r; } catch {}
+      emit("BLOCK_SET:" + agentId + ":" + JSON.stringify({ id: b.id, label: b.label, priority: b.priority, text }));
+    },
     getBlock: (id) => blocks.get(id),
-    removeBlock: (id) => blocks.delete(id),
+    // Surface removals (BLOCK_REMOVED:<agent>:<id>) so a test can assert teardown
+    // drops the block. Preserve the contract return (true iff a block was removed).
+    removeBlock: (id) => { const had = blocks.delete(id); emit("BLOCK_REMOVED:" + agentId + ":" + id); return had; },
     listBlocks: () => [...blocks.values()].map((b) => ({ id: b.id, priority: b.priority })),
     log: { info: () => {}, warn: () => {}, error: () => {} },
     print: (t) => { emit("PRINT:" + t); },
@@ -638,6 +648,59 @@ test("web: registers a 'web.send_message' chat tool (ToolDef with a string text 
     assert.ok(
       props && props.text && props.text.type === "string",
       "the tool takes a string `text` parameter",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: contributes a guidance context block stating the monologue rule + naming web.send_message", async () => {
+  // The send tool gives the LLM the MECHANISM to speak; this block gives it the RULE.
+  // Structural (offline) check: web must put the speak-vs-think rule into the composed
+  // prompt — not rely solely on the tool description — so a real model is far likelier
+  // to call web.send_message instead of "replying" in plain text (which web renders to
+  // no one). It can NOT prove a live model obeys the rule; that needs a reachable LLM.
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_SET:alice:"))),
+      "web must register a context block via ctx.setBlock",
+    );
+    const block = JSON.parse(
+      c.lines.find((l) => l.startsWith("BLOCK_SET:alice:"))!.slice("BLOCK_SET:alice:".length),
+    );
+
+    // web's OWN block (namespaced id), placed just BELOW persona's stable 10000 so
+    // persona stays the top cache-prefix, but well above any volatile content.
+    assert.match(block.id, /^web\./, "the block id is web-namespaced (e.g. web.guidance)");
+    assert.ok(
+      block.priority < 10000,
+      "priority must sit BELOW persona's stable 10000 so persona stays the prompt-cache prefix on top (got " + block.priority + ")",
+    );
+    assert.ok(
+      block.priority >= 1000,
+      "but it is a high/stable priority, not buried among volatile blocks (got " + block.priority + ")",
+    );
+
+    // The rendered guidance must (a) name the explicit send tool and (b) state the
+    // monologue rule: a plain reply is private / delivered to no one.
+    assert.ok(typeof block.text === "string" && block.text.length > 0, "the block renders non-empty guidance text");
+    assert.match(block.text, /web\.send_message/, "the guidance names the web.send_message tool");
+    assert.match(block.text, /monologue/i, "the guidance states the reply-is-a-monologue rule");
+    assert.match(
+      block.text,
+      /private|no one|never|silen/i,
+      "the guidance must make clear a plain reply is NOT delivered to the user",
+    );
+
+    // Symmetry: the block is registered in setup and REMOVED on teardown.
+    c.send("down alice");
+    assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
+    assert.ok(
+      c.lines.includes("BLOCK_REMOVED:alice:" + block.id),
+      "teardown must remove web's guidance block; saw " +
+        JSON.stringify(c.lines.filter((l) => l.startsWith("BLOCK_REMOVED:"))),
     );
   } finally {
     await c.close();
