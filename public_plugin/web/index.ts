@@ -67,7 +67,7 @@ const createWeb: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "web", version: "0.1.0" },
+    manifest: { id: "web", version: "0.1.0", requires: ["llm.register_tool"] },
 
     async setup(ctx: PluginContext): Promise<void> {
       // Destructure the only ctx members the long-lived closures need, so the rest
@@ -122,8 +122,10 @@ const createWeb: PluginFactory = (): Plugin => {
       reg = r;
       addReg(r);
 
-      // Deliver an agent message to this agent's browser clients (persist + stream).
-      const deliver = (text: string): void => {
+      // Stream an agent message to THIS agent's browser clients (persist + broadcast).
+      // Named distinctly from r.deliver (the opposite-direction INPUT path: emit
+      // input.message + wake the beat) so the two can't be confused in a later edit.
+      const streamAgentMessage = (text: string): void => {
         r.store.append({ role: "agent", text, at: Date.now() });
         broadcast(r, { type: "output", text });
       };
@@ -139,12 +141,15 @@ const createWeb: PluginFactory = (): Plugin => {
         if (typeof text !== "string" || text.length === 0) {
           throw new Error("web.send_message: params must be { text: non-empty string }");
         }
-        deliver(text);
+        streamAgentMessage(text);
         return { delivered: true };
       });
 
-      // Declare the chat tool so the LLM can call it. Best-effort: if no tool registry
-      // is present (no llm-core), the input/output plumbing still works.
+      // Declare the chat tool so the LLM can call it. Since web.send_message is now web's
+      // ONLY path to the browser, the manifest `requires: ["llm.register_tool"]` makes the
+      // loader fail the agent LOUDLY if the tool registry (llm-core) isn't loaded/ordered
+      // before web — instead of a misordered config silently muting the agent. The
+      // try/catch below is then just defensive (e.g. a malformed-ToolDef rejection).
       const sendTool: ToolDef = {
         name: SEND_MESSAGE_ACTION,
         description:
@@ -198,6 +203,9 @@ const createWeb: PluginFactory = (): Plugin => {
     teardown(): void {
       for (const off of unsubs) off();
       unsubs = [];
+      // Note: offSend unregisters the web.send_message ACTION, but the ToolDef stays in
+      // llm-core's per-Agent registry — there is no llm.unregister_tool, and llm-core
+      // clears its whole tool map on its own teardown. The asymmetry is intentional.
       if (reg) {
         // Stop the async append chain, then synchronously rewrite the file from the
         // in-memory transcript — compacting it to <= MAX_TRANSCRIPT entries and baking
