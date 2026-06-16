@@ -15,8 +15,8 @@
  *         (channel "web", meta.msgId=id) + clock.fire_now on THAT agent's bus.
  *         empty text -> 400; unknown id -> 404.
  *     - GET  /api/agents/:id/stream    -> SSE; first event { type:"output", text:<greeting> }
- *         then { type:"output", text } per output.message on that agent's bus, and
- *         { type:"status", id, status:"sent"|"read" } per message lifecycle. unknown id -> 404.
+ *         then { type:"output", text } per web.send_message tool call dispatched to that
+ *         agent, and { type:"status", id, status:"sent"|"read" } per message lifecycle. unknown id -> 404.
  *   sent = appended to the queue (POST). read = processed: flipped when llm.return
  *   fires on that agent's bus. R6: an agent's stream carries ONLY its own events.
  *   Lifecycle: first setup binds the server; last teardown closes it (port freed).
@@ -24,7 +24,7 @@
  * Driven END-TO-END in a CHILD process: the child builds N per-Agent instances
  * sharing the hub on an EPHEMERAL port (first agent config.port=0), reports the
  * bound port, observes each agent's bus (GOT_INPUT/FIRED), and runs a stdin command
- * loop (out/return/down/quit) so the parent can emit output.message / llm.return on
+ * loop (out/raw/return/down/quit) so the parent can invoke web.send_message / emit llm.return on
  * a chosen agent's bus while driving the REAL server over HTTP (fetch + SSE).
  */
 import { test } from "node:test";
@@ -44,6 +44,9 @@ const PLUGIN_URL = pathToFileURL(
   path.resolve(REPO, "public_plugin", "web", "index.ts"),
 ).href;
 
+/** The chat-tool action the agent invokes to speak to the web channel. */
+const SEND_ACTION = "web.send_message";
+
 let TMP: string;
 test.before(() => {
   TMP = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-web-"));
@@ -60,7 +63,8 @@ test.after(() => {
 // Child harness: builds N web-plugin instances sharing the module hub, reports
 // the bound port (PORT:<n>), echoes each agent's input.message (GOT_INPUT:<id>:<json>)
 // and fire_now (FIRED:<id>), and runs a stdin command loop:
-//   out <id> <text>   -> emit output.message{text} on <id>'s bus
+//   out <id> <text>   -> invoke web.send_message{text} (the agent's explicit send) on <id>'s bus
+//   raw <id> <text>   -> emit a bare output.message{text} (the monologue hook; web ignores it)
 //   req <id> <reqId>  -> emit llm.request{id:reqId} on <id>'s bus (a beat's request)
 //   ret <id> <reqId>  -> emit llm.return{id:reqId} on <id>'s bus (that request's return)
 //   down <id>         -> teardown that agent's instance (TORE_DOWN:<id>)
@@ -81,6 +85,9 @@ function makeCtx(agentId, port){
   const blocks = new Map();
   sys.actions.register(${JSON.stringify(Actions.CLOCK_FIRE_NOW)}, async () => { emit("FIRED:" + agentId); });
   sys.events.on(${JSON.stringify(Events.INPUT_MESSAGE)}, (p) => { emit("GOT_INPUT:" + agentId + ":" + JSON.stringify(p)); });
+  // Mock the tool registry (llm-core's llm.register_tool action) so web can declare
+  // its chat tool; surface the registered ToolDef so a test can assert it.
+  sys.actions.register("llm.register_tool", async (def) => { emit("TOOL_REGISTERED:" + agentId + ":" + JSON.stringify(def)); return true; });
   // PER-AGENT dataDir: each agent gets its OWN isolated subdir under WEB_DATADIR.
   // This (a) isolates one agent's persisted transcript from another's (R6), and
   // (b) lets a SECOND child process reuse the same WEB_DATADIR to load an agent's
@@ -129,11 +136,25 @@ rl.on("line", async (line) => {
   const sp = t.indexOf(" ");
   const op = sp === -1 ? t : t.slice(0, sp);
   const rest = sp === -1 ? "" : t.slice(sp + 1);
-  if (op === "out") {
-    const c = rest.indexOf(" ");
-    const id = rest.slice(0, c);
-    const text = rest.slice(c + 1);
-    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
+  if (op === "out" || op === "raw") {
+    // Shared parse, guarded like req/ret: "<id> <text>"; a missing text -> "".
+    const sp2 = rest.indexOf(" ");
+    const id = sp2 === -1 ? rest : rest.slice(0, sp2);
+    const text = sp2 === -1 ? "" : rest.slice(sp2 + 1);
+    if (op === "out") {
+      // The agent speaks ONLY by invoking its explicit chat tool — the orchestrator
+      // dispatches a web.send_message tool call to this action on the agent's bus.
+      // Surface (don't swallow) a send error so a real failure isn't an opaque timeout.
+      instances[id] &&
+        instances[id].sys.actions
+          .invoke(${JSON.stringify(SEND_ACTION)}, { text })
+          .catch((e) => emit("SEND_ERROR:" + id + ":" + String(e && e.message ? e.message : e)));
+    } else {
+      // A bare output.message on the bus — the LLM's private monologue hook. web must
+      // IGNORE it for display now (decoupling): it must NOT reach the browser stream.
+      instances[id] &&
+        instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
+    }
   } else if (op === "req") {
     const s2 = rest.indexOf(" ");
     const id = s2 === -1 ? rest : rest.slice(0, s2);
@@ -560,6 +581,64 @@ test("web: SSE to an unknown agent id -> 404", async () => {
     assertUp(c);
     const res = await fetch(api(c, "/api/agents/ghost/stream"));
     assert.equal(res.status, 404);
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Scenario 3b — monologue decoupling + chat-tool registration
+//   web renders to the browser ONLY via the explicit web.send_message tool; a bare
+//   output.message (the LLM monologue hook llm-core still emits) must be IGNORED.
+// ===========================================================================
+
+test("web: a bare output.message (the LLM monologue) is NOT streamed to the browser", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const a = await openSSE(c, "alice");
+    await waitEvents(a.events, (e) => e.some((x) => x.type === "output")); // greeting
+
+    // The monologue hook fires on the bus, but web is decoupled from it now.
+    c.send("raw alice MONOLOGUE-GHOST");
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(
+      !a.events.some((x) => x.type === "output" && x.text === "MONOLOGUE-GHOST"),
+      "a bare output.message must NOT reach the browser stream (web no longer renders it)",
+    );
+
+    // ...but an explicit web.send_message DOES reach the stream.
+    c.send("out alice REAL-SEND");
+    assert.ok(
+      await waitEvents(a.events, (e) => e.some((x) => x.type === "output" && x.text === "REAL-SEND")),
+      "an explicit web.send_message must reach the browser stream",
+    );
+    a.close();
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: registers a 'web.send_message' chat tool (ToolDef with a string text param)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("TOOL_REGISTERED:alice:"))),
+      "web must declare a tool via llm.register_tool",
+    );
+    const line = c.lines.find((l) => l.startsWith("TOOL_REGISTERED:alice:"))!;
+    const def = JSON.parse(line.slice("TOOL_REGISTERED:alice:".length));
+    assert.equal(def.name, "web.send_message", "the tool is named web.send_message");
+    assert.ok(
+      typeof def.description === "string" && def.description.length > 0,
+      "the tool carries a description for the LLM",
+    );
+    const props = def.parameters && def.parameters.properties;
+    assert.ok(
+      props && props.text && props.text.type === "string",
+      "the tool takes a string `text` parameter",
+    );
   } finally {
     await c.close();
   }

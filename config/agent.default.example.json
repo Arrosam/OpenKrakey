@@ -3,14 +3,11 @@
   "plugins": [
     "history",
     "llm-core",
-    "notes",
     "persona",
-    "toolbox",
     "web"
   ],
   "privatePlugins": [
-    "history",
-    "notes"
+    "history"
   ],
   "config": {
     "persona": {
