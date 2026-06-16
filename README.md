@@ -37,7 +37,7 @@ npm start                                     # 启动所有 agents/*/config.jso
 启动后打开浏览器到 `http://localhost:7717` 即可与各 agent 对话（每个 agent 独立会话、消息有 sent/read 状态）。
 
 MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份块）· `history`（对话记忆，重启不丢）·
-`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态）· `notes`（持久笔记工具）· `toolbox`（时间 + LLM 自调节奏）。
+`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态；仅在 LLM 显式调用 `web.send_message` 工具时才发消息——LLM 的 output.message 独白不再自动推送）。
 把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本。
 
 ## 状态
