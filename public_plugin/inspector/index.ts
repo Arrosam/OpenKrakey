@@ -41,10 +41,12 @@ const KIND: { [eventName: string]: string } = {
   [Events.CLOCK_TICK]: "tick",
   [Events.PROMPT_GATHER]: "gather",
   [Events.LLM_REQUEST]: "prompt.sent",
+  [Events.LLM_REQUEST_SENT]: "prompt.sent",
   [Events.LLM_RETURN]: "prompt.received",
   [Events.INPUT_MESSAGE]: "input",
   [Events.OUTPUT_MESSAGE]: "output",
   [Events.TOOL_RESULT]: "tool.result",
+  [Events.CONVERSATION_SNAPSHOT]: "conversation",
   [Events.LOG]: "log",
 };
 

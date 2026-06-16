@@ -31,6 +31,9 @@ const createPersona: PluginFactory = (): Plugin => {
       const { text, priority } = (ctx.config ?? {}) as PersonaConfig;
       ctx.setBlock({
         id: BLOCK_ID,
+        // Nominate the block's label so the orchestrator encapsulates this block
+        // as <persona>…</persona> when it composes the context.
+        label: BLOCK_ID,
         priority: priority ?? DEFAULT_PRIORITY,
         render: () => text ?? DEFAULT_TEXT,
       });

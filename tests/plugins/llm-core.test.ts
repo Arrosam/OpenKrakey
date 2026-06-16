@@ -11,6 +11,7 @@ import type {
   LLMRequest,
   LLMResponse,
   Capability,
+  Message,
 } from "../../contracts/llm";
 import type { Plugin, PluginContext } from "../../contracts/plugin";
 import type { ContextBlock } from "../../contracts/context";
@@ -196,9 +197,20 @@ function settle(ms = 20): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Build an llm.request Request envelope. */
-function llmRequest(id: string, text: string) {
-  return { id, at: Date.now(), data: { context: { text } } };
+/**
+ * Build an llm.request Request envelope.
+ *
+ * `messages` is the conversation now carried ON THE EVENT (Request<{ context;
+ * messages }>). When omitted the `messages` key is left OFF the payload entirely
+ * (the spec's "empty or absent" branch), so the no-arg form exercises the
+ * single-user-message fallback. Pass an array to drive the messages branch.
+ */
+function llmRequest(id: string, text: string, messages?: Message[]) {
+  const data: { context: { text: string }; messages?: Message[] } = {
+    context: { text },
+  };
+  if (messages !== undefined) data.messages = messages;
+  return { id, at: Date.now(), data };
 }
 
 // ===========================================================================
@@ -660,4 +672,433 @@ test("config: with neither set, temperature and maxTokens are absent on the requ
   await settle();
   assert.equal(com.calls[0].temperature, undefined);
   assert.equal(com.calls[0].maxTokens, undefined);
+});
+
+// ===========================================================================
+// 11. messages carried ON THE EVENT -> system + messages[] (no conversation action)
+// ===========================================================================
+//
+// The conversation now rides the `llm.request` payload itself
+// (Request<{ context: ComposedContext; messages: Message[] }>). llm-core no longer
+// reads any conversation action — it merely TRANSPORTS the event's `messages` onto
+// the chat request.
+//
+//  • messages is a NON-EMPTY array -> chat request gets `system = context.text`
+//    and `messages` deep-equal to the event's messages (verbatim, untouched).
+//  • messages is EMPTY or ABSENT -> single-user-message fallback
+//    (`messages:[{role:"user", content: context.text}]`) and NO `system` key.
+//
+// No conversation-history action is registered anywhere — that action no longer exists.
+
+// ---- positive: non-empty messages branch -----------------------------------
+
+test("messages: a non-empty event array becomes the chat messages, context.text becomes system", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [
+    { role: "user", content: "hi", name: "web" },
+    { role: "assistant", content: "yo" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYSTEM-CTX", convo));
+  await settle();
+  assert.equal(com.calls.length, 1);
+  assert.equal(
+    com.calls[0].system,
+    "SYSTEM-CTX",
+    "composed context rides the system field when messages are supplied",
+  );
+  assert.deepEqual(
+    com.calls[0].messages,
+    [
+      { role: "user", content: "hi", name: "web" },
+      { role: "assistant", content: "yo" },
+    ],
+    "the event's messages are transported verbatim onto the chat request",
+  );
+});
+
+test("messages: the event array is used VERBATIM, not derived from context.text", async (t) => {
+  // context.text differs from every message's content: llm-core must NOT inject a
+  // user turn built from context.text when messages are present — it only sets system.
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [{ role: "user", content: "actual turn", name: "cli" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "DIFFERENT-CONTEXT", convo));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [
+    { role: "user", content: "actual turn", name: "cli" },
+  ]);
+  assert.equal(com.calls[0].system, "DIFFERENT-CONTEXT");
+});
+
+test("messages: tool turns keep toolCallId/name and assistant toolCalls pass through verbatim", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "time.now", arguments: {} }],
+    },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "time.now", arguments: {} }],
+    },
+    { role: "tool", content: '{"iso":"x"}', toolCallId: "c1", name: "time.now" },
+  ]);
+  assert.equal(com.calls[0].system, "CTX");
+});
+
+// ---- BVA: single-element messages array (boundary between empty and many) ----
+
+test("messages: a single-element array is the boundary non-empty case (system set)", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const convo: Message[] = [{ role: "user", content: "only" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "only" }]);
+  assert.equal(com.calls[0].system, "CTX", "one supplied turn already counts as non-empty");
+});
+
+// ---- fallback: empty / absent messages -> single user message, NO system -----
+
+test("messages: an EMPTY array falls back to a single user message with NO system key", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", []));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "the system key must be OMITTED (not just undefined) when there are no messages",
+  );
+});
+
+test("messages: an ABSENT messages key falls back to a single user message with NO system key", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  // llmRequest with no `messages` arg leaves the key off the payload entirely.
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  await settle();
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "the system key must be OMITTED when messages are absent",
+  );
+});
+
+// ---- negative / error-guessing: messages present but not an array ------------
+
+test("messages: a non-array `messages` is treated as absent (single-user fallback, no throw)", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  // `messages` is neither an array nor absent — it is not a "non-empty array",
+  // so the spec's fallback branch applies; the request must not throw.
+  const bad = { id: "1", at: Date.now(), data: { context: { text: "CTX" }, messages: "nope" } };
+  assert.doesNotThrow(() => events.emit(Events.LLM_REQUEST, bad));
+  await settle();
+  assert.equal(com.calls.length, 1, "a non-array messages must not block the chat call");
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "system"),
+    false,
+    "no system when messages is not a non-empty array",
+  );
+});
+
+// ---- combined flow: messages + tools + temperature + maxTokens together ------
+
+test("messages: event messages + registered tools + temperature + maxTokens all flow on one request", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, {
+    config: { temperature: 0.7, maxTokens: 128 },
+    llm: library([com]),
+  });
+  await actions.invoke("llm.register_tool", { name: "t1", description: "d", parameters: { type: "object" } });
+  const convo: Message[] = [
+    { role: "user", content: "q", name: "web" },
+    { role: "assistant", content: "a" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "SYS", convo));
+  await settle();
+  assert.equal(com.calls.length, 1);
+  const req = com.calls[0];
+  assert.equal(req.system, "SYS", "context.text -> system");
+  assert.deepEqual(
+    req.messages,
+    [
+      { role: "user", content: "q", name: "web" },
+      { role: "assistant", content: "a" },
+    ],
+    "the event's messages are carried through alongside tools/temp/maxTokens",
+  );
+  assert.ok(Array.isArray(req.tools));
+  assert.equal(req.tools!.length, 1);
+  assert.equal(req.tools![0].name, "t1");
+  assert.equal(req.temperature, 0.7);
+  assert.equal(req.maxTokens, 128);
+});
+
+test("messages: success with event messages still emits output.message from the response content", async (t) => {
+  // The assistant reply text comes from the RESPONSE, independent of the request's
+  // messages — confirm output.message rides response.content, not the convo.
+  const com = chatCommunicator({ response: { content: "assistant says" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const outs = collect(events, Events.OUTPUT_MESSAGE) as any[];
+  const convo: Message[] = [{ role: "user", content: "hi", name: "web" }];
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
+  await settle();
+  assert.equal(outs.length, 1);
+  assert.equal(outs[0].data.text, "assistant says");
+});
+
+// ===========================================================================
+// 12. llm.request.sent — the EXACT dispatched request, mirrored on the bus
+// ===========================================================================
+//
+// SPEC: on EVERY real dispatch (a chat-capable communicator EXISTS and chat() is
+// invoked), llm-core emits `Events.LLM_REQUEST_SENT` carrying the assembled
+// LLMRequest — surfaced so observers (the inspector) can show what was actually
+// sent. Envelope is Request<{ request: LLMRequest }>:
+//
+//     { id: <the llm.request id>, at: <number>, data: { request: chatReq } }
+//
+// Invariants under test:
+//   • data.request DEEP-EQUALS the very object handed to communicator.chat(...).
+//   • id is the SAME corrId as the llm.request (and the eventual llm.return).
+//   • emitted on success, on the fallback (no event messages) path, AND when
+//     chat() later REJECTS (the request was still sent).
+//   • NOT emitted when there is no chat-capable communicator (early ok:false
+//     return that dispatches nothing).
+//
+// `data.request` is asserted against the captured `chat` argument by deepEqual so
+// the test is agnostic to whether llm-core forwards the same reference or a clone
+// and to the field ORDER of the assembled request.
+
+/** Collect llm.request.sent payloads, typed for the Request<{request}> envelope. */
+function collectSent(events: Harness["events"]): Array<{
+  id: string;
+  at: number;
+  data: { request: LLMRequest };
+}> {
+  return collect(events, Events.LLM_REQUEST_SENT) as Array<{
+    id: string;
+    at: number;
+    data: { request: LLMRequest };
+  }>;
+}
+
+// ---- positive: full assembly (messages + tools + temperature + maxTokens) ----
+
+test("request.sent: data.request deep-equals the chat() arg; id matches; carries system/messages/tools/temperature/maxTokens", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events, actions } = await setupPlugin(t, {
+    config: { temperature: 0.7, maxTokens: 128 },
+    llm: library([com]),
+  });
+  const sent = collectSent(events);
+  await actions.invoke("llm.register_tool", {
+    name: "t1",
+    description: "d",
+    parameters: { type: "object" },
+  });
+  const convo: Message[] = [
+    { role: "user", content: "q", name: "web" },
+    { role: "assistant", content: "a" },
+  ];
+  events.emit(Events.LLM_REQUEST, llmRequest("req-42", "SYS", convo));
+  await settle();
+
+  // the provider was actually called…
+  assert.equal(com.calls.length, 1, "chat() must be invoked exactly once");
+  // …and exactly one mirror event fired with the matching corrId.
+  assert.equal(sent.length, 1, "exactly one llm.request.sent");
+  assert.equal(sent[0].id, "req-42", "corrId equals the llm.request id");
+  assert.equal(typeof sent[0].at, "number", "envelope carries a numeric at");
+
+  // The mirrored request IS the dispatched request.
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "data.request must deep-equal the object passed to communicator.chat(...)",
+  );
+
+  // And it is the fully-assembled request, as the spec enumerates.
+  const req = sent[0].data.request;
+  assert.equal(req.system, "SYS", "context.text rides system when messages supplied");
+  assert.deepEqual(
+    req.messages,
+    [
+      { role: "user", content: "q", name: "web" },
+      { role: "assistant", content: "a" },
+    ],
+    "event messages are mirrored verbatim",
+  );
+  assert.ok(Array.isArray(req.tools), "tools present");
+  assert.equal(req.tools!.length, 1);
+  assert.equal(req.tools![0].name, "t1");
+  assert.equal(req.temperature, 0.7);
+  assert.equal(req.maxTokens, 128);
+});
+
+test("request.sent: id matches across the trio — llm.request.sent, llm.return and the request all share the corrId", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("corr-1", "CTX"));
+  await settle();
+  assert.equal(sent.length, 1);
+  assert.equal(replies.length, 1);
+  assert.equal(sent[0].id, "corr-1");
+  assert.equal(replies[0].id, "corr-1");
+  assert.equal(sent[0].id, replies[0].id, "sent and return share the same corrId");
+});
+
+// ---- fallback: no event messages -> single-user request, NO system -----------
+
+test("request.sent: fallback path mirrors {messages:[{role:'user',content:context.text}]} with no system", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  // no `messages` arg -> fallback branch
+  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
+  await settle();
+
+  assert.equal(com.calls.length, 1);
+  assert.equal(sent.length, 1);
+
+  // mirror equals the dispatched fallback request…
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "fallback request must be mirrored exactly as dispatched",
+  );
+  // …which is the single-user message and carries NO system key.
+  assert.deepEqual(sent[0].data.request.messages, [{ role: "user", content: "CTX" }]);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(sent[0].data.request, "system"),
+    false,
+    "no system key on the fallback request (mirror must reflect the omission)",
+  );
+});
+
+// ---- rejection: the request was still SENT -----------------------------------
+
+test("request.sent: STILL emitted when chat() rejects (alongside the ok:false llm.return)", async (t) => {
+  const com = chatCommunicator({ reject: new Error("boom") });
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("4", "CTX"));
+  await settle();
+
+  // chat was attempted, the mirror fired, the request still failed.
+  assert.equal(com.calls.length, 1, "chat() was invoked");
+  assert.equal(sent.length, 1, "request.sent fires even though chat() rejected");
+  assert.equal(sent[0].id, "4", "mirror carries the corrId of the failed beat");
+  assert.deepEqual(
+    sent[0].data.request,
+    com.calls[0],
+    "the mirrored request equals the one that was dispatched-then-rejected",
+  );
+
+  // and the failure is still reported on llm.return.
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "4");
+  assert.equal(replies[0].ok, false);
+});
+
+// ---- negative: no chat-capable communicator -> nothing dispatched ------------
+
+test("request.sent: NOT emitted when there is no chat-capable communicator (embed-only library)", async (t) => {
+  const { events } = await setupPlugin(t, { llm: library([embedOnlyCommunicator()]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("9", "CTX"));
+  await settle();
+
+  assert.equal(sent.length, 0, "no dispatch -> no llm.request.sent");
+  // the beat still resolves as a failure on llm.return.
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "9");
+  assert.equal(replies[0].ok, false);
+});
+
+test("request.sent: NOT emitted when the chosen communicator lacks a chat() method", async (t) => {
+  // withCapability('chat') names it, but there is no chat method to dispatch to,
+  // so nothing is sent and no mirror event must fire.
+  const { events } = await setupPlugin(t, { llm: library([noChatCommunicator("broken")]) });
+  const sent = collectSent(events);
+  const replies = collect(events, Events.LLM_RETURN) as any[];
+  events.emit(Events.LLM_REQUEST, llmRequest("5", "CTX"));
+  await settle();
+
+  assert.equal(sent.length, 0, "no chat() to dispatch to -> no llm.request.sent");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].id, "5");
+  assert.equal(replies[0].ok, false);
+});
+
+test("request.sent: NOT emitted for a malformed llm.request (nothing is dispatched)", async (t) => {
+  // A payload missing data.context is the spec's ignore case: no chat call, hence
+  // no request was sent and no mirror event must fire.
+  const com = chatCommunicator({});
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  assert.doesNotThrow(() =>
+    events.emit(Events.LLM_REQUEST, { id: "1", at: 0, data: {} }),
+  );
+  await settle();
+  assert.equal(com.calls.length, 0, "malformed payload must not call chat");
+  assert.equal(sent.length, 0, "malformed payload must not emit llm.request.sent");
+});
+
+// ---- ordering / multiplicity: one mirror per real dispatch -------------------
+
+test("request.sent: exactly one mirror per dispatch across a failing-then-succeeding pair", async (t) => {
+  // The listener survives a rejection; each real dispatch emits its own mirror,
+  // each tagged with that beat's corrId.
+  let n = 0;
+  const com: ChatStub = {
+    name: "flaky",
+    provider: "stub",
+    model: "m",
+    capabilities: ["chat"],
+    input: ["text"],
+    output: ["text"],
+    calls: [],
+    chat(req: LLMRequest) {
+      com.calls.push(req);
+      n += 1;
+      if (n === 1) return Promise.reject(new Error("first-fails"));
+      return Promise.resolve({ content: "recovered" });
+    },
+  };
+  const { events } = await setupPlugin(t, { llm: library([com]) });
+  const sent = collectSent(events);
+  events.emit(Events.LLM_REQUEST, llmRequest("a", "CTX1"));
+  await settle();
+  events.emit(Events.LLM_REQUEST, llmRequest("b", "CTX2"));
+  await settle();
+
+  assert.equal(com.calls.length, 2, "both beats dispatched");
+  assert.equal(sent.length, 2, "one mirror per dispatch (the rejection still sent)");
+  assert.deepEqual(
+    sent.map((s) => s.id),
+    ["a", "b"],
+    "mirrors are tagged with each beat's corrId, in order",
+  );
+  // each mirror equals the request dispatched on that beat.
+  assert.deepEqual(sent[0].data.request, com.calls[0]);
+  assert.deepEqual(sent[1].data.request, com.calls[1]);
 });

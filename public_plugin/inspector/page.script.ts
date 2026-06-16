@@ -6,6 +6,8 @@
  * /snapshot then live-streams /stream over SSE, and renders the four panels.
  * page.ts re-wraps it in the <script> tags so the assembled PAGE is byte-identical.
  */
+import { formatRequest, chooseSent } from "./page.format";
+
 export const SCRIPT = `
 (function () {
   "use strict";
@@ -51,6 +53,8 @@ export const SCRIPT = `
     }
     return cur;
   }
+  var formatRequest = ${formatRequest.toString()};
+  var chooseSent = ${chooseSent.toString()};
 
   // ---- token-gated fetch ----
   function api(path) {
@@ -61,6 +65,7 @@ export const SCRIPT = `
 
   // ---- per-selection state ----
   var state = null; // { id, lastSeq, records, es, prompts, ... }
+  var promptView = "readable";
 
   function freshState(id) {
     return {
@@ -84,6 +89,7 @@ export const SCRIPT = `
     "input": "k-input",
     "output": "k-output",
     "tool.result": "k-tool",
+    "conversation": "k-conversation",
     "log": "k-log"
   };
 
@@ -92,6 +98,14 @@ export const SCRIPT = `
     if (p && p.__truncated) return "⚠ truncated (" + p.bytes + " bytes)";
     switch (rec.kind) {
       case "prompt.sent": {
+        var rq = get(p, ["data", "request"]);
+        if (rq) {
+          var mc = Array.isArray(rq.messages) ? rq.messages.length : 0;
+          var tc = Array.isArray(rq.tools) ? rq.tools.length : 0;
+          return "messages=" + mc + (tc ? (", tools=" + tc) : "");
+        }
+        var ms = get(p, ["data", "messages"]);
+        if (Array.isArray(ms)) return "messages=" + ms.length;
         var t = get(p, ["data", "context", "text"]);
         return t != null ? ("len=" + String(t).length) : "(context)";
       }
@@ -116,6 +130,7 @@ export const SCRIPT = `
       case "tick": return "seq=" + (get(p, ["data", "seq"]));
       case "gather": return "seq=" + (get(p, ["data", "seq"]));
       case "agent.start": return get(p, ["data", "agentId"]) || "";
+      case "conversation": { var msgs = get(p, ["data", "messages"]); return (Array.isArray(msgs) ? msgs.length : 0) + " turns"; }
       default: return "";
     }
   }
@@ -203,7 +218,7 @@ export const SCRIPT = `
       var sentText;
       if (!pr.sent) sentText = "(no request captured)";
       else if (pr.sent.payload && pr.sent.payload.__truncated) sentText = "⚠ truncated (" + pr.sent.payload.bytes + " bytes)";
-      else sentText = get(pr.sent.payload, ["data", "context", "text"]) || "";
+      else sentText = formatRequest(pr.sent.payload, promptView);
       var recvBlock = "(awaiting response…)";
       if (pr.received) {
         var rp = pr.received.payload;
@@ -310,7 +325,7 @@ export const SCRIPT = `
     // prompts pairing
     if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) {
       if (!s.prompts[rec.corrId]) { s.prompts[rec.corrId] = {}; s.promptOrder.push(rec.corrId); }
-      if (rec.kind === "prompt.sent") s.prompts[rec.corrId].sent = rec;
+      if (rec.kind === "prompt.sent") s.prompts[rec.corrId].sent = chooseSent(s.prompts[rec.corrId].sent, rec);
       else s.prompts[rec.corrId].received = rec;
       while (s.promptOrder.length > CAP_PROMPTS) {
         var drop = s.promptOrder.shift();
@@ -544,6 +559,20 @@ export const SCRIPT = `
       }
     });
   });
+
+  var pvToggle = document.getElementById("pvToggle");
+  if (pvToggle) {
+    pvToggle.addEventListener("click", function (e) {
+      var btn = e.target;
+      if (!btn || typeof btn.getAttribute !== "function") return;
+      var pv = btn.getAttribute("data-pv");
+      if (!pv || pv === promptView) return;
+      promptView = pv;
+      var bs = pvToggle.querySelectorAll(".pv-btn");
+      for (var i = 0; i < bs.length; i++) bs[i].classList.toggle("active", bs[i].getAttribute("data-pv") === pv);
+      if (state) renderPrompts(state);
+    });
+  }
 
   // ---- agent list (poll lightly so new agents appear) ----
   function loadAgents() {

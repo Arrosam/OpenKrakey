@@ -7,12 +7,11 @@
  *
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
  *     -> web: input.message Notify (channel "web") + clock.fire_now
- *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona 10000+
- *        on top, history 100 with the folded input) -> llm.request
- *     -> llm-core: chat({ messages:[{role:"user", content: context.text}], tools })
+ *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona -> <persona>) -> llm.request
+ *     -> llm-core: chat({ system:<persona>, messages:<conversation from history>, tools })
  *     -> stub server: FIRST call returns a time.now tool_call; orchestrator dispatches
- *        the tool -> tool.result -> history folds "assistant -> tool" + "tool -> {…}"
- *     -> LATER beat: context now carries the tool result -> chat #2+ -> "E2E-FINAL-REPLY"
+ *        the tool -> tool.result -> history records an assistant(toolCalls) turn + a tool turn
+ *     -> LATER beat -> chat #2+ (messages now carry those Hermes turns) -> "E2E-FINAL-REPLY"
  *     -> llm.return (ok + content) -> llm-core emits output.message
  *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser
  *
@@ -165,6 +164,7 @@ async function main() {
     id: "e2e-agent",
     intervalMs: 250,
     plugins: ["llm-core", "persona", "history", "web", "notes", "toolbox"],
+    privatePlugins: ["history"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
@@ -353,16 +353,18 @@ function result(): E2EResult {
   return RESULT!;
 }
 
-/** Concatenated text of messages[0].content across helper shapes. */
-function firstMessageText(reqBody: any): string {
-  const m0 = reqBody?.messages?.[0];
-  if (!m0) return "";
-  const c = m0.content;
+/** The system message content sent on a request (openai wire: role:'system'). */
+function systemText(reqBody: any): string {
+  const sys = (reqBody?.messages ?? []).find((m: any) => m?.role === "system");
+  const c = sys?.content;
   if (typeof c === "string") return c;
-  if (Array.isArray(c)) {
-    return c.map((p: any) => (typeof p === "string" ? p : p?.text ?? "")).join("\n");
-  }
+  if (Array.isArray(c)) return c.map((p: any) => (typeof p === "string" ? p : p?.text ?? "")).join("\n");
   return "";
+}
+
+/** All wire messages of a given role across one request. */
+function messagesOfRole(reqBody: any, role: string): any[] {
+  return (reqBody?.messages ?? []).filter((m: any) => m?.role === role);
 }
 
 /** Names of all tool defs sent on a request (openai wire: tools[].function.name). */
@@ -399,31 +401,34 @@ test("e2e/2: the stub LLM server received >= 2 chat requests (the beat loop turn
 });
 
 // ===========================================================================
-// Assertion 3 — request #1 composition: persona on top, history folded the input,
-// and the four MVP tool defs (toolbox + notes) are present.
+// Assertion 3 — composition: the wrapped persona rides `system`, the user input is
+// a real role:'user' turn tagged with its source channel, and the MVP tool defs ride.
 // ===========================================================================
 
-test("e2e/3: request #1 carries the persona block + the folded user line, plus the MVP tool defs", () => {
+test("e2e/3: persona rides `system`, the user input is a role:'user' turn with its source, plus the MVP tool defs", () => {
   const r = result();
   assert.ok(r.requests.length >= 1, "no chat request reached the server at all");
 
-  const text = firstMessageText(r.requests[0]);
-  assert.match(
-    text,
-    /PERSONA-MARK/,
-    "messages[0].content must contain the persona block text (priority 10000+, top of context)",
-  );
-  assert.match(
-    text,
-    /hello krakey/,
-    "messages[0].content must contain the folded user input (history block)",
-  );
-  assert.ok(
-    text.indexOf("PERSONA-MARK") < text.indexOf("hello krakey"),
-    "persona (priority 10000+) must be rendered above the history input line (priority 100)",
-  );
+  // The wrapped persona is present on request #1 — as the system message once a
+  // conversation exists, or as the fallback user message before any input lands.
+  const first = r.requests[0];
+  const personaRe = /<persona>\s*PERSONA-MARK\s*<\/persona>/;
+  const firstHasPersona =
+    personaRe.test(systemText(first)) ||
+    messagesOfRole(first, "user").some(
+      (m) => typeof m.content === "string" && personaRe.test(m.content),
+    );
+  assert.ok(firstHasPersona, "request #1 must carry the wrapped persona (system or fallback user message)");
 
-  const names = toolNames(r.requests[0]);
+  // The user input shows up as a real role:'user' turn in messages[] (Hermes), and
+  // its source channel is surfaced to the model via `name`.
+  const hello = r.requests
+    .flatMap((req) => messagesOfRole(req, "user"))
+    .find((m) => typeof m.content === "string" && m.content.includes("hello krakey"));
+  assert.ok(hello, "the user input must appear as a role:'user' turn in some request's messages[]");
+  assert.equal(hello.name, "web", "the user turn's source channel must be surfaced via name");
+
+  const names = toolNames(first);
   for (const expected of ["time.now", "clock.set_interval", "clock.set_default_interval", "note.save"]) {
     assert.ok(
       names.includes(expected),
@@ -433,25 +438,32 @@ test("e2e/3: request #1 carries the persona block + the folded user line, plus t
 });
 
 // ===========================================================================
-// Assertion 4 — tool-result folding: SOME later request's context shows the
-// time.now result line history recorded.
+// Assertion 4 — the tool round-trip lands in messages[] as an assistant(tool_calls)
+// turn + a matching role:'tool' result turn (history's Hermes folding).
 // ===========================================================================
 
-test("e2e/4: a later request's context shows the time.now tool result folded back in", () => {
+test("e2e/4: the tool round-trip folds back as an assistant(tool_calls) turn + a tool result turn", () => {
   const r = result();
-  assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the folded tool result");
+  assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the folded tool round");
 
-  const folded = r.requests.slice(1).some((req) => {
-    const text = firstMessageText(req);
-    const mentionsTool = text.includes("time.now");
-    const mentionsPayload =
-      /"?iso"?\s*[:=]/.test(text) || /epochMs/.test(text) || /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(text);
-    return mentionsTool && mentionsPayload;
-  });
-  assert.ok(
-    folded,
-    "no later request's messages[0].content contained the folded 'time.now' tool result (iso/epoch payload)",
-  );
+  const assistantToolCall = r.requests
+    .flatMap((req) => messagesOfRole(req, "assistant"))
+    .some(
+      (m) =>
+        Array.isArray(m.tool_calls) &&
+        m.tool_calls.some((tc: any) => tc?.function?.name === "time.now"),
+    );
+  assert.ok(assistantToolCall, "some request must carry an assistant turn with the time.now tool_call");
+
+  const toolTurn = r.requests
+    .flatMap((req) => messagesOfRole(req, "tool"))
+    .some((m) => {
+      const c = typeof m.content === "string" ? m.content : "";
+      const hasPayload =
+        /"?iso"?\s*[:=]/.test(c) || /epochMs/.test(c) || /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(c);
+      return typeof m.tool_call_id === "string" && hasPayload;
+    });
+  assert.ok(toolTurn, "some request must carry a role:'tool' turn (tool_call_id + the time.now payload)");
 });
 
 // ===========================================================================

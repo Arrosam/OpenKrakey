@@ -15,7 +15,7 @@ import type { Orchestrator } from "../../../contracts/orchestrator";
 import type { EventSystem, Unsub } from "../../../contracts/event-system";
 import type { Clock } from "../../../contracts/clock";
 import type { ContextBlock, ComposedContext } from "../../../contracts/context";
-import type { LLMResponse } from "../../../contracts/llm";
+import type { LLMResponse, Message } from "../../../contracts/llm";
 import { Actions, Events } from "../../../shared/actions";
 import type { Notify, Request, Reply } from "../../../shared/actions";
 import { consoleLogger, tagged } from "../../../shared/logging";
@@ -33,6 +33,8 @@ export function createOrchestrator(deps: {
   let beatQueued = false;
   let tickUnsub: Unsub | null = null;
   let returnUnsub: Unsub | null = null;
+  let snapshotUnsub: Unsub | null = null;
+  let pendingMessages: Message[] = [];   // captured from conversation.snapshot during the current beat's gather
   let clockUnsubs: Unsub[] = []; // CLOCK_* action registrations (while started)
   let seq = 0; // beat counter
   const log = tagged(deps.log ?? consoleLogger, "[orchestrator]");
@@ -44,17 +46,24 @@ export function createOrchestrator(deps: {
     const sorted = [...blocks.values()].sort((a, b) => b.priority - a.priority);
     // Render every block in ISOLATION: a block whose render() throws or rejects
     // degrades to "" for this beat (logged); it never drops the others or the beat.
+    // ENCAPSULATE each non-empty block in its label — `<label>…</label>`, where
+    // label = block.label ?? block.id — so every plugin's contribution is a bounded,
+    // labelled block. Empty/failed blocks contribute nothing; blocks join by a blank line.
     const parts = await Promise.all(
       sorted.map(async (b) => {
+        let text: string;
         try {
-          return await b.render();
+          text = await b.render();
         } catch (err) {
           log.warn(`block render failed: ${b.id}: ${err}`);
-          return "";
+          text = "";
         }
+        if (text === "") return "";
+        const label = b.label ?? b.id;
+        return `<${label}>\n${text}\n</${label}>`;
       }),
     );
-    return { text: parts.join("\n") };
+    return { text: parts.filter((p) => p !== "").join("\n\n") };
   }
 
   // ---- the beat ----
@@ -67,9 +76,13 @@ export function createOrchestrator(deps: {
     }
     try {
       const n = ++seq;
-      // Let plugins refresh their blocks synchronously before we compose.
+      // Reset so a beat with no snapshot emits messages:[] and stale turns never leak.
+      pendingMessages = [];
+      // Let plugins refresh their blocks AND let a conversation provider contribute
+      // its snapshot synchronously before we compose.
       const gather: Notify<{ seq: number }> = { at: Date.now(), data: { seq: n } };
       deps.events.events.emit(Events.PROMPT_GATHER, gather);
+      const messages = pendingMessages;   // the snapshot captured during this beat's gather
 
       const context = await compose();
       // compose() is async; if we were stopped mid-flight, emit nothing further.
@@ -77,10 +90,10 @@ export function createOrchestrator(deps: {
 
       // Request the LLM round-trip; do NOT await — the beat ends here. The reply
       // arrives later as LLM_RETURN. In Phase 0 nobody listens and that is fine.
-      const payload: Request<{ context: ComposedContext }> = {
+      const payload: Request<{ context: ComposedContext; messages: Message[] }> = {
         id: String(n),
         at: Date.now(),
-        data: { context },
+        data: { context, messages },
       };
       deps.events.events.emit(Events.LLM_REQUEST, payload);
     } catch (err) {
@@ -150,6 +163,13 @@ export function createOrchestrator(deps: {
     }
   }
 
+  function onSnapshot(payload: unknown): void {
+    // A conversation provider contributes wire-ready Message[]; capture the latest.
+    if (payload === null || typeof payload !== "object") return;
+    const msgs = (payload as Notify<{ messages?: unknown }>).data?.messages;
+    if (Array.isArray(msgs)) pendingMessages = msgs as Message[];
+  }
+
   // ---- clock-rhythm actions (registered while started) ----
   // Validate { ms: number } for the setters: a missing/non-object params or a
   // non-finite/non-positive ms REJECTS without touching the clock.
@@ -184,6 +204,7 @@ export function createOrchestrator(deps: {
       running = true;
       tickUnsub = deps.events.events.on(Events.CLOCK_TICK, () => onTick());
       returnUnsub = deps.events.events.on(Events.LLM_RETURN, (p) => onReturn(p));
+      snapshotUnsub = deps.events.events.on(Events.CONVERSATION_SNAPSHOT, (p) => onSnapshot(p));
       registerClockActions();
     },
 
@@ -195,6 +216,8 @@ export function createOrchestrator(deps: {
       tickUnsub = null;
       returnUnsub?.();
       returnUnsub = null;
+      snapshotUnsub?.();
+      snapshotUnsub = null;
       for (const unsub of clockUnsubs) unsub();
       clockUnsubs = [];
     },
