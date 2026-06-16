@@ -61,9 +61,10 @@ interface StubServer {
 
 async function startStubServer(): Promise<StubServer> {
   const requests: any[] = [];
-  // Count chat requests made AFTER the user message has landed, so the stub can drive a
-  // deterministic post-input sequence: think (monologue) -> speak (web.send_message tool).
-  let postInputBeats = 0;
+  // The agent SPEAKS (via the chat tool) exactly once. Gating on conversation STATE
+  // (below) instead of a beat counter keeps the stub robust to out-of-order / concurrent
+  // in-flight beats (the orchestrator beat ends at LLM_REQUEST emission, not at return).
+  let replied = false;
 
   const server = http.createServer((req, res) => {
     if (req.method !== "POST" || !req.url || !req.url.includes("/chat/completions")) {
@@ -82,19 +83,30 @@ async function startStubServer(): Promise<StubServer> {
       }
       requests.push(body);
 
-      // Deterministic loop that proves the MONOLOGUE behavior:
-      //   • before the user msg lands, and on the FIRST post-input beat, the agent
-      //     "thinks out loud" — a plain content return ("E2E-MONOLOGUE") that web must
-      //     NEVER stream to the browser;
-      //   • on the SECOND post-input beat it actually SPEAKS, by calling web.send_message
-      //     with the real reply — the only thing that should reach the browser;
-      //   • afterwards it keeps thinking (more monologue), so the tool round-trip folds
-      //     back into a later request (observed by e2e/4) without sending anything new.
-      const hasHello = JSON.stringify(body).includes("hello krakey");
-      if (hasHello) postInputBeats++;
+      // Deterministic loop that proves the MONOLOGUE behavior, gated on conversation
+      // STATE (field-targeted, so robust to out-of-order beats and not coupled to a
+      // substring of the whole serialized body):
+      //   • the agent "thinks out loud" — a plain content return ("E2E-MONOLOGUE") that
+      //     web must NEVER stream to the browser;
+      //   • once it has seen "hello krakey" AND already produced a monologue turn that
+      //     FOLLOWS that user message, it SPEAKS exactly once via web.send_message — so
+      //     the first post-input beat is always a monologue (the e2e/6 guard) and the
+      //     next speaks. This is the only thing that should reach the browser;
+      //   • afterwards it keeps thinking, so the tool round-trip folds back into a later
+      //     request (observed by e2e/2 + e2e/4) without sending anything new.
+      const msgs: any[] = Array.isArray(body.messages) ? body.messages : [];
+      const userIdx = msgs.findIndex(
+        (m) => m?.role === "user" && typeof m.content === "string" && m.content.includes("hello krakey"),
+      );
+      const thoughtAfterUser =
+        userIdx >= 0 &&
+        msgs
+          .slice(userIdx + 1)
+          .some((m) => m?.role === "assistant" && typeof m.content === "string" && m.content.includes("E2E-MONOLOGUE"));
       let message: any;
       let finish_reason: string;
-      if (hasHello && postInputBeats === 2) {
+      if (thoughtAfterUser && !replied) {
+        replied = true;
         message = {
           role: "assistant",
           content: null,
@@ -336,11 +348,25 @@ async function runE2E(): Promise<E2EResult> {
         body: JSON.stringify({ text: "hello krakey" }),
       }).catch(() => {});
       await collected;
-      // The reply arrives on the 2nd post-input beat; let the loop turn a few more
-      // times so the web.send_message round-trip folds back into a LATER request
-      // (what e2e/2 and e2e/4 observe). The SSE stream is already closed, so these
-      // extra monologue beats are not observed by e2e/5 or e2e/6.
-      await new Promise((r) => setTimeout(r, 1500));
+      // After the reply, wait (with a hard deadline) until the web.send_message round-trip
+      // has folded back into a LATER request — i.e. some request now carries an assistant
+      // turn with the web.send_message tool_call. That folded request is exactly what e2e/2
+      // and e2e/4 observe; polling the request log is deterministic where a fixed sleep
+      // would be flaky on a slow box (and wasteful on a fast one). The SSE stream is
+      // already closed, so the extra monologue beats are not seen by e2e/5 or e2e/6.
+      const foldDeadline = Date.now() + 6_000;
+      const folded = (): boolean =>
+        server.requests.some((b) =>
+          (b?.messages ?? []).some(
+            (m: any) =>
+              m?.role === "assistant" &&
+              Array.isArray(m.tool_calls) &&
+              m.tool_calls.some((tc: any) => tc?.function?.name === "web.send_message"),
+          ),
+        );
+      while (!folded() && Date.now() < foldDeadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
     }
   } finally {
     try {

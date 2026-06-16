@@ -136,20 +136,25 @@ rl.on("line", async (line) => {
   const sp = t.indexOf(" ");
   const op = sp === -1 ? t : t.slice(0, sp);
   const rest = sp === -1 ? "" : t.slice(sp + 1);
-  if (op === "out") {
-    const c = rest.indexOf(" ");
-    const id = rest.slice(0, c);
-    const text = rest.slice(c + 1);
-    // The agent speaks ONLY by invoking its explicit chat tool — the orchestrator
-    // dispatches a web.send_message tool call to this action on the agent's bus.
-    instances[id] && instances[id].sys.actions.invoke(${JSON.stringify(SEND_ACTION)}, { text }).catch(() => {});
-  } else if (op === "raw") {
-    // A bare output.message on the bus — the LLM's private monologue hook. web must
-    // IGNORE it for display now (decoupling): it must NOT reach the browser stream.
-    const c = rest.indexOf(" ");
-    const id = rest.slice(0, c);
-    const text = rest.slice(c + 1);
-    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
+  if (op === "out" || op === "raw") {
+    // Shared parse, guarded like req/ret: "<id> <text>"; a missing text -> "".
+    const sp2 = rest.indexOf(" ");
+    const id = sp2 === -1 ? rest : rest.slice(0, sp2);
+    const text = sp2 === -1 ? "" : rest.slice(sp2 + 1);
+    if (op === "out") {
+      // The agent speaks ONLY by invoking its explicit chat tool — the orchestrator
+      // dispatches a web.send_message tool call to this action on the agent's bus.
+      // Surface (don't swallow) a send error so a real failure isn't an opaque timeout.
+      instances[id] &&
+        instances[id].sys.actions
+          .invoke(${JSON.stringify(SEND_ACTION)}, { text })
+          .catch((e) => emit("SEND_ERROR:" + id + ":" + String(e && e.message ? e.message : e)));
+    } else {
+      // A bare output.message on the bus — the LLM's private monologue hook. web must
+      // IGNORE it for display now (decoupling): it must NOT reach the browser stream.
+      instances[id] &&
+        instances[id].sys.events.emit(${JSON.stringify(Events.OUTPUT_MESSAGE)}, { at: Date.now(), data: { text } });
+    }
   } else if (op === "req") {
     const s2 = rest.indexOf(" ");
     const id = s2 === -1 ? rest : rest.slice(0, s2);
