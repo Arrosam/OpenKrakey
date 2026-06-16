@@ -52,6 +52,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { formatRequest, chooseSent } from "../../public_plugin/inspector/page.format";
+import { SCRIPT } from "../../public_plugin/inspector/page.script";
+
+// REGRESSION GUARD: the dashboard embeds page.format helpers into the served browser
+// SCRIPT via `.toString()`. The bundler instruments NESTED function expressions with a
+// `__name(...)` helper that is undefined in the browser — embedding such a function makes
+// it throw at runtime (chooseSent failing silently once made the request show
+// "(no request captured)"). The embedded helpers MUST stay flat so the served SCRIPT
+// references no bundler helper.
+test("page.script: served SCRIPT references no bundler __name helper (embedded helpers are self-contained)", () => {
+  assert.equal(
+    SCRIPT.includes("__name"),
+    false,
+    "SCRIPT must not reference __name — an embedded helper would throw 'not defined' in the browser",
+  );
+});
 
 const MSG_HEADER = (n: number) => `— messages (${n}) —`;
 const TOOL_HEADER = (n: number) => `— tools (${n}) —`;
