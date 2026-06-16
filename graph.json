@@ -185,10 +185,11 @@
     "web": {
       "zone": "plugins",
       "path": "public_plugin/web",
-      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed; contributes a `web.guidance` context block (priority 9000, just below persona) teaching the monologue rule + naming the web.send_message tool; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
+        "context",
         "llm"
       ],
       "implements_contracts": [],
