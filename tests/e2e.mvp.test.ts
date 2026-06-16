@@ -2,18 +2,21 @@
  * E2E — the crown-jewel MVP integration test.
  *
  * A REAL `agent_instance` runs the REAL `public_plugin/` code (llm-core, persona,
- * history, web, notes, toolbox) against a LOCAL stub LLM server, driven through the
- * WEB channel over HTTP. This is the full Phase-1 loop end-to-end:
+ * history, web) against a LOCAL stub LLM server, driven through the WEB channel over
+ * HTTP. This exercises the MONOLOGUE behavior end-to-end: the LLM's plain return is
+ * private; the agent reaches the browser ONLY by calling the web.send_message tool.
  *
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
  *     -> web: input.message Notify (channel "web") + clock.fire_now
  *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona -> <persona>) -> llm.request
  *     -> llm-core: chat({ system:<persona>, messages:<conversation from history>, tools })
- *     -> stub server: FIRST call returns a time.now tool_call; orchestrator dispatches
- *        the tool -> tool.result -> history records an assistant(toolCalls) turn + a tool turn
- *     -> LATER beat -> chat #2+ (messages now carry those Hermes turns) -> "E2E-FINAL-REPLY"
- *     -> llm.return (ok + content) -> llm-core emits output.message
- *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser
+ *     -> stub server: BEFORE the user msg lands it returns plain content "E2E-MONOLOGUE"
+ *        (a monologue — llm-core still emits output.message, but web does NOT render it);
+ *        once it sees "hello krakey" it returns a web.send_message tool_call instead
+ *     -> orchestrator dispatches web.send_message -> web persists + streams it -> tool.result
+ *        -> history records an assistant(toolCalls) turn + a tool turn
+ *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser,
+ *        while the "E2E-MONOLOGUE" return is NEVER delivered.
  *
  * The contracts that pin the wire shapes:
  *   - shared/actions: Events.* + the Notify/Request/Reply envelopes, Actions.CLOCK_*
@@ -57,6 +60,9 @@ interface StubServer {
 
 async function startStubServer(): Promise<StubServer> {
   const requests: any[] = [];
+  // Count chat requests made AFTER the user message has landed, so the stub can drive a
+  // deterministic post-input sequence: think (monologue) -> speak (web.send_message tool).
+  let postInputBeats = 0;
 
   const server = http.createServer((req, res) => {
     if (req.method !== "POST" || !req.url || !req.url.includes("/chat/completions")) {
@@ -75,22 +81,38 @@ async function startStubServer(): Promise<StubServer> {
       }
       requests.push(body);
 
-      const callNo = requests.length;
-      const message =
-        callNo === 1
-          ? {
-              role: "assistant",
-              content: null,
-              tool_calls: [
-                {
-                  id: "c1",
-                  type: "function",
-                  function: { name: "time.now", arguments: "{}" },
-                },
-              ],
-            }
-          : { role: "assistant", content: "E2E-FINAL-REPLY" };
-      const finish_reason = callNo === 1 ? "tool_calls" : "stop";
+      // Deterministic loop that proves the MONOLOGUE behavior:
+      //   • before the user msg lands, and on the FIRST post-input beat, the agent
+      //     "thinks out loud" — a plain content return ("E2E-MONOLOGUE") that web must
+      //     NEVER stream to the browser;
+      //   • on the SECOND post-input beat it actually SPEAKS, by calling web.send_message
+      //     with the real reply — the only thing that should reach the browser;
+      //   • afterwards it keeps thinking (more monologue), so the tool round-trip folds
+      //     back into a later request (observed by e2e/4) without sending anything new.
+      const hasHello = JSON.stringify(body).includes("hello krakey");
+      if (hasHello) postInputBeats++;
+      let message: any;
+      let finish_reason: string;
+      if (hasHello && postInputBeats === 2) {
+        message = {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "c1",
+              type: "function",
+              function: {
+                name: "web.send_message",
+                arguments: JSON.stringify({ text: "E2E-FINAL-REPLY" }),
+              },
+            },
+          ],
+        };
+        finish_reason = "tool_calls";
+      } else {
+        message = { role: "assistant", content: "E2E-MONOLOGUE" };
+        finish_reason = "stop";
+      }
 
       const payload = {
         id: "chatcmpl-stub",
@@ -163,7 +185,7 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "history", "web", "notes", "toolbox"],
+    plugins: ["llm-core", "persona", "history", "web"],
     privatePlugins: ["history"],
     config: {
       persona: { text: "PERSONA-MARK" },
@@ -313,6 +335,11 @@ async function runE2E(): Promise<E2EResult> {
         body: JSON.stringify({ text: "hello krakey" }),
       }).catch(() => {});
       await collected;
+      // The reply arrives on the 2nd post-input beat; let the loop turn a few more
+      // times so the web.send_message round-trip folds back into a LATER request
+      // (what e2e/2 and e2e/4 observe). The SSE stream is already closed, so these
+      // extra monologue beats are not observed by e2e/5 or e2e/6.
+      await new Promise((r) => setTimeout(r, 1500));
     }
   } finally {
     try {
@@ -429,12 +456,10 @@ test("e2e/3: persona rides `system`, the user input is a role:'user' turn with i
   assert.equal(hello.name, "web", "the user turn's source channel must be surfaced via name");
 
   const names = toolNames(first);
-  for (const expected of ["time.now", "clock.set_interval", "clock.set_default_interval", "note.save"]) {
-    assert.ok(
-      names.includes(expected),
-      "tools[] must include the def '" + expected + "'; saw [" + names.join(", ") + "]",
-    );
-  }
+  assert.ok(
+    names.includes("web.send_message"),
+    "tools[] must include the web.send_message chat tool; saw [" + names.join(", ") + "]",
+  );
 });
 
 // ===========================================================================
@@ -451,30 +476,44 @@ test("e2e/4: the tool round-trip folds back as an assistant(tool_calls) turn + a
     .some(
       (m) =>
         Array.isArray(m.tool_calls) &&
-        m.tool_calls.some((tc: any) => tc?.function?.name === "time.now"),
+        m.tool_calls.some((tc: any) => tc?.function?.name === "web.send_message"),
     );
-  assert.ok(assistantToolCall, "some request must carry an assistant turn with the time.now tool_call");
+  assert.ok(assistantToolCall, "some request must carry an assistant turn with the web.send_message tool_call");
 
   const toolTurn = r.requests
     .flatMap((req) => messagesOfRole(req, "tool"))
     .some((m) => {
       const c = typeof m.content === "string" ? m.content : "";
-      const hasPayload =
-        /"?iso"?\s*[:=]/.test(c) || /epochMs/.test(c) || /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(c);
-      return typeof m.tool_call_id === "string" && hasPayload;
+      return typeof m.tool_call_id === "string" && /deliver/i.test(c);
     });
-  assert.ok(toolTurn, "some request must carry a role:'tool' turn (tool_call_id + the time.now payload)");
+  assert.ok(toolTurn, "some request must carry a role:'tool' turn (tool_call_id + the web.send_message result)");
 });
 
 // ===========================================================================
-// Assertion 5 — the reply reaches the browser: the agent's SSE stream delivered
-// an output event carrying "E2E-FINAL-REPLY" (llm.return -> output.message -> web SSE).
+// Assertion 5 — the reply reaches the browser ONLY because the agent called the
+// chat tool: SSE delivered an output event carrying "E2E-FINAL-REPLY"
+// (llm.return -> web.send_message tool dispatch -> web SSE).
 // ===========================================================================
 
-test("e2e/5: the final reply travels llm.return -> output.message -> web SSE stream", () => {
+test("e2e/5: the final reply reaches the browser via the web.send_message tool", () => {
   const r = result();
   assert.ok(
     r.sseOutputs.some((t) => t.includes("E2E-FINAL-REPLY")),
-    "the web SSE stream must deliver the assistant reply; got events:\n" + JSON.stringify(r.sseOutputs),
+    "the web SSE stream must deliver the reply the agent sent via web.send_message; got events:\n" +
+      JSON.stringify(r.sseOutputs),
+  );
+});
+
+// ===========================================================================
+// Assertion 6 — the monologue stays private: the plain LLM return ("E2E-MONOLOGUE")
+// is NEVER auto-streamed to the browser (the behavior this branch fixes).
+// ===========================================================================
+
+test("e2e/6: a plain LLM return (monologue) is NOT delivered to the browser", () => {
+  const r = result();
+  assert.ok(
+    !r.sseOutputs.some((t) => t.includes("E2E-MONOLOGUE")),
+    "a plain LLM return must NOT be auto-streamed (web renders only explicit sends); got events:\n" +
+      JSON.stringify(r.sseOutputs),
   );
 });
