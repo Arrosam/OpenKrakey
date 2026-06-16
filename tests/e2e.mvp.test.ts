@@ -48,8 +48,9 @@ import { spawn } from "node:child_process";
 const REPO_ROOT = path.resolve(".");
 
 // ---------------------------------------------------------------------------
-// Stub OpenAI chat-completions server (unchanged): call #1 -> time.now tool_call,
-// call #2+ -> "E2E-FINAL-REPLY".
+// Stub OpenAI chat-completions server: returns plain "E2E-MONOLOGUE" content (a private
+// monologue) on every beat EXCEPT the 2nd post-input one, which returns a web.send_message
+// tool_call carrying "E2E-FINAL-REPLY" — the only output that should reach the browser.
 // ---------------------------------------------------------------------------
 
 interface StubServer {
