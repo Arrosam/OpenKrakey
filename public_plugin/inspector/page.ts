@@ -15,8 +15,8 @@
  *
  * The page is assembled here from a static HTML skeleton plus two extracted
  * fragments — STYLE (the CSS) and SCRIPT (the client logic) — kept in sibling
- * files for single-responsibility. The assembled string is byte-identical to the
- * pre-split page (length 33320).
+ * files for single-responsibility. (The split itself was byte-preserving; the page
+ * has since evolved with features, so no fixed length is asserted.)
  */
 import { STYLE } from "./page.style";
 import { SCRIPT } from "./page.script";
@@ -61,7 +61,7 @@ export const PAGE = `<!doctype html>
 
 <main id="main" data-view="overview">
   <section class="panel panel--prompts cyan">
-    <h3>Prompts <span class="count" id="cPrompts">0</span></h3>
+    <h3>Prompts <span class="count" id="cPrompts">0</span><div class="pv-toggle" id="pvToggle"><button type="button" class="pv-btn active" data-pv="readable">Readable</button><button type="button" class="pv-btn" data-pv="raw">Raw</button></div></h3>
     <div class="body" id="prompts"><div class="empty">No prompts yet.</div></div>
   </section>
 

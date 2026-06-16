@@ -129,6 +129,16 @@ export const STYLE = `
   .panel.yellow h3 { color: var(--yellow); }
   .panel.red h3 { color: var(--red); }
 
+  /* segmented Readable|Raw toggle in the Prompts panel header */
+  .pv-toggle { display: inline-flex; margin-left: auto; gap: 0; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  .pv-btn {
+    background: var(--panel); color: var(--muted); border: none; cursor: pointer;
+    padding: 2px 8px; font: 10px var(--mono);
+  }
+  .pv-btn:hover { color: var(--text); background: var(--bg); }
+  .pv-btn + .pv-btn { border-left: 1px solid var(--border); }
+  .pv-btn.active { background: var(--cyan); color: var(--bg); }
+
   .toolbar {
     display: flex; align-items: center; gap: 8px;
     padding: 4px 10px; border-bottom: 1px solid var(--border);
@@ -153,6 +163,7 @@ export const STYLE = `
   .k-input { color: var(--yellow); }
   .k-output { color: var(--green); }
   .k-tool { color: var(--magenta); }
+  .k-conversation { color: var(--cyan); }
   .k-log { color: var(--muted); }
   .k-start { color: var(--green); }
 

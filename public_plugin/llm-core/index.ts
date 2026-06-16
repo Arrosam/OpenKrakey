@@ -2,10 +2,12 @@
  * Plugin: llm-core — the LLM round-trip, and nothing else.
  *
  * It is the only thing that answers the orchestrator's `llm.request`: it picks a
- * communicator from the key-less `ctx.llm` library, sends the composed context as a
- * single user message (with any registered tools), and reports the normalized result
- * back as `llm.return`. On success it also surfaces the assistant's text as an
- * `output.message` so channels can show it.
+ * communicator from the key-less `ctx.llm` library, reads the conversation from the
+ * `llm.request` event's `messages` and builds the chat request from `{ context,
+ * messages }` (with any registered tools), and reports the normalized result back as
+ * `llm.return`. Right before dispatching it also emits `llm.request.sent` carrying the
+ * assembled request, so observers (the inspector) can show what was actually sent. On
+ * success it surfaces the assistant's text as an `output.message` so channels can show it.
  *
  * It doubles as the tool-registration hub via the `llm.register_tool` action: tool
  * plugins declare the L1 `ToolDef`s that ride along on every chat request. The core
@@ -21,7 +23,9 @@ import type { Unsub } from "../../contracts/event-system";
 import type {
   ToolDef,
   Communicator,
+  LLMRequest,
   LLMResponse,
+  Message,
 } from "../../contracts/llm";
 import type { ComposedContext } from "../../contracts/context";
 import {
@@ -63,7 +67,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
   }
 
   async function answer(
-    req: Request<{ context: ComposedContext }>,
+    req: Request<{ context: ComposedContext; messages: Message[] }>,
     context: ComposedContext,
   ): Promise<void> {
     const { id } = req;
@@ -81,14 +85,33 @@ const createLLMCore: PluginFactory = (): Plugin => {
       return;
     }
 
-    const chatReq = {
-      messages: [{ role: "user" as const, content: context.text }],
+    // The conversation rides the llm.request event as wire-ready Message[] (the
+    // provider already stripped provenance). With turns, the composed context becomes
+    // the `system`; without, fall back to the single-user-message shape.
+    const turns: Message[] = Array.isArray(req.data?.messages) ? req.data.messages : [];
+    const base =
+      turns.length > 0
+        ? { system: context.text, messages: turns }
+        : { messages: [{ role: "user" as const, content: context.text }] };
+
+    const chatReq: LLMRequest = {
+      ...base,
       ...(tools.size > 0 ? { tools: [...tools.values()] } : {}),
       ...(config.temperature !== undefined
         ? { temperature: config.temperature }
         : {}),
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     };
+
+    // Surface the EXACT request being dispatched (system + messages + tools + params)
+    // so observers (the inspector) can show what was actually sent — fire-and-forget,
+    // same corrId (`id`) as this beat's llm.request / llm.return.
+    const sent: Request<{ request: LLMRequest }> = {
+      id,
+      at: Date.now(),
+      data: { request: chatReq },
+    };
+    ctx!.events.emit(Events.LLM_REQUEST_SENT, sent);
 
     try {
       const response = await communicator.chat(chatReq);
@@ -140,7 +163,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
       unsubRequest = pluginCtx.events.on(Events.LLM_REQUEST, (payload: unknown) => {
         // Ignore malformed requests silently — never throw out of a listener.
         if (payload === null || typeof payload !== "object") return;
-        const req = payload as Request<{ context: ComposedContext }>;
+        const req = payload as Request<{ context: ComposedContext; messages: Message[] }>;
         const context = req.data?.context;
         if (context === null || typeof context !== "object") return;
         if (typeof context.text !== "string") return;

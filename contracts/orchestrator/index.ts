@@ -12,10 +12,13 @@
  *     plugins can adjust the rhythm; they are unregistered on stop().
  *
  * Beat (EVENT-driven, fire-and-forget): clock tick (a `clock.tick` event) →
- * emit `prompt.gather` (plugins refresh blocks) → compose → emit `llm.request`
- * (Request<{context}>) WITHOUT awaiting — the beat ends at the emit. The LLM
- * round-trip returns later as an `llm.return` event (Reply<LLMResponse>) whose
- * tool calls are dispatched fire-and-forget on the actionbus. As EACH dispatched
+ * emit `prompt.gather` (plugins refresh blocks; a conversation provider — `history` —
+ * contributes the current conversation as a `conversation.snapshot` event the
+ * orchestrator captures) → compose → emit `llm.request` (Request<{context, messages}>)
+ * WITHOUT awaiting — the beat ends at the emit. The orchestrator only TRANSPORTS
+ * `messages` (the captured snapshot, already wire-ready); it never builds or inspects
+ * them. The LLM round-trip returns later as an `llm.return` event (Reply<LLMResponse>)
+ * whose tool calls are dispatched fire-and-forget on the actionbus. As EACH dispatched
  * call settles, a `tool.result` event is emitted (Reply: id = the ToolCall id,
  * name = the action name; ok+data on success, ok:false+error on rejection) so
  * plugins can fold tool outcomes into the next beat's context.
