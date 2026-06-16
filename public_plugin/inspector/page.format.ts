@@ -67,14 +67,18 @@ export function formatRequest(payload: unknown, mode: "readable" | "raw"): strin
  * `llm.request.sent` share a corrId and can arrive in EITHER order (the sent event is
  * emitted re-entrantly during the request emit). Prefer the assembled one — the record
  * carrying `payload.data.request` — so a plain request never overwrites it.
+ *
+ * MUST stay FLAT — no nested/inner function. This source is embedded verbatim into the
+ * served browser SCRIPT via `.toString()`, and the bundler instruments nested function
+ * expressions with a `__name(...)` helper that is undefined in the browser (it would
+ * throw at runtime). The `has(...)` check is therefore inlined, not a closure.
  */
 export function chooseSent(current: unknown, incoming: unknown): unknown {
-  var has = function (r: any): boolean {
-    return !!(r && r.payload && r.payload.data && r.payload.data.request);
-  };
   if (!incoming) return current;
   if (!current) return incoming;
-  if (has(incoming)) return incoming;
-  if (has(current)) return current;
+  var inc: any = incoming;
+  if (inc.payload && inc.payload.data && inc.payload.data.request) return incoming;
+  var cur: any = current;
+  if (cur.payload && cur.payload.data && cur.payload.data.request) return current;
   return incoming;
 }
