@@ -1,10 +1,13 @@
 /**
  * Plugin: web — the browser chat channel.
  *
- * A sibling of any other channel behind the same input/output event seam: a typed
- * browser message becomes `input.message` (and wakes the beat via `clock.fire_now`);
- * `output.message` text is streamed back to the browser over SSE. Per message it
- * reports a delivery status — `sent` when the message is appended to the event
+ * A sibling of any other channel behind the same INPUT event seam: a typed browser
+ * message becomes `input.message` (and wakes the beat via `clock.fire_now`). OUTPUT is
+ * explicit — the agent speaks to this channel ONLY by calling the `web.send_message`
+ * tool; the orchestrator dispatches that tool call to this plugin's action, which
+ * persists the text and streams it to the browser over SSE. The LLM's raw return
+ * (`output.message`) is a private monologue this channel does NOT render. Per message
+ * it reports a delivery status — `sent` when the message is appended to the event
  * queue, `read` once the agent's beat has processed it (signalled by `llm.return`).
  *
  * process resource ownership (one process owns one terminal, one port): one
@@ -30,7 +33,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
-import type { LLMResponse } from "../../contracts/llm";
+import type { LLMResponse, ToolDef } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
 import {
   type AgentReg,
@@ -45,6 +48,9 @@ import { TranscriptStore } from "./transcript-store";
 
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
+
+/** The chat-tool action the orchestrator dispatches when the LLM decides to speak. */
+const SEND_MESSAGE_ACTION = "web.send_message";
 
 /**
  * A configured token is adopted only if it's a URL/cookie-safe string of length
@@ -61,7 +67,7 @@ const createWeb: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "web", version: "0.1.0" },
+    manifest: { id: "web", version: "0.1.0", requires: ["llm.register_tool"] },
 
     async setup(ctx: PluginContext): Promise<void> {
       // Destructure the only ctx members the long-lived closures need, so the rest
@@ -116,14 +122,50 @@ const createWeb: PluginFactory = (): Plugin => {
       reg = r;
       addReg(r);
 
-      // Stream this agent's replies to its browser clients, persisting each.
-      const offOutput = events.on(Events.OUTPUT_MESSAGE, (payload) => {
-        const text = (payload as EventPayloads["output.message"])?.data?.text;
-        if (typeof text === "string") {
-          r.store.append({ role: "agent", text, at: Date.now() });
-          broadcast(r, { type: "output", text });
+      // Stream an agent message to THIS agent's browser clients (persist + broadcast).
+      // Named distinctly from r.deliver (the opposite-direction INPUT path: emit
+      // input.message + wake the beat) so the two can't be confused in a later edit.
+      const streamAgentMessage = (text: string): void => {
+        r.store.append({ role: "agent", text, at: Date.now() });
+        broadcast(r, { type: "output", text });
+      };
+
+      // The agent speaks to THIS channel only by explicitly calling web.send_message;
+      // the orchestrator dispatches that tool call to this action. (The LLM's plain
+      // return — output.message — is a private monologue web no longer renders.)
+      const offSend = actions.register(SEND_MESSAGE_ACTION, async (params: unknown) => {
+        const text =
+          params && typeof params === "object"
+            ? (params as { text?: unknown }).text
+            : undefined;
+        if (typeof text !== "string" || text.length === 0) {
+          throw new Error("web.send_message: params must be { text: non-empty string }");
         }
+        streamAgentMessage(text);
+        return { delivered: true };
       });
+
+      // Declare the chat tool so the LLM can call it. Since web.send_message is now web's
+      // ONLY path to the browser, the manifest `requires: ["llm.register_tool"]` makes the
+      // loader fail the agent LOUDLY if the tool registry (llm-core) isn't loaded/ordered
+      // before web — instead of a misordered config silently muting the agent. The
+      // try/catch below is then just defensive (e.g. a malformed-ToolDef rejection).
+      const sendTool: ToolDef = {
+        name: SEND_MESSAGE_ACTION,
+        description:
+          "Send a message to the user in the web chat. Your plain replies are private " +
+          "thinking; call this tool whenever you actually want to say something to the user.",
+        parameters: {
+          type: "object",
+          properties: { text: { type: "string", description: "The message to show the user." } },
+          required: ["text"],
+        },
+      };
+      try {
+        await actions.invoke("llm.register_tool", sendTool);
+      } catch (err) {
+        ctx.log.warn(`web: failed to register the web.send_message tool: ${String(err)}`);
+      }
 
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
@@ -152,7 +194,7 @@ const createWeb: PluginFactory = (): Plugin => {
         }
       });
 
-      unsubs = [offOutput, offRequest, offReturn];
+      unsubs = [offSend, offRequest, offReturn];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
       await ensureServer(port, host, tk, (line) => ctx.print(line));
@@ -161,6 +203,9 @@ const createWeb: PluginFactory = (): Plugin => {
     teardown(): void {
       for (const off of unsubs) off();
       unsubs = [];
+      // Note: offSend unregisters the web.send_message ACTION, but the ToolDef stays in
+      // llm-core's per-Agent registry — there is no llm.unregister_tool, and llm-core
+      // clears its whole tool map on its own teardown. The asymmetry is intentional.
       if (reg) {
         // Stop the async append chain, then synchronously rewrite the file from the
         // in-memory transcript — compacting it to <= MAX_TRANSCRIPT entries and baking

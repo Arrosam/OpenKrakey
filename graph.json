@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-15T00:00:00Z"
+    "updated_at": "2026-06-16T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -27,8 +27,6 @@
         "persona",
         "history",
         "web",
-        "notes",
-        "toolbox",
         "inspector"
       ],
       "overview": "overviews/zones/plugins.md"
@@ -147,7 +145,7 @@
     "llm-core": {
       "zone": "plugins",
       "path": "public_plugin/llm-core",
-      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content — the monologue HOOK for observers, NOT a channel send). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Provides the llm.register_tool action other plugins call to declare ToolDefs.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -187,7 +185,7 @@
     "web": {
       "zone": "plugins",
       "path": "public_plugin/web",
-      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams that agent's output.message; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -196,32 +194,6 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/web.md"
-    },
-    "notes": {
-      "zone": "plugins",
-      "path": "public_plugin/notes",
-      "description": "Persistent notes store (the roadmap 'library' demo made useful): note.save/note.read/note.list actions over dataDir files, registered as LLM tools; shared when public, agent-isolated when independent.",
-      "depends_on_contracts": [
-        "plugin",
-        "event-system",
-        "llm"
-      ],
-      "implements_contracts": [],
-      "status": "done",
-      "overview": "overviews/nodes/notes.md"
-    },
-    "toolbox": {
-      "zone": "plugins",
-      "path": "public_plugin/toolbox",
-      "description": "Basic tools: time.now action + ToolDefs exposing the orchestrator's clock.set_interval / clock.set_default_interval rhythm actions so the LLM can self-pace.",
-      "depends_on_contracts": [
-        "plugin",
-        "event-system",
-        "llm"
-      ],
-      "implements_contracts": [],
-      "status": "done",
-      "overview": "overviews/nodes/toolbox.md"
     },
     "inspector": {
       "zone": "plugins",
