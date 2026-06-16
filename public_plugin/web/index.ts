@@ -53,6 +53,35 @@ const DEFAULT_HOST = "127.0.0.1";
 const SEND_MESSAGE_ACTION = "web.send_message";
 
 /**
+ * web's GUIDANCE context block — the structural home for the monologue rule.
+ *
+ * The send tool (registered in setup) gives the LLM the MECHANISM to speak; this
+ * block gives it the RULE: a plain reply is a PRIVATE monologue web renders to no
+ * one, so the agent is heard only when it calls web.send_message. Stating that in
+ * the composed prompt — not only in the tool's description — is what stops a model
+ * from "replying" in plain text and looking silent in the chat.
+ *
+ * Priority 9000: just BELOW persona's stable 10000, so persona stays the byte-stable
+ * top-of-prompt prefix (the prompt-cache anchor), yet far above any volatile content.
+ * The text is itself fixed across beats, so persona + web compose a stable system
+ * prefix. (Conversation is NOT a block — it rides as a separate `messages` array —
+ * so nothing volatile interleaves between these two.) A future Slack/CLI channel
+ * adds its OWN block naming its OWN send tool, so the model learns each channel's
+ * speak path from that channel itself.
+ */
+const GUIDANCE_BLOCK_ID = "web.guidance";
+const GUIDANCE_LABEL = "web";
+const GUIDANCE_PRIORITY = 9000;
+const GUIDANCE_TEXT =
+  "You run on a recurring beat. The plain text you return each beat is a PRIVATE " +
+  "MONOLOGUE — your own thinking — and is shown to NO ONE.\n" +
+  "To actually say something to the user in the web chat you MUST call the " +
+  "`web.send_message` tool with the exact text you want them to see. Anything you " +
+  "write outside that tool call never reaches the user — a plain reply alone leaves " +
+  "the user seeing silence.\n" +
+  "On a beat where you have nothing worth sending, just think; do not call the tool.";
+
+/**
  * A configured token is adopted only if it's a URL/cookie-safe string of length
  * ≥ 16; anything else is rejected in favour of a fresh random token (parity with
  * inspector/config.ts). Keeps a too-short or malformed pinned token from becoming
@@ -73,7 +102,9 @@ const createWeb: PluginFactory = (): Plugin => {
       // Destructure the only ctx members the long-lived closures need, so the rest
       // of ctx (config, dataDir, print, …) can be GC'd once setup() returns instead
       // of being pinned for the agent's lifetime by the closures stored in `regs`.
-      const { events, actions } = ctx;
+      // removeBlock is one such member — the teardown thunk in `unsubs` calls it to
+      // drop web's guidance block, so we capture just it rather than retaining ctx.
+      const { events, actions, removeBlock } = ctx;
 
       const cfg = (ctx.config ?? {}) as { port?: number; host?: string; token?: string };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
@@ -167,6 +198,16 @@ const createWeb: PluginFactory = (): Plugin => {
         ctx.log.warn(`web: failed to register the web.send_message tool: ${String(err)}`);
       }
 
+      // Teach the RULE behind that tool: register web's guidance context block so the
+      // monologue model lives in the composed prompt, not only in the tool description.
+      // (setBlock can't fail — it's a store write in the orchestrator — so no guard.)
+      ctx.setBlock({
+        id: GUIDANCE_BLOCK_ID,
+        label: GUIDANCE_LABEL,
+        priority: GUIDANCE_PRIORITY,
+        render: () => GUIDANCE_TEXT,
+      });
+
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
       // (so an EARLIER outstanding request's return can't claim them).
@@ -194,7 +235,9 @@ const createWeb: PluginFactory = (): Plugin => {
         }
       });
 
-      unsubs = [offSend, offRequest, offReturn];
+      // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web's
+      // guidance context block (registered above) via the captured removeBlock.
+      unsubs = [offSend, offRequest, offReturn, () => removeBlock(GUIDANCE_BLOCK_ID)];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
       await ensureServer(port, host, tk, (line) => ctx.print(line));
