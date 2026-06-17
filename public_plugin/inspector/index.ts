@@ -46,7 +46,6 @@ const KIND: { [eventName: string]: string } = {
   [Events.INPUT_MESSAGE]: "input",
   [Events.OUTPUT_MESSAGE]: "output",
   [Events.TOOL_RESULT]: "tool.result",
-  [Events.CONVERSATION_SNAPSHOT]: "conversation",
   [Events.LOG]: "log",
 };
 
