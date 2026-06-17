@@ -9,12 +9,12 @@
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
  *     -> web: input.message Notify (channel "web") + clock.fire_now
  *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona -> <persona>) -> llm.request
- *     -> llm-core: chat({ system:<persona>, messages:<conversation from history>, tools })
+ *     -> llm-core: chat({ system:<persona+web.guidance>, messages:<web's chat-history block>, tools })
  *     -> stub server: BEFORE the user msg lands it returns plain content "E2E-MONOLOGUE"
  *        (a monologue — llm-core still emits output.message, but web does NOT render it);
  *        once it sees "hello krakey" it returns a web.send_message tool_call instead
- *     -> orchestrator dispatches web.send_message -> web persists + streams it -> tool.result
- *        -> history records an assistant(toolCalls) turn + a tool turn
+ *     -> orchestrator dispatches web.send_message -> web persists + streams it (+ records
+ *        the send in its OWN transcript -> a clean assistant turn in the next prompt)
  *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser,
  *        while the "E2E-MONOLOGUE" return is NEVER delivered.
  *
@@ -95,17 +95,16 @@ async function startStubServer(): Promise<StubServer> {
       //   • afterwards it keeps thinking, so the tool round-trip folds back into a later
       //     request (observed by e2e/2 + e2e/4) without sending anything new.
       const msgs: any[] = Array.isArray(body.messages) ? body.messages : [];
-      const userIdx = msgs.findIndex(
+      // History is gone; web owns the conversation and does NOT record the monologue,
+      // so we can't gate on "a recorded monologue turn follows the user message". Gate
+      // on simply having SEEN the user message: pre-input timer beats monologue (never
+      // delivered — the e2e/6 guard), and the first beat that sees "hello krakey" speaks.
+      const sawUser = msgs.some(
         (m) => m?.role === "user" && typeof m.content === "string" && m.content.includes("hello krakey"),
       );
-      const thoughtAfterUser =
-        userIdx >= 0 &&
-        msgs
-          .slice(userIdx + 1)
-          .some((m) => m?.role === "assistant" && typeof m.content === "string" && m.content.includes("E2E-MONOLOGUE"));
       let message: any;
       let finish_reason: string;
-      if (thoughtAfterUser && !replied) {
+      if (sawUser && !replied) {
         replied = true;
         message = {
           role: "assistant",
@@ -198,8 +197,7 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "history", "web"],
-    privatePlugins: ["history"],
+    plugins: ["llm-core", "persona", "web"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
@@ -348,10 +346,10 @@ async function runE2E(): Promise<E2EResult> {
         body: JSON.stringify({ text: "hello krakey" }),
       }).catch(() => {});
       await collected;
-      // After the reply, wait (with a hard deadline) until the web.send_message round-trip
-      // has folded back into a LATER request — i.e. some request now carries an assistant
-      // turn with the web.send_message tool_call. That folded request is exactly what e2e/2
-      // and e2e/4 observe; polling the request log is deterministic where a fixed sleep
+      // After the reply, wait (with a hard deadline) until the agent's send has folded
+      // back into a LATER request — i.e. web recorded its own send and now renders it as
+      // a clean assistant turn carrying the reply text. That folded request is exactly
+      // what e2e/4 observes; polling the request log is deterministic where a fixed sleep
       // would be flaky on a slow box (and wasteful on a fast one). The SSE stream is
       // already closed, so the extra monologue beats are not seen by e2e/5 or e2e/6.
       const foldDeadline = Date.now() + 6_000;
@@ -360,8 +358,8 @@ async function runE2E(): Promise<E2EResult> {
           (b?.messages ?? []).some(
             (m: any) =>
               m?.role === "assistant" &&
-              Array.isArray(m.tool_calls) &&
-              m.tool_calls.some((tc: any) => tc?.function?.name === "web.send_message"),
+              typeof m.content === "string" &&
+              m.content.includes("E2E-FINAL-REPLY"),
           ),
         );
       while (!folded() && Date.now() < foldDeadline) {
@@ -490,30 +488,27 @@ test("e2e/3: persona rides `system`, the user input is a role:'user' turn with i
 });
 
 // ===========================================================================
-// Assertion 4 — the tool round-trip lands in messages[] as an assistant(tool_calls)
-// turn + a matching role:'tool' result turn (history's Hermes folding).
+// Assertion 4 — web owns its chat: the agent's web.send_message reply is recorded by
+// web and folds back into a later prompt as a CLEAN assistant turn; the tool-call /
+// tool-result mechanics never enter the conversation the LLM sees.
 // ===========================================================================
 
-test("e2e/4: the tool round-trip folds back as an assistant(tool_calls) turn + a tool result turn", () => {
+test("e2e/4: the agent's reply folds back as a clean assistant turn; no tool mechanics in the prompt", () => {
   const r = result();
-  assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the folded tool round");
+  assert.ok(r.requests.length >= 2, "need >= 2 requests to observe the reply fold back");
 
-  const assistantToolCall = r.requests
+  const cleanReply = r.requests
     .flatMap((req) => messagesOfRole(req, "assistant"))
-    .some(
-      (m) =>
-        Array.isArray(m.tool_calls) &&
-        m.tool_calls.some((tc: any) => tc?.function?.name === "web.send_message"),
-    );
-  assert.ok(assistantToolCall, "some request must carry an assistant turn with the web.send_message tool_call");
+    .some((m) => typeof m.content === "string" && m.content.includes("E2E-FINAL-REPLY"));
+  assert.ok(cleanReply, "a later request must carry a CLEAN assistant turn with the sent reply 'E2E-FINAL-REPLY' (web recorded its own send)");
 
-  const toolTurn = r.requests
-    .flatMap((req) => messagesOfRole(req, "tool"))
-    .some((m) => {
-      const c = typeof m.content === "string" ? m.content : "";
-      return typeof m.tool_call_id === "string" && /deliver/i.test(c);
-    });
-  assert.ok(toolTurn, "some request must carry a role:'tool' turn (tool_call_id + the web.send_message result)");
+  const anyToolCall = r.requests
+    .flatMap((req) => messagesOfRole(req, "assistant"))
+    .some((m) => Array.isArray(m.tool_calls) && m.tool_calls.length > 0);
+  assert.ok(!anyToolCall, "no assistant turn carries tool_calls — tool mechanics never enter the conversation");
+
+  const anyToolTurn = r.requests.flatMap((req) => messagesOfRole(req, "tool")).length > 0;
+  assert.ok(!anyToolTurn, "no role:'tool' turns reach the prompt — tool results stay out of the conversation");
 });
 
 // ===========================================================================
