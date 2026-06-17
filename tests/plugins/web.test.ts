@@ -100,7 +100,7 @@ function makeCtx(agentId, port){
   // An empty WEB_TOKEN ("") is forwarded verbatim (a falsy configured token).
   const cfg = { port };
   if (process.env.WEB_TOKEN !== undefined) cfg.token = process.env.WEB_TOKEN;
-  return { sys, ctx: {
+  return { sys, blocks, ctx: {
     agentId,
     events: sys.events,
     actions: sys.actions,
@@ -114,7 +114,7 @@ function makeCtx(agentId, port){
       // here; if a future block renders async, text is reported null (fine for web).
       let text = null;
       try { const r = b.render(); if (typeof r === "string") text = r; } catch {}
-      emit("BLOCK_SET:" + agentId + ":" + JSON.stringify({ id: b.id, label: b.label, priority: b.priority, text }));
+      emit("BLOCK_SET:" + agentId + ":" + JSON.stringify({ id: b.id, label: b.label, priority: b.priority, target: b.target, text }));
     },
     getBlock: (id) => blocks.get(id),
     // Surface removals (BLOCK_REMOVED:<agent>:<id>) so a test can assert teardown
@@ -132,11 +132,11 @@ if (!mod || typeof mod.default !== "function") { emit("NOT_IMPLEMENTED"); proces
 let firstPort = 0;
 let isFirst = true;
 for (const a of AGENTS) {
-  const { sys, ctx } = makeCtx(a, isFirst ? 0 : 7717);
+  const { sys, ctx, blocks } = makeCtx(a, isFirst ? 0 : 7717);
   isFirst = false;
   const plugin = mod.default();
   await plugin.setup(ctx);
-  instances[a] = { plugin, sys };
+  instances[a] = { plugin, sys, blocks };
 }
 emit("SETUP_DONE");
 
@@ -175,6 +175,13 @@ rl.on("line", async (line) => {
     const id = s2 === -1 ? rest : rest.slice(0, s2);
     const rid = s2 === -1 ? "r" : rest.slice(s2 + 1);
     instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_RETURN)}, { id: rid, at: Date.now(), ok: true, data: { content: "ok", toolCalls: [] } });
+  } else if (op === "render") {
+    // render <id> <blockId> -> emit BLOCK_RENDER:<id>:<blockId>:<json> (a block's rendered output)
+    const s2 = rest.indexOf(" ");
+    const rid = s2 === -1 ? rest : rest.slice(0, s2);
+    const bid = s2 === -1 ? "" : rest.slice(s2 + 1);
+    const b = instances[rid] && instances[rid].blocks.get(bid);
+    if (b) Promise.resolve(b.render()).then((out) => emit("BLOCK_RENDER:" + rid + ":" + bid + ":" + JSON.stringify(out)), () => {});
   } else if (op === "down") {
     if (instances[rest] && instances[rest].plugin.teardown) await instances[rest].plugin.teardown();
     emit("TORE_DOWN:" + rest);
@@ -663,13 +670,14 @@ test("web: contributes a guidance context block stating the monologue rule + nam
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
+    // Select web's GUIDANCE block by id (web also registers a web.conversation block).
+    const prefix = "BLOCK_SET:alice:";
+    const isGuidance = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.guidance"');
     assert.ok(
-      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_SET:alice:"))),
-      "web must register a context block via ctx.setBlock",
+      await c.waitFor((ls) => ls.some(isGuidance)),
+      "web must register the web.guidance context block via ctx.setBlock",
     );
-    const block = JSON.parse(
-      c.lines.find((l) => l.startsWith("BLOCK_SET:alice:"))!.slice("BLOCK_SET:alice:".length),
-    );
+    const block = JSON.parse(c.lines.find(isGuidance)!.slice(prefix.length));
 
     // web's OWN block (namespaced id), placed just BELOW persona's stable 10000 so
     // persona stays the top cache-prefix, but well above any volatile content.
@@ -701,6 +709,60 @@ test("web: contributes a guidance context block stating the monologue rule + nam
       c.lines.includes("BLOCK_REMOVED:alice:" + block.id),
       "teardown must remove web's guidance block; saw " +
         JSON.stringify(c.lines.filter((l) => l.startsWith("BLOCK_REMOVED:"))),
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+test("web: contributes a 'web.conversation' messages-block rendering its transcript as clean turns", async () => {
+  // Web owns its chat history: it persists the dialogue (user messages + agent sends)
+  // and contributes it to the prompt as a message-target block. render() maps the
+  // transcript to CLEAN wire turns — user -> {role:user,name:web}, agent send ->
+  // {role:assistant} — with no monologue and no tool mechanics.
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const prefix = "BLOCK_SET:alice:";
+    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.conversation"');
+    assert.ok(await c.waitFor((ls) => ls.some(isConvo)), "web must register a web.conversation block");
+    const blk = JSON.parse(c.lines.find(isConvo)!.slice(prefix.length));
+    assert.equal(blk.target, "messages", "the conversation block targets the messages array");
+    assert.equal(blk.priority, 5000, "median priority 5000 (other message-blocks can sit before or after)");
+
+    // Populate the transcript: a user message (POST) and an agent send (web.send_message).
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hi there" }),
+    });
+    assert.equal(res.status, 202, "the user message is accepted (and stored)");
+    c.send("out alice hello back");
+    await new Promise((r) => setTimeout(r, 250)); // let the agent send append to the transcript
+
+    // Render the block — it must yield exactly the two clean turns, in order.
+    c.send("render alice web.conversation");
+    assert.ok(
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web.conversation:"))),
+      "the conversation block must render its messages",
+    );
+    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web.conversation:"))!;
+    const msgs = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web.conversation:".length));
+    assert.deepEqual(
+      msgs,
+      [
+        { role: "user", content: "hi there", name: "web" },
+        { role: "assistant", content: "hello back" },
+      ],
+      "user -> {role:user,name:web}; agent send -> {role:assistant}; nothing else",
+    );
+
+    // Registered in setup, removed on teardown.
+    c.send("down alice");
+    assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
+    assert.ok(
+      c.lines.includes("BLOCK_REMOVED:alice:web.conversation"),
+      "teardown must remove the conversation block",
     );
   } finally {
     await c.close();
