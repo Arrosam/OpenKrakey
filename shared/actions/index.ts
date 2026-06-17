@@ -66,19 +66,6 @@ export interface Reply<T = unknown> {
 }
 
 /**
- * One turn of conversation history in Hermes chat shape: an `llm` Message PLUS
- * provenance. `source` = where the turn came from (the input channel for a user turn,
- * "assistant" for an LLM turn, the tool name for a tool turn); `at` = epoch-ms.
- * `history` builds these internally (and persists them as JSONL); its message-target
- * context block STRIPS `at`/`source` down to the wire `Message[]` it renders (a user
- * turn's `source` is already surfaced to the model via `Message.name`).
- */
-export interface ConversationMessage extends Message {
-  at: number;
-  source: string;
-}
-
-/**
  * Concrete well-known event payloads. Each specializes a base envelope. Keys are
  * the `Events` string values (kept literal so this compiles as an interface).
  */

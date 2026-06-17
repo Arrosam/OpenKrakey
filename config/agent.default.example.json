@@ -1,13 +1,12 @@
 {
   "intervalMs": 30000,
   "plugins": [
-    "history",
     "llm-core",
     "persona",
     "web"
   ],
   "privatePlugins": [
-    "history"
+    "web"
   ],
   "config": {
     "persona": {

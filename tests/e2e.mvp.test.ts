@@ -198,6 +198,11 @@ async function main() {
     id: "e2e-agent",
     intervalMs: 250,
     plugins: ["llm-core", "persona", "web"],
+    // web is the data-carrying plugin now (it owns the conversation transcript), so it
+    // is private-by-default — each agent gets its OWN dataDir under agentsDir. Without
+    // this, web's transcript persists in the SHARED public_plugin/web/data across runs
+    // and pollutes the prompt with a prior run's conversation.
+    privatePlugins: ["web"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
