@@ -5,10 +5,12 @@
  * ROLE-SEPARATED turns — user / assistant (+ its toolCalls) / tool (+ its toolCallId)
  * — each carrying provenance (`source`) and a timestamp (`at`). It folds three generic
  * events into turns: user input, the LLM's return, and each settled tool result; and
- * persists every turn to `<dataDir>/history.jsonl` so memory survives restarts. On every
- * `prompt.gather` it CONTRIBUTES the current conversation to the orchestrator by emitting
- * `conversation.snapshot` as wire-ready `Message[]` (provenance `at`/`source` stripped),
- * which the orchestrator forwards as the beat's `llm.request` messages. Public install =
+ * persists every turn to `<dataDir>/history.jsonl` so memory survives restarts. It
+ * CONTRIBUTES the conversation as a MESSAGE-target context block (id "history", median
+ * priority 5000) whose render() returns the turns as wire-ready `Message[]` (provenance
+ * `at`/`source` stripped; a user turn's source surfaced via `Message.name`); the
+ * orchestrator places that group into the beat's `llm.request` messages, ordered among
+ * message-blocks by priority. Public install =
  * shared memory across agents; private install = agent-isolated.
  *
  * The default export is a PluginFactory — the loader calls it once per Agent, so the
@@ -28,6 +30,8 @@ import {
 } from "../../shared/actions";
 
 const DEFAULT_MAX_ENTRIES = 200;
+const DEFAULT_PRIORITY = 5000; // median: lets other message-blocks sit before (>5000) or after (<5000)
+const BLOCK_ID = "history";
 const ROLES = new Set(["user", "assistant", "tool"]);
 
 /** `tool.result` is a Reply carrying the tool name (its `id` = the ToolCall id). */
@@ -52,11 +56,17 @@ const createHistory: PluginFactory = (): Plugin => {
 
     setup(ctx: PluginContext) {
       context = ctx;
-      const cfg = (ctx.config ?? {}) as { maxEntries?: number };
+      const cfg = (ctx.config ?? {}) as { maxEntries?: number; priority?: number };
       const maxEntries =
         typeof cfg.maxEntries === "number" && cfg.maxEntries > 0
           ? cfg.maxEntries
           : DEFAULT_MAX_ENTRIES;
+      // The conversation block's priority (DESC among message-blocks). A median 5000
+      // default lets other plugins inject messages before (>5000) or after (<5000) it.
+      const priority =
+        typeof cfg.priority === "number" && Number.isFinite(cfg.priority)
+          ? cfg.priority
+          : DEFAULT_PRIORITY;
 
       const file = join(ctx.dataDir, "history.jsonl");
       mkdirSync(ctx.dataDir, { recursive: true });
@@ -145,25 +155,24 @@ const createHistory: PluginFactory = (): Plugin => {
         }),
       );
 
-      // On every gather, contribute the current conversation to the orchestrator as
-      // wire-ready Message[] — strip provenance (at/source); a user turn's source is
-      // already surfaced via Message.name. The orchestrator captures this snapshot
-      // and forwards it as the beat's llm.request messages.
-      unsubs.push(
-        ctx.events.on(Events.PROMPT_GATHER, () => {
-          const messages: Message[] = turns.map(({ at, source, ...m }) => m);
-          const snap: Notify<{ messages: Message[] }> = {
-            at: Date.now(),
-            data: { messages },
-          };
-          ctx.events.emit(Events.CONVERSATION_SNAPSHOT, snap);
-        }),
-      );
+      // Contribute the conversation as a MESSAGE-target context block. Every beat the
+      // orchestrator renders this block and places its Message[] GROUP into the request's
+      // messages array (ordered among message-blocks by priority). render() strips
+      // provenance (at/source) to wire Message[] — a user turn's source is already
+      // surfaced via Message.name — and returns a fresh array of fresh objects, so a
+      // consumer cannot mutate the stored turns. Registered ONCE; it reads `turns` live.
+      ctx.setBlock({
+        id: BLOCK_ID,
+        target: "messages",
+        priority,
+        render: (): Message[] => turns.map(({ at, source, ...m }) => m),
+      });
     },
 
     teardown() {
       for (const off of unsubs) off();
       unsubs = [];
+      context?.removeBlock(BLOCK_ID);
       context = undefined;
     },
   };
