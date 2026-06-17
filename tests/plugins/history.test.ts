@@ -9,16 +9,23 @@ import type { Message } from "../../contracts/llm";
 import type { Plugin, PluginContext } from "../../contracts/plugin";
 
 // ---------------------------------------------------------------------------
-// BLACK-BOX edge tests for the `history` plugin (conversation.snapshot vocab).
+// BLACK-BOX edge tests for the `history` plugin (message-target block vocab).
 //
 // Spec: history folds four generic events into an ordered list of stored chat
 // turns (each a wire `Message` PLUS provenance `source` + `at`):
 //   input.message  -> { role:"user",      content, name:source,        source, at }
 //   llm.return(ok) -> { role:"assistant", content, toolCalls?,  source:"assistant", at }
 //   tool.result    -> { role:"tool", content, toolCallId:id, name, source:name, at }
-// On EVERY prompt.gather it EMITS Events.CONVERSATION_SNAPSHOT carrying the
-// current conversation as WIRE `Message[]` — each stored turn with `at` + `source`
-// STRIPPED OUT (role/content kept; whichever of toolCallId/name/toolCalls present).
+// On `setup` it registers EXACTLY ONE message-target context block via
+// `ctx.setBlock`:
+//   { id:"history", target:"messages", priority, render: () => Message[] }
+// where priority = (finite-number config.priority) ?? 5000. The block's
+// render() returns the current conversation as WIRE `Message[]` — each stored
+// turn with `at` + `source` STRIPPED OUT (role/content kept; whichever of
+// toolCallId/name/toolCalls present) — and returns a COPY (external mutation
+// must not corrupt internal turns). On `teardown` it calls
+// `ctx.removeBlock("history")` and unsubscribes its listeners. It NO LONGER
+// listens to prompt.gather and NO LONGER emits conversation.snapshot.
 // It persists every FULL stored turn to <dataDir>/history.jsonl (one JSON line)
 // and reloads it at setup (last `maxEntries`, default 200), skipping malformed /
 // foreign lines. It registers NO actions and its manifest has NO `provides`
@@ -50,6 +57,7 @@ const STUB_LLM = {
 
 function makeCtx(dataDir: string, config?: unknown) {
   const sys = createEventSystem();
+  const blocks = new Map<string, any>();
   const ctx: PluginContext = {
     agentId: "agent-1",
     events: sys.events,
@@ -57,14 +65,16 @@ function makeCtx(dataDir: string, config?: unknown) {
     config,
     dataDir,
     llm: STUB_LLM,
-    setBlock: () => {},
-    getBlock: () => undefined,
-    removeBlock: () => false,
-    listBlocks: () => [],
+    setBlock: (b: any) => {
+      blocks.set(b.id, b);
+    },
+    getBlock: (id: string) => blocks.get(id),
+    removeBlock: (id: string) => blocks.delete(id),
+    listBlocks: () => [...blocks.values()].map((b) => ({ id: b.id, priority: b.priority })),
     log: { info: () => {}, warn: () => {}, error: () => {} },
     print: () => {},
   };
-  return { sys, ctx, events: sys.events, actions: sys.actions };
+  return { sys, ctx, events: sys.events, actions: sys.actions, blocks };
 }
 
 async function setup(t: { after(fn: () => void): void }, config?: unknown) {
@@ -94,24 +104,14 @@ function settle(ms = 5): Promise<void> {
 }
 
 /**
- * Drive one prompt.gather and capture the conversation.snapshot it provokes.
- * Subscribes BEFORE emitting (so a synchronous re-emit is caught), unsubscribes
- * after, and returns the wire `messages` from the LAST snapshot seen.
- * Returns `null` if no snapshot was emitted (e.g. after teardown).
+ * Read the conversation history now contributes as a message-target block: find the
+ * "history" block in the ctx's block store and return its rendered wire Message[].
+ * Returns null if no such block exists (e.g. after teardown removed it).
  */
-async function snapshot(events: any, seq = 1): Promise<Message[] | null> {
-  let captured: Message[] | null = null;
-  const off = events.on(Events.CONVERSATION_SNAPSHOT, (payload: any) => {
-    // payload is Notify<{ messages: Message[] }>
-    captured = payload?.data?.messages ?? null;
-  });
-  try {
-    events.emit(Events.PROMPT_GATHER, { at: 9000 + seq, data: { seq } });
-    await settle();
-  } finally {
-    off();
-  }
-  return captured;
+async function renderHistory(blocks: Map<string, any>): Promise<Message[] | null> {
+  const b = blocks.get("history");
+  if (!b) return null;
+  return await b.render();
 }
 
 // emit helpers in the well-known envelope shapes
@@ -166,26 +166,50 @@ test("setup: registers NO actions — in particular not 'conversation.get'", asy
 });
 
 // ===========================================================================
-// 2. snapshot basics — emitted on prompt.gather, empty when no turns
+// 2. block basics — registered message-target block, empty when no turns
 // ===========================================================================
 
-test("prompt.gather on a brand-new agent emits a snapshot with messages: []", async (t) => {
-  const { events } = await setup(t);
-  const msgs = await snapshot(events);
-  assert.notEqual(msgs, null, "a snapshot is emitted even with zero turns");
+test("setup: registers a message-target block id 'history' at default priority 5000", async (t) => {
+  const { blocks } = await setup(t);
+  const b = blocks.get("history");
+  assert.ok(b, "a 'history' block must be registered on setup");
+  assert.equal(b.id, "history");
+  assert.equal(b.target, "messages", "the block targets the messages section");
+  assert.equal(b.priority, 5000, "the median default priority is 5000");
+  assert.equal(typeof b.render, "function", "the block must expose a render() function");
+});
+
+test("config.priority overrides the block priority (e.g. 1000)", async (t) => {
+  const a = await setup(t, { priority: 1000 });
+  assert.equal(a.blocks.get("history").priority, 1000, "a finite number config.priority wins");
+  // 0 is a finite number -> it overrides the default
+  const z = await setup(t, { priority: 0 });
+  assert.equal(z.blocks.get("history").priority, 0, "0 is finite -> overrides default");
+  // negative is a finite number -> it overrides the default
+  const n = await setup(t, { priority: -7 });
+  assert.equal(n.blocks.get("history").priority, -7, "negative is finite -> overrides default");
+  // a non-number priority falls back to 5000
+  const bad = await setup(t, { priority: "high" });
+  assert.equal(bad.blocks.get("history").priority, 5000, "non-number priority -> default 5000");
+});
+
+test("a brand-new agent's history block renders messages: []", async (t) => {
+  const { blocks } = await setup(t);
+  const msgs = await renderHistory(blocks);
+  assert.notEqual(msgs, null, "the block exists and renders even with zero turns");
   assert.deepEqual(msgs, []);
 });
 
-test("snapshot is emitted on EVERY prompt.gather (not just the first)", async (t) => {
-  const { events } = await setup(t);
-  const first = await snapshot(events, 1);
+test("the history block reflects the latest turns on each render", async (t) => {
+  const { events, blocks } = await setup(t);
+  const first = await renderHistory(blocks);
   assert.deepEqual(first, []);
   input(events, "hello", "web");
   await settle();
-  const second = await snapshot(events, 2);
+  const second = await renderHistory(blocks);
   assert.deepEqual(second, [{ role: "user", content: "hello", name: "web" }]);
-  // and a third gather with no new turns still emits, unchanged
-  const third = await snapshot(events, 3);
+  // a render after no new turns is unchanged
+  const third = await renderHistory(blocks);
   assert.deepEqual(third, [{ role: "user", content: "hello", name: "web" }]);
 });
 
@@ -194,10 +218,10 @@ test("snapshot is emitted on EVERY prompt.gather (not just the first)", async (t
 // ===========================================================================
 
 test("input.message -> wire user turn { role:'user', content, name:channel } (no at, no source)", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   input(events, "hello krakey", "web", 1234);
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.equal(msgs.length, 1, "exactly one wire message");
   const m = msgs[0];
   assert.equal(m.role, "user");
@@ -210,42 +234,42 @@ test("input.message -> wire user turn { role:'user', content, name:channel } (no
 });
 
 test("input.message without a channel -> name 'user' (source defaulted then surfaced)", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   input(events, "hi");
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "user");
   assert.equal(m.content, "hi");
   assert.equal(m.name, "user", "absent channel -> source 'user' -> wire name 'user'");
 });
 
 test("input.message with a non-string channel -> name falls back to 'user'", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   // channel present but not a string: source must default to "user".
   events.emit(Events.INPUT_MESSAGE, { at: 1, data: { text: "hey", channel: 123 } });
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.equal(msgs.length, 1);
   assert.equal(msgs[0].name, "user");
 });
 
 test("input.message with empty-string text is still a user turn (content '')", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   input(events, "", "web");
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.equal(msgs.length, 1, "empty string is a valid string -> recorded");
   assert.equal(msgs[0].content, "");
   assert.equal(msgs[0].role, "user");
 });
 
 test("input.message with a non-string text is ignored (no turn)", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.INPUT_MESSAGE, { at: 1, data: { text: 42 } });
   events.emit(Events.INPUT_MESSAGE, { at: 2, data: { text: null } });
   events.emit(Events.INPUT_MESSAGE, { at: 3, data: {} });
   await settle();
-  assert.deepEqual(await snapshot(events), []);
+  assert.deepEqual(await renderHistory(blocks), []);
 });
 
 // ===========================================================================
@@ -253,10 +277,10 @@ test("input.message with a non-string text is ignored (no turn)", async (t) => {
 // ===========================================================================
 
 test("llm.return(ok) -> wire assistant turn { role:'assistant', content } and NO toolCalls key", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   ret(events, "the answer is 42");
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "assistant");
   assert.equal(m.content, "the answer is 42");
   assert.equal(hasKey(m, "toolCalls"), false, "no toolCalls key when none were returned");
@@ -265,20 +289,20 @@ test("llm.return(ok) -> wire assistant turn { role:'assistant', content } and NO
 });
 
 test("llm.return with non-string content -> content coerced to '' ", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.LLM_RETURN, { id: "r", at: 1, ok: true, data: { content: undefined } });
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "assistant");
   assert.equal(m.content, "", "missing/non-string content becomes the empty string");
 });
 
 test("llm.return with non-empty toolCalls -> they are preserved on the wire assistant turn", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   const calls = [{ id: "c1", name: "time.now", arguments: {} }];
   ret(events, "", calls);
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "assistant");
   assert.equal(m.content, "");
   assert.equal(hasKey(m, "toolCalls"), true, "toolCalls present when the model emitted some");
@@ -286,27 +310,27 @@ test("llm.return with non-empty toolCalls -> they are preserved on the wire assi
 });
 
 test("llm.return with an EMPTY toolCalls array -> the toolCalls key is omitted", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   // length 0 -> spec says toolCalls is attached ONLY if length > 0.
   events.emit(Events.LLM_RETURN, { id: "r", at: 1, ok: true, data: { content: "hi", toolCalls: [] } });
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "assistant");
   assert.equal(hasKey(m, "toolCalls"), false, "empty toolCalls must not appear on the wire");
 });
 
 test("llm.return with ok:false records nothing", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.LLM_RETURN, { id: "r", at: 1, ok: false, error: "boom" });
   await settle();
-  assert.deepEqual(await snapshot(events), []);
+  assert.deepEqual(await renderHistory(blocks), []);
 });
 
 test("llm.return ok:true but missing data records nothing", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.LLM_RETURN, { id: "r", at: 1, ok: true });
   await settle();
-  assert.deepEqual(await snapshot(events), []);
+  assert.deepEqual(await renderHistory(blocks), []);
 });
 
 // ===========================================================================
@@ -314,10 +338,10 @@ test("llm.return ok:true but missing data records nothing", async (t) => {
 // ===========================================================================
 
 test("tool.result(ok) -> wire tool turn { role:'tool', content=JSON(data), toolCallId=id, name } (no at/source)", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   toolRes(events, "c1", "time.now", { iso: "2026-06-15T10:00:00Z", epochMs: 1 }, 5555);
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "tool");
   assert.equal(m.toolCallId, "c1", "pairs with the assistant tool_call id");
   assert.equal(m.name, "time.now");
@@ -328,19 +352,19 @@ test("tool.result(ok) -> wire tool turn { role:'tool', content=JSON(data), toolC
 });
 
 test("tool.result(ok) with no data -> content is the JSON literal 'null'", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.TOOL_RESULT, { id: "c9", at: 1, ok: true, name: "noop.tool" });
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "tool");
   assert.equal(m.content, "null", "data ?? null -> JSON.stringify(null) === 'null'");
 });
 
 test("tool.result with ok:false -> content is an 'Error: ...' string carrying the error", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.TOOL_RESULT, { id: "c2", at: 1, ok: false, error: "exploded", name: "note.save" });
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "tool");
   assert.equal(m.toolCallId, "c2");
   assert.equal(m.name, "note.save");
@@ -349,45 +373,45 @@ test("tool.result with ok:false -> content is an 'Error: ...' string carrying th
 });
 
 test("tool.result with ok:false and NO error -> content 'Error: tool failed'", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   events.emit(Events.TOOL_RESULT, { id: "c3", at: 1, ok: false, name: "broken.tool" });
   await settle();
-  const m = (await snapshot(events))![0];
+  const m = (await renderHistory(blocks))![0];
   assert.equal(m.role, "tool");
   assert.equal(m.content, "Error: tool failed");
 });
 
 test("tool.result with a non-string name is ignored (no turn)", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   // `name` is the discriminator; a non-string name => skip.
   events.emit(Events.TOOL_RESULT, { id: "c4", at: 1, ok: true, data: { x: 1 }, name: 99 });
   await settle();
-  assert.deepEqual(await snapshot(events), []);
+  assert.deepEqual(await renderHistory(blocks), []);
 });
 
 // ===========================================================================
-// 6. ordering, multi-turn round, snapshot isolation (copy semantics)
+// 6. ordering, multi-turn round, render isolation (copy semantics)
 // ===========================================================================
 
 test("turns preserve emit order: user -> assistant(toolCall) -> tool -> assistant", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   input(events, "what time is it?", "web");
   ret(events, "", [{ id: "c1", name: "time.now", arguments: {} }]);
   toolRes(events, "c1", "time.now", { iso: "x" });
   ret(events, "it is 10am");
   await settle();
-  const roles = (await snapshot(events))!.map((m) => m.role);
+  const roles = (await renderHistory(blocks))!.map((m) => m.role);
   assert.deepEqual(roles, ["user", "assistant", "tool", "assistant"]);
 });
 
 test("a full round produces exactly the three wire messages, in order, fully shaped", async (t) => {
-  const { events } = await setup(t);
+  const { events, blocks } = await setup(t);
   const calls = [{ id: "c1", name: "time.now", arguments: {} }];
   input(events, "what time is it?", "web", 1000);
   ret(events, "let me check", calls, 2000);
   toolRes(events, "c1", "time.now", { iso: "2026-06-15T10:00:00Z" }, 3000);
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.deepEqual(msgs, [
     { role: "user", content: "what time is it?", name: "web" },
     { role: "assistant", content: "let me check", toolCalls: calls },
@@ -400,17 +424,17 @@ test("a full round produces exactly the three wire messages, in order, fully sha
   ]);
 });
 
-test("the snapshot is a COPY — mutating the emitted array does not corrupt the next snapshot", async (t) => {
-  const { events } = await setup(t);
+test("the render is a COPY — mutating the rendered array/objects does not corrupt a later render", async (t) => {
+  const { events, blocks } = await setup(t);
   input(events, "hi", "web");
   await settle();
-  const first = (await snapshot(events))!;
+  const first = (await renderHistory(blocks))!;
   assert.equal(first.length, 1);
   // mutate the returned array AND its element objects
   first.push({ role: "user", content: "injected" } as Message);
   (first[0] as any).content = "corrupted";
   (first[0] as any).role = "system";
-  const second = (await snapshot(events))!;
+  const second = (await renderHistory(blocks))!;
   assert.equal(second.length, 1, "internal list length must be unaffected by external mutation");
   assert.equal(second[0].content, "hi", "internal turn content must be unaffected");
   assert.equal(second[0].role, "user");
@@ -422,6 +446,7 @@ test("the snapshot is a COPY — mutating the emitted array does not corrupt the
 
 test("persistence: each turn is appended to <dataDir>/history.jsonl as one FULL JSON line (with at/source)", async (t) => {
   const { events, dataDir } = await setup(t);
+  // (observation here is the JSONL file itself, not the block render)
   input(events, "one", "web", 1111);
   ret(events, "two", undefined, 2222);
   await settle();
@@ -440,7 +465,7 @@ test("persistence: each turn is appended to <dataDir>/history.jsonl as one FULL 
   assert.equal(b.source, "assistant");
 });
 
-test("reload: a fresh instance over the same dataDir restores prior turns (seen via a post-reload snapshot)", async (t) => {
+test("reload: a fresh instance over the same dataDir restores prior turns (seen via the reloaded block render)", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "history-reload-"));
   t.after(() => {
     try {
@@ -461,7 +486,7 @@ test("reload: a fresh instance over the same dataDir restores prior turns (seen 
   const b = makeCtx(dataDir);
   const pb = plugin();
   await pb.setup(b.ctx);
-  const msgs = (await snapshot(b.events))!;
+  const msgs = (await renderHistory(b.blocks))!;
   await pb.teardown?.();
   assert.deepEqual(
     msgs,
@@ -469,7 +494,7 @@ test("reload: a fresh instance over the same dataDir restores prior turns (seen 
       { role: "user", content: "remembered", name: "web" },
       { role: "assistant", content: "ack" },
     ],
-    "the persisted turns must reload from JSONL and re-emit as wire messages",
+    "the persisted turns must reload from JSONL and render as wire messages",
   );
 });
 
@@ -497,7 +522,7 @@ test("reload: corrupt or foreign-schema lines are skipped (never poison the conv
   const h = makeCtx(dataDir);
   const p = plugin();
   await p.setup(h.ctx);
-  const msgs = (await snapshot(h.events))!;
+  const msgs = (await renderHistory(h.blocks))!;
   await p.teardown?.();
   assert.deepEqual(
     msgs,
@@ -510,10 +535,10 @@ test("reload: corrupt or foreign-schema lines are skipped (never poison the conv
 });
 
 test("bounding: maxEntries keeps only the most recent turns (live appends)", async (t) => {
-  const { events } = await setup(t, { maxEntries: 3 });
+  const { events, blocks } = await setup(t, { maxEntries: 3 });
   for (let i = 0; i < 5; i++) input(events, `m${i}`, "web");
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.equal(msgs.length, 3, "older turns are trimmed from the front");
   assert.deepEqual(
     msgs.map((m) => m.content),
@@ -522,11 +547,11 @@ test("bounding: maxEntries keeps only the most recent turns (live appends)", asy
 });
 
 test("bounding: maxEntries=1 keeps a single turn", async (t) => {
-  const { events } = await setup(t, { maxEntries: 1 });
+  const { events, blocks } = await setup(t, { maxEntries: 1 });
   input(events, "a", "web");
   input(events, "b", "web");
   await settle();
-  const msgs = (await snapshot(events))!;
+  const msgs = (await renderHistory(blocks))!;
   assert.equal(msgs.length, 1);
   assert.equal(msgs[0].content, "b");
 });
@@ -534,10 +559,10 @@ test("bounding: maxEntries=1 keeps a single turn", async (t) => {
 test("bounding: a non-positive / non-number maxEntries falls back to the default (turns are NOT dropped to 0)", async (t) => {
   // 0, negative, and non-number must not wipe history; default (200) applies.
   for (const bad of [{ maxEntries: 0 }, { maxEntries: -5 }, { maxEntries: "lots" }]) {
-    const { events } = await setup(t, bad);
+    const { events, blocks } = await setup(t, bad);
     input(events, "kept", "web");
     await settle();
-    const msgs = (await snapshot(events))!;
+    const msgs = (await renderHistory(blocks))!;
     assert.equal(msgs.length, 1, `maxEntries=${JSON.stringify(bad)} must not drop turns to zero`);
     assert.equal(msgs[0].content, "kept");
   }
@@ -560,7 +585,7 @@ test("reload bounding: only the last maxEntries lines are restored", async (t) =
   const h = makeCtx(dataDir, { maxEntries: 2 });
   const p = plugin();
   await p.setup(h.ctx);
-  const msgs = (await snapshot(h.events))!;
+  const msgs = (await renderHistory(h.blocks))!;
   await p.teardown?.();
   assert.deepEqual(
     msgs.map((m) => m.content),
@@ -570,10 +595,10 @@ test("reload bounding: only the last maxEntries lines are restored", async (t) =
 });
 
 // ===========================================================================
-// 8. teardown — listeners removed, no more snapshots / folding
+// 8. teardown — block removed, listeners removed, no more folding
 // ===========================================================================
 
-test("teardown: after teardown a prompt.gather emits NO snapshot", async (t) => {
+test("teardown: after teardown the history block is removed", async (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "history-td-"));
   t.after(() => {
     try {
@@ -585,13 +610,19 @@ test("teardown: after teardown a prompt.gather emits NO snapshot", async (t) => 
   const h = makeCtx(dataDir);
   const p = plugin();
   await p.setup(h.ctx);
-  // sanity: it DOES emit while alive
-  assert.deepEqual(await snapshot(h.events), []);
+  // sanity: the block exists and renders while alive
+  assert.ok(h.blocks.get("history"), "the block is registered while alive");
+  assert.deepEqual(await renderHistory(h.blocks), []);
   await p.teardown?.();
   assert.equal(
-    await snapshot(h.events),
+    h.blocks.get("history"),
+    undefined,
+    "teardown must removeBlock('history')",
+  );
+  assert.equal(
+    await renderHistory(h.blocks),
     null,
-    "no conversation.snapshot is emitted after teardown",
+    "with the block gone, renderHistory returns null",
   );
 });
 
@@ -620,7 +651,7 @@ test("teardown: after teardown, input/llm/tool events are no longer folded", asy
   const h2 = makeCtx(dataDir);
   const p2 = plugin();
   await p2.setup(h2.ctx);
-  const msgs = (await snapshot(h2.events))!;
+  const msgs = (await renderHistory(h2.blocks))!;
   await p2.teardown?.();
   assert.deepEqual(
     msgs.map((m) => m.content),
