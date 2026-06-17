@@ -58,7 +58,7 @@
     "orchestrator": {
       "zone": "core",
       "path": "packages/orchestrator",
-      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks; a conversation provider emits conversation.snapshot) → compose → llm.request{context,messages} (transports the captured messages, never inspects them); dispatch tool calls from llm.return.",
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks) → compose → llm.request{context,messages}. compose splits blocks by target: system blocks → system prompt text (priority DESC, wrapped <label>), message blocks → messages array (groups concatenated by priority DESC, within-group order kept; the conversation is one such block). Dispatch tool calls from llm.return.",
       "depends_on_contracts": [
         "event-system",
         "clock",
@@ -172,10 +172,11 @@
     "history": {
       "zone": "plugins",
       "path": "public_plugin/history",
-      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; contributes the turns to the orchestrator via the conversation.snapshot event on prompt.gather (provenance stripped to wire Message[]), which the orchestrator forwards as the beat's llm.request messages.",
+      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; contributes the turns as a message-target context block (id 'history', median priority 5000) whose render() returns the conversation as wire Message[] (provenance stripped), which the orchestrator places into the beat's llm.request messages, ordered among message-blocks by priority.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
+        "context",
         "llm"
       ],
       "implements_contracts": [],
