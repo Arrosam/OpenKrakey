@@ -33,7 +33,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
-import type { LLMResponse, ToolDef } from "../../contracts/llm";
+import type { LLMResponse, Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
 import {
   type AgentReg,
@@ -64,8 +64,8 @@ const SEND_MESSAGE_ACTION = "web.send_message";
  * Priority 9000: just BELOW persona's stable 10000, so persona stays the byte-stable
  * top-of-prompt prefix (the prompt-cache anchor), yet far above any volatile content.
  * The text is itself fixed across beats, so persona + web compose a stable system
- * prefix. (Conversation is NOT a block — it rides as a separate `messages` array —
- * so nothing volatile interleaves between these two.) A future Slack/CLI channel
+ * prefix. (The conversation is web's OWN `messages`-target block at priority 5000, so
+ * it sits well below these stable system blocks.) A future Slack/CLI channel
  * adds its OWN block naming its OWN send tool, so the model learns each channel's
  * speak path from that channel itself.
  */
@@ -80,6 +80,21 @@ const GUIDANCE_TEXT =
   "write outside that tool call never reaches the user — a plain reply alone leaves " +
   "the user seeing silence.\n" +
   "On a beat where you have nothing worth sending, just think; do not call the tool.";
+
+/**
+ * web's CONVERSATION context block — web maintains its OWN chat history (the per-agent
+ * transcript it already persists for the browser) and contributes it to the prompt as
+ * the conversation. Each stored turn renders as a CLEAN wire message: a user message →
+ * {role:"user", name:"web"}, an agent send (web.send_message) → {role:"assistant"}. The
+ * LLM's plain monologue is never stored (web records only what the user said and what the
+ * agent explicitly sent), so the prompt's conversation stays clean — no monologue, no
+ * tool-call mechanics.
+ *
+ * Priority 5000 (median): below the stable system blocks (persona 10000, web.guidance
+ * 9000), leaving room for other message-blocks to inject before (>5000) or after (<5000).
+ */
+const CONVERSATION_BLOCK_ID = "web.conversation";
+const CONVERSATION_PRIORITY = 5000;
 
 /**
  * A configured token is adopted only if it's a URL/cookie-safe string of length
@@ -208,6 +223,23 @@ const createWeb: PluginFactory = (): Plugin => {
         render: () => GUIDANCE_TEXT,
       });
 
+      // Contribute web's OWN chat history as the prompt's conversation (message-target
+      // block). render() maps the live transcript to clean wire turns — a user message →
+      // {role:"user"} tagged with the channel via `name`, an agent send → {role:"assistant"}
+      // — so the model sees the dialogue without the monologue or tool mechanics. Reads
+      // r.store live each beat; registered once.
+      ctx.setBlock({
+        id: CONVERSATION_BLOCK_ID,
+        target: "messages",
+        priority: CONVERSATION_PRIORITY,
+        render: (): Message[] =>
+          r.store.list().map((e) =>
+            e.role === "agent"
+              ? { role: "assistant", content: e.text }
+              : { role: "user", content: e.text, name: "web" },
+          ),
+      });
+
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
       // (so an EARLIER outstanding request's return can't claim them).
@@ -237,7 +269,13 @@ const createWeb: PluginFactory = (): Plugin => {
 
       // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web's
       // guidance context block (registered above) via the captured removeBlock.
-      unsubs = [offSend, offRequest, offReturn, () => removeBlock(GUIDANCE_BLOCK_ID)];
+      unsubs = [
+        offSend,
+        offRequest,
+        offReturn,
+        () => removeBlock(GUIDANCE_BLOCK_ID),
+        () => removeBlock(CONVERSATION_BLOCK_ID),
+      ];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
       await ensureServer(port, host, tk, (line) => ctx.print(line));
