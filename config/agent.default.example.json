@@ -3,6 +3,7 @@
   "plugins": [
     "llm-core",
     "persona",
+    "system-prompt",
     "web"
   ],
   "privatePlugins": [
