@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-16T00:00:00Z"
+    "updated_at": "2026-06-18T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -25,7 +25,7 @@
       "nodes": [
         "llm-core",
         "persona",
-        "history",
+        "system-prompt",
         "web",
         "inspector"
       ],
@@ -58,7 +58,7 @@
     "orchestrator": {
       "zone": "core",
       "path": "packages/orchestrator",
-      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks; a conversation provider emits conversation.snapshot) → compose → llm.request{context,messages} (transports the captured messages, never inspects them); dispatch tool calls from llm.return.",
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks) → compose → llm.request{context,messages}. compose splits blocks by target: system blocks → system prompt text (priority DESC, wrapped <label>), message blocks → messages array (groups concatenated by priority DESC, within-group order kept; the conversation is one such block). Dispatch tool calls from llm.return.",
       "depends_on_contracts": [
         "event-system",
         "clock",
@@ -169,26 +169,27 @@
       "status": "done",
       "overview": "overviews/nodes/persona.md"
     },
-    "history": {
+    "system-prompt": {
       "zone": "plugins",
-      "path": "public_plugin/history",
-      "description": "Conversation memory in Hermes chat shape: folds input.message / llm.return / tool.result into ordered role-separated turns (user / assistant+toolCalls / tool+toolCallId), each carrying source + timestamp; persists JSONL; contributes the turns to the orchestrator via the conversation.snapshot event on prompt.gather (provenance stripped to wire Message[]), which the orchestrator forwards as the beat's llm.request messages.",
+      "path": "public_plugin/system-prompt",
+      "description": "Stable system-target context block (priority 9000, just below persona) introducing the LLM to the agent's OPERATING MODEL — the monologue rule + basic tool-use, CHANNEL-AGNOSTIC (never names a channel's send tool). Text/priority configurable. Identity lives in persona; this is operation.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
-        "llm"
+        "context"
       ],
       "implements_contracts": [],
       "status": "done",
-      "overview": "overviews/nodes/history.md"
+      "overview": "overviews/nodes/system-prompt.md"
     },
     "web": {
       "zone": "plugins",
       "path": "public_plugin/web",
-      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed; per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed. Contributes a `web.guidance` SYSTEM block (priority 8000, text/priority config-overridable) teaching THIS channel's own usage (Web Chat is a message channel; reach its user only by calling web.send_message) — the general monologue/operating-model rule stays in the separate `system-prompt` plugin. OWNS THE CONVERSATION via a `web.conversation` message-block (priority 5000) rendering its persisted transcript as clean turns (user input + agent sends; no monologue, no tool mechanics). The data-carrying plugin, so private-by-default (per-agent transcript). per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
+        "context",
         "llm"
       ],
       "implements_contracts": [],

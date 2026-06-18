@@ -25,6 +25,10 @@
  * secrets) and, when opened with the valid ?token=, sets an HttpOnly cookie so the
  * page's same-origin fetch/SSE authenticate automatically (no token in API URLs).
  *
+ * Context: web contributes a `web.guidance` system block (what this channel is and
+ * that the agent reaches its user only via web.send_message) plus the `web.conversation`
+ * message block (web's own chat history rendered as clean turns).
+ *
  * The default export is a PluginFactory — the loader calls it once per Agent; only
  * the hub (a process resource) is module-level. Persistence + the transcript live
  * in ./transcript-store; the HTTP/SSE server + auth live in ./hub.
@@ -33,7 +37,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
-import type { LLMResponse, ToolDef } from "../../contracts/llm";
+import type { LLMResponse, Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events, type EventPayloads, type Reply } from "../../shared/actions";
 import {
   type AgentReg,
@@ -51,6 +55,41 @@ const DEFAULT_HOST = "127.0.0.1";
 
 /** The chat-tool action the orchestrator dispatches when the LLM decides to speak. */
 const SEND_MESSAGE_ACTION = "web.send_message";
+
+/**
+ * web's CONVERSATION context block — web maintains its OWN chat history (the per-agent
+ * transcript it already persists for the browser) and contributes it to the prompt as
+ * the conversation. Each stored turn renders as a CLEAN wire message: a user message →
+ * {role:"user", name:"web"}, an agent send (web.send_message) → {role:"assistant"}. The
+ * LLM's plain monologue is never stored (web records only what the user said and what the
+ * agent explicitly sent), so the prompt's conversation stays clean — no monologue, no
+ * tool-call mechanics.
+ *
+ * Priority 5000 (median): below the stable system blocks (persona 10000, system-prompt
+ * 9000), leaving room for other message-blocks to inject before (>5000) or after (<5000).
+ */
+const CONVERSATION_BLOCK_ID = "web.conversation";
+const CONVERSATION_PRIORITY = 5000;
+
+/**
+ * web's GUIDANCE context block — a SYSTEM-target block teaching the LLM what THIS
+ * channel is and how to use it: Web Chat is a message channel, and the agent reaches
+ * its user ONLY by calling the web.send_message tool. Channel-SPECIFIC by design — the
+ * GENERAL operating model (the private-monologue rule, "act only via tools") lives in
+ * the separate `system-prompt` plugin; this block does not restate it.
+ *
+ * Priority 8000: a stable system block that sits below persona (10000, identity) and
+ * system-prompt (9000, general model), so the system prompt reads identity → general
+ * model → this channel's specifics. Text + priority overridable via config.
+ */
+const GUIDANCE_BLOCK_ID = "web.guidance";
+const GUIDANCE_PRIORITY = 8000;
+const DEFAULT_GUIDANCE =
+  "You are connected to a human through Web Chat, a message channel. In the " +
+  "conversation, messages tagged `web` are what this user typed to you. To say " +
+  "anything back to them — an answer, a question, an acknowledgement — you must call " +
+  "the `web.send_message` tool; this channel delivers ONLY what you send through that " +
+  "tool. Merely thinking a reply does not send it.";
 
 /**
  * A configured token is adopted only if it's a URL/cookie-safe string of length
@@ -73,9 +112,18 @@ const createWeb: PluginFactory = (): Plugin => {
       // Destructure the only ctx members the long-lived closures need, so the rest
       // of ctx (config, dataDir, print, …) can be GC'd once setup() returns instead
       // of being pinned for the agent's lifetime by the closures stored in `regs`.
-      const { events, actions } = ctx;
+      // removeBlock is one such member — the teardown thunks in `unsubs` call it to
+      // drop web's context blocks (the guidance + conversation blocks), so we capture
+      // just it rather than retaining ctx.
+      const { events, actions, removeBlock } = ctx;
 
-      const cfg = (ctx.config ?? {}) as { port?: number; host?: string; token?: string };
+      const cfg = (ctx.config ?? {}) as {
+        port?: number;
+        host?: string;
+        token?: string;
+        guidance?: string;
+        guidancePriority?: number;
+      };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
       const host = typeof cfg.host === "string" && cfg.host ? cfg.host : DEFAULT_HOST;
       // A fresh random token per process unless a VALID one is pinned in config.
@@ -153,8 +201,8 @@ const createWeb: PluginFactory = (): Plugin => {
       const sendTool: ToolDef = {
         name: SEND_MESSAGE_ACTION,
         description:
-          "Send a message to the user in the web chat. Your plain replies are private " +
-          "thinking; call this tool whenever you actually want to say something to the user.",
+          "Send a message to the user in the web chat. This is the ONLY way to reach " +
+          "them — your plain (non-tool) replies are never delivered.",
         parameters: {
           type: "object",
           properties: { text: { type: "string", description: "The message to show the user." } },
@@ -166,6 +214,36 @@ const createWeb: PluginFactory = (): Plugin => {
       } catch (err) {
         ctx.log.warn(`web: failed to register the web.send_message tool: ${String(err)}`);
       }
+
+      // Contribute web's OWN channel guidance as a stable SYSTEM block: what this channel is
+      // and that the agent reaches its user ONLY via the web.send_message tool. Channel-specific;
+      // the general monologue/operating-model rule is the system-prompt plugin's job. Text and
+      // priority are config-overridable (cfg.guidance / cfg.guidancePriority).
+      ctx.setBlock({
+        id: GUIDANCE_BLOCK_ID,
+        // Label = id so the orchestrator wraps it as <web.guidance>…</web.guidance>.
+        label: GUIDANCE_BLOCK_ID,
+        target: "system",
+        priority: cfg.guidancePriority ?? GUIDANCE_PRIORITY,
+        render: (): string => cfg.guidance ?? DEFAULT_GUIDANCE,
+      });
+
+      // Contribute web's OWN chat history as the prompt's conversation (message-target
+      // block). render() maps the live transcript to clean wire turns — a user message →
+      // {role:"user"} tagged with the channel via `name`, an agent send → {role:"assistant"}
+      // — so the model sees the dialogue without the monologue or tool mechanics. Reads
+      // r.store live each beat; registered once.
+      ctx.setBlock({
+        id: CONVERSATION_BLOCK_ID,
+        target: "messages",
+        priority: CONVERSATION_PRIORITY,
+        render: (): Message[] =>
+          r.store.list().map((e) =>
+            e.role === "agent"
+              ? { role: "assistant", content: e.text }
+              : { role: "user", content: e.text, name: "web" },
+          ),
+      });
 
       // A new request snapshots the messages now in its composed context: those
       // pending messages are carried by THIS request and become its responsibility
@@ -194,7 +272,16 @@ const createWeb: PluginFactory = (): Plugin => {
         }
       });
 
-      unsubs = [offSend, offRequest, offReturn];
+      // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web's
+      // two context blocks (the guidance + conversation blocks, registered above) via
+      // the captured removeBlock.
+      unsubs = [
+        offSend,
+        offRequest,
+        offReturn,
+        () => removeBlock(GUIDANCE_BLOCK_ID),
+        () => removeBlock(CONVERSATION_BLOCK_ID),
+      ];
       // Await the bind so the URL is announced within this agent's startup block
       // (the startup report indents it under the agent), with the real bound port.
       await ensureServer(port, host, tk, (line) => ctx.print(line));
