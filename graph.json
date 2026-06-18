@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-16T00:00:00Z"
+    "updated_at": "2026-06-18T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -185,7 +185,7 @@
     "web": {
       "zone": "plugins",
       "path": "public_plugin/web",
-      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed; OWNS THE CONVERSATION via a `web.conversation` message-block (priority 5000) rendering its persisted transcript as clean turns (user input + agent sends; no monologue, no tool mechanics). The monologue rule itself lives in the separate `system-prompt` plugin — web is a pure channel. The data-carrying plugin, so private-by-default (per-agent transcript). per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed. Contributes a `web.guidance` SYSTEM block (priority 8000, text/priority config-overridable) teaching THIS channel's own usage (Web Chat is a message channel; reach its user only by calling web.send_message) — the general monologue/operating-model rule stays in the separate `system-prompt` plugin. OWNS THE CONVERSATION via a `web.conversation` message-block (priority 5000) rendering its persisted transcript as clean turns (user input + agent sends; no monologue, no tool mechanics). The data-carrying plugin, so private-by-default (per-agent transcript). per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
