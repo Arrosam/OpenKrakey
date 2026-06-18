@@ -53,35 +53,6 @@ const DEFAULT_HOST = "127.0.0.1";
 const SEND_MESSAGE_ACTION = "web.send_message";
 
 /**
- * web's GUIDANCE context block — the structural home for the monologue rule.
- *
- * The send tool (registered in setup) gives the LLM the MECHANISM to speak; this
- * block gives it the RULE: a plain reply is a PRIVATE monologue web renders to no
- * one, so the agent is heard only when it calls web.send_message. Stating that in
- * the composed prompt — not only in the tool's description — is what stops a model
- * from "replying" in plain text and looking silent in the chat.
- *
- * Priority 9000: just BELOW persona's stable 10000, so persona stays the byte-stable
- * top-of-prompt prefix (the prompt-cache anchor), yet far above any volatile content.
- * The text is itself fixed across beats, so persona + web compose a stable system
- * prefix. (The conversation is web's OWN `messages`-target block at priority 5000, so
- * it sits well below these stable system blocks.) A future Slack/CLI channel
- * adds its OWN block naming its OWN send tool, so the model learns each channel's
- * speak path from that channel itself.
- */
-const GUIDANCE_BLOCK_ID = "web.guidance";
-const GUIDANCE_LABEL = "web";
-const GUIDANCE_PRIORITY = 9000;
-const GUIDANCE_TEXT =
-  "You run on a recurring beat. The plain text you return each beat is a PRIVATE " +
-  "MONOLOGUE — your own thinking — and is shown to NO ONE.\n" +
-  "To actually say something to the user in the web chat you MUST call the " +
-  "`web.send_message` tool with the exact text you want them to see. Anything you " +
-  "write outside that tool call never reaches the user — a plain reply alone leaves " +
-  "the user seeing silence.\n" +
-  "On a beat where you have nothing worth sending, just think; do not call the tool.";
-
-/**
  * web's CONVERSATION context block — web maintains its OWN chat history (the per-agent
  * transcript it already persists for the browser) and contributes it to the prompt as
  * the conversation. Each stored turn renders as a CLEAN wire message: a user message →
@@ -90,7 +61,7 @@ const GUIDANCE_TEXT =
  * agent explicitly sent), so the prompt's conversation stays clean — no monologue, no
  * tool-call mechanics.
  *
- * Priority 5000 (median): below the stable system blocks (persona 10000, web.guidance
+ * Priority 5000 (median): below the stable system blocks (persona 10000, system-prompt
  * 9000), leaving room for other message-blocks to inject before (>5000) or after (<5000).
  */
 const CONVERSATION_BLOCK_ID = "web.conversation";
@@ -199,8 +170,8 @@ const createWeb: PluginFactory = (): Plugin => {
       const sendTool: ToolDef = {
         name: SEND_MESSAGE_ACTION,
         description:
-          "Send a message to the user in the web chat. Your plain replies are private " +
-          "thinking; call this tool whenever you actually want to say something to the user.",
+          "Send a message to the user in the web chat. This is the ONLY way to reach " +
+          "them — your plain (non-tool) replies are never delivered.",
         parameters: {
           type: "object",
           properties: { text: { type: "string", description: "The message to show the user." } },
@@ -212,16 +183,6 @@ const createWeb: PluginFactory = (): Plugin => {
       } catch (err) {
         ctx.log.warn(`web: failed to register the web.send_message tool: ${String(err)}`);
       }
-
-      // Teach the RULE behind that tool: register web's guidance context block so the
-      // monologue model lives in the composed prompt, not only in the tool description.
-      // (setBlock can't fail — it's a store write in the orchestrator — so no guard.)
-      ctx.setBlock({
-        id: GUIDANCE_BLOCK_ID,
-        label: GUIDANCE_LABEL,
-        priority: GUIDANCE_PRIORITY,
-        render: () => GUIDANCE_TEXT,
-      });
 
       // Contribute web's OWN chat history as the prompt's conversation (message-target
       // block). render() maps the live transcript to clean wire turns — a user message →
@@ -268,12 +229,11 @@ const createWeb: PluginFactory = (): Plugin => {
       });
 
       // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web's
-      // guidance context block (registered above) via the captured removeBlock.
+      // conversation context block (registered above) via the captured removeBlock.
       unsubs = [
         offSend,
         offRequest,
         offReturn,
-        () => removeBlock(GUIDANCE_BLOCK_ID),
         () => removeBlock(CONVERSATION_BLOCK_ID),
       ];
       // Await the bind so the URL is announced within this agent's startup block

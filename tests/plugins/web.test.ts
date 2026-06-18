@@ -661,60 +661,6 @@ test("web: registers a 'web.send_message' chat tool (ToolDef with a string text 
   }
 });
 
-test("web: contributes a guidance context block stating the monologue rule + naming web.send_message", async () => {
-  // The send tool gives the LLM the MECHANISM to speak; this block gives it the RULE.
-  // Structural (offline) check: web must put the speak-vs-think rule into the composed
-  // prompt — not rely solely on the tool description — so a real model is far likelier
-  // to call web.send_message instead of "replying" in plain text (which web renders to
-  // no one). It can NOT prove a live model obeys the rule; that needs a reachable LLM.
-  const c = await startChild(["alice"]);
-  try {
-    assertUp(c);
-    // Select web's GUIDANCE block by id (web also registers a web.conversation block).
-    const prefix = "BLOCK_SET:alice:";
-    const isGuidance = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.guidance"');
-    assert.ok(
-      await c.waitFor((ls) => ls.some(isGuidance)),
-      "web must register the web.guidance context block via ctx.setBlock",
-    );
-    const block = JSON.parse(c.lines.find(isGuidance)!.slice(prefix.length));
-
-    // web's OWN block (namespaced id), placed just BELOW persona's stable 10000 so
-    // persona stays the top cache-prefix, but well above any volatile content.
-    assert.match(block.id, /^web\./, "the block id is web-namespaced (e.g. web.guidance)");
-    assert.ok(
-      block.priority < 10000,
-      "priority must sit BELOW persona's stable 10000 so persona stays the prompt-cache prefix on top (got " + block.priority + ")",
-    );
-    assert.ok(
-      block.priority >= 1000,
-      "but it is a high/stable priority, not buried among volatile blocks (got " + block.priority + ")",
-    );
-
-    // The rendered guidance must (a) name the explicit send tool and (b) state the
-    // monologue rule: a plain reply is private / delivered to no one.
-    assert.ok(typeof block.text === "string" && block.text.length > 0, "the block renders non-empty guidance text");
-    assert.match(block.text, /web\.send_message/, "the guidance names the web.send_message tool");
-    assert.match(block.text, /monologue/i, "the guidance states the reply-is-a-monologue rule");
-    assert.match(
-      block.text,
-      /private|no one|never|silen/i,
-      "the guidance must make clear a plain reply is NOT delivered to the user",
-    );
-
-    // Symmetry: the block is registered in setup and REMOVED on teardown.
-    c.send("down alice");
-    assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
-    assert.ok(
-      c.lines.includes("BLOCK_REMOVED:alice:" + block.id),
-      "teardown must remove web's guidance block; saw " +
-        JSON.stringify(c.lines.filter((l) => l.startsWith("BLOCK_REMOVED:"))),
-    );
-  } finally {
-    await c.close();
-  }
-});
-
 test("web: contributes a 'web.conversation' messages-block rendering its transcript as clean turns", async () => {
   // Web owns its chat history: it persists the dialogue (user messages + agent sends)
   // and contributes it to the prompt as a message-target block. render() maps the
