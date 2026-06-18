@@ -100,6 +100,12 @@ function makeCtx(agentId, port){
   // An empty WEB_TOKEN ("") is forwarded verbatim (a falsy configured token).
   const cfg = { port };
   if (process.env.WEB_TOKEN !== undefined) cfg.token = process.env.WEB_TOKEN;
+  // Optional CONFIGURED guidance text + priority, injected via WEB_GUIDANCE /
+  // WEB_GUIDANCE_PRIORITY, land FLAT on ctx.config (mirroring the token knob).
+  // Left unset by default so every existing caller exercises web's default
+  // guidance block; set only when a test overrides them.
+  if (process.env.WEB_GUIDANCE !== undefined) cfg.guidance = process.env.WEB_GUIDANCE;
+  if (process.env.WEB_GUIDANCE_PRIORITY !== undefined) cfg.guidancePriority = Number(process.env.WEB_GUIDANCE_PRIORITY);
   return { sys, blocks, ctx: {
     agentId,
     events: sys.events,
@@ -207,7 +213,7 @@ interface Child {
 
 async function startChild(
   agents: string[],
-  opts: { dataDir?: string; token?: string } = {},
+  opts: { dataDir?: string; token?: string; guidance?: string; guidancePriority?: number } = {},
 ): Promise<Child> {
   // Each agent gets its OWN subdir under this WEB_DATADIR (created in the child).
   // Default: a FRESH temp dir (existing callers stay isolated & unchanged).
@@ -228,6 +234,14 @@ async function startChild(
       // child sets config.web.token). Unset by default → child omits it → the
       // server mints a random token, exactly as every existing test expects.
       ...(opts.token !== undefined ? { WEB_TOKEN: opts.token } : {}),
+      // Forward a CONFIGURED guidance text/priority only when asked (so the child
+      // sets config.web.guidance / config.web.guidancePriority). Unset by default
+      // → child omits them → web uses its default guidance text + priority,
+      // exactly as every existing caller expects.
+      ...(opts.guidance !== undefined ? { WEB_GUIDANCE: opts.guidance } : {}),
+      ...(opts.guidancePriority !== undefined
+        ? { WEB_GUIDANCE_PRIORITY: String(opts.guidancePriority) }
+        : {}),
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -710,6 +724,179 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
       c.lines.includes("BLOCK_REMOVED:alice:web.conversation"),
       "teardown must remove the conversation block",
     );
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Scenario 3c — SYSTEM-target 'web.guidance' block (RED until `web` adds it)
+// ---------------------------------------------------------------------------
+// Surface under test is derived ONLY from the pinned contract for this feature
+// — NO implementation was read; the block does not exist yet, so every scenario
+// here fails on a CLEAN assertion (assertUp still passes: the plugin binds and
+// registers its existing surface — only the new web.guidance block is missing).
+//
+//   IN ADDITION to its existing web.conversation messages-block, web contributes
+//   a SECOND context block — a SYSTEM-target block teaching the LLM that Web Chat
+//   is a message channel reached only via the web.send_message tool:
+//     - id    === "web.guidance"
+//     - label === "web.guidance"  (orchestrator wraps it <web.guidance>…</web.guidance>)
+//     - priority === 8000 (default)
+//     - SYSTEM block: target is "system" (or undefined, the default) — never "messages"
+//     - render() -> a non-empty STRING naming the send tool (/web\.send_message/)
+//       and framing Web Chat as a channel (/channel/i)
+//   Teardown removes it (BLOCK_REMOVED:<agent>:web.guidance). It is DISTINCT from
+//   the conversation block (different id + different target). An operator may
+//   override the text + priority via config keys `guidance` / `guidancePriority`.
+//
+// Harness knobs backing the override test (added above, mirroring WEB_TOKEN):
+//   * The child's cfg construction now reads WEB_GUIDANCE / WEB_GUIDANCE_PRIORITY
+//     into cfg.guidance / cfg.guidancePriority (flat, like cfg.token), only when
+//     set — so every existing caller leaves them unset and exercises the default.
+//   * startChild(agents, { guidance, guidancePriority }) forwards them to env
+//     exactly like opts.token; default is unset, so all existing callers are
+//     unchanged.
+// ===========================================================================
+
+/** A regex pinning the guidance text: it names the send tool. */
+const GUIDANCE_NAMES_SEND_TOOL = /web\.send_message/;
+/** A regex pinning the guidance text: it frames Web Chat as a channel. */
+const GUIDANCE_FRAMES_CHANNEL = /channel/i;
+
+/** The web.guidance BLOCK_SET payload for an agent (parsed), or undefined. */
+function guidanceBlockSet(lines: string[], agentId: string): any | undefined {
+  const prefix = "BLOCK_SET:" + agentId + ":";
+  const line = lines.find((l) => l.startsWith(prefix) && l.includes('"id":"web.guidance"'));
+  return line ? JSON.parse(line.slice(prefix.length)) : undefined;
+}
+
+// --- Test G1: registration defaults — id/label/priority/target + render text ---
+test("web: contributes a SYSTEM 'web.guidance' block (default id/label/priority + channel/send-tool text)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    // The block is registered during setup — surfaced via BLOCK_SET.
+    assert.ok(
+      await c.waitFor((ls) => guidanceBlockSet(ls, "alice") !== undefined),
+      "web must register a 'web.guidance' block during setup",
+    );
+    const blk = guidanceBlockSet(c.lines, "alice")!;
+
+    // Identity + wrapping + placement.
+    assert.equal(blk.id, "web.guidance", "the block id is 'web.guidance'");
+    assert.equal(
+      blk.label,
+      "web.guidance",
+      "the label is 'web.guidance' so the orchestrator wraps it <web.guidance>…</web.guidance>",
+    );
+    assert.equal(blk.priority, 8000, "the default guidance priority is 8000");
+
+    // SYSTEM block: target is "system" (accept the default 'undefined' too), and
+    // it must NOT be a messages-block (that's the conversation block's job).
+    assert.notEqual(blk.target, "messages", "the guidance block is NOT a messages-block");
+    assert.ok(
+      blk.target === "system" || blk.target === undefined,
+      "the guidance block targets the system prompt ('system' or the default undefined); got " +
+        JSON.stringify(blk.target),
+    );
+
+    // render() (surfaced as the BLOCK_SET 'text' field) is a non-empty string that
+    // names the send tool AND frames Web Chat as a channel.
+    assert.equal(typeof blk.text, "string", "the guidance block renders a string (system block)");
+    assert.ok(blk.text.length > 0, "the guidance text is non-empty");
+    assert.match(blk.text, GUIDANCE_NAMES_SEND_TOOL, "the guidance text names the web.send_message tool");
+    assert.match(blk.text, GUIDANCE_FRAMES_CHANNEL, "the guidance text frames Web Chat as a channel");
+
+    // Belt-and-suspenders: drive render() directly via the verb and re-assert the
+    // rendered output is a string matching the same two regexes.
+    c.send("render alice web.guidance");
+    assert.ok(
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web.guidance:"))),
+      "the guidance block must render on demand",
+    );
+    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web.guidance:"))!;
+    const rendered = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web.guidance:".length));
+    assert.equal(typeof rendered, "string", "render() returns a string");
+    assert.match(rendered, GUIDANCE_NAMES_SEND_TOOL, "the rendered guidance names the web.send_message tool");
+    assert.match(rendered, GUIDANCE_FRAMES_CHANNEL, "the rendered guidance frames Web Chat as a channel");
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test G2: distinct from the conversation block — BOTH registered, diff targets ---
+test("web: the guidance (system) and conversation (messages) blocks are BOTH registered and distinct", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+
+    const prefix = "BLOCK_SET:alice:";
+    const isGuidance = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.guidance"');
+    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.conversation"');
+
+    // Both blocks must be registered during setup.
+    assert.ok(
+      await c.waitFor((ls) => ls.some(isGuidance) && ls.some(isConvo)),
+      "web must register BOTH the web.guidance and web.conversation blocks",
+    );
+
+    const guidance = JSON.parse(c.lines.find(isGuidance)!.slice(prefix.length));
+    const convo = JSON.parse(c.lines.find(isConvo)!.slice(prefix.length));
+
+    // They are different blocks with different targets.
+    assert.notEqual(guidance.id, convo.id, "the two blocks have different ids");
+    assert.equal(convo.target, "messages", "the conversation block targets the messages array");
+    assert.notEqual(
+      guidance.target,
+      "messages",
+      "the guidance block must NOT share the conversation block's 'messages' target",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test G3: teardown removes the guidance block (alongside the conversation one) ---
+test("web: teardown removes the 'web.guidance' block", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) => guidanceBlockSet(ls, "alice") !== undefined),
+      "the guidance block is registered before teardown",
+    );
+
+    c.send("down alice");
+    assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
+    assert.ok(
+      c.lines.includes("BLOCK_REMOVED:alice:web.guidance"),
+      "teardown must remove the web.guidance block",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Test G4: config override — `guidance` + `guidancePriority` win over defaults ---
+test("web: config `guidance` + `guidancePriority` override the default guidance text and priority", async () => {
+  const c = await startChild(["alice"], { guidance: "CUSTOM-GUIDE-TEXT", guidancePriority: 1234 });
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) => guidanceBlockSet(ls, "alice") !== undefined),
+      "the guidance block is registered with the configured overrides",
+    );
+    const blk = guidanceBlockSet(c.lines, "alice")!;
+
+    // Config wins over the defaults for BOTH knobs.
+    assert.equal(blk.priority, 1234, "the configured guidancePriority (1234) overrides the default 8000");
+    assert.equal(blk.text, "CUSTOM-GUIDE-TEXT", "the configured guidance text overrides the default");
+
+    // Identity is unchanged by the override (still the same addressable block).
+    assert.equal(blk.id, "web.guidance", "the configured block keeps id 'web.guidance'");
+    assert.notEqual(blk.target, "messages", "the configured guidance block is still a system block");
   } finally {
     await c.close();
   }
