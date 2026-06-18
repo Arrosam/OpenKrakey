@@ -125,29 +125,18 @@ function captureRequests(events: ReturnType<typeof freshOrc>["events"]): Request
 }
 
 /**
- * Subscribe to PROMPT_GATHER and, SYNCHRONOUSLY inside that handler, emit a
- * `conversation.snapshot` carrying `messages` — exactly how the `history` provider
- * contributes the conversation DURING the gather phase of a beat. The orchestrator
- * captures the latest snapshot emitted within the gather and forwards it as the
- * beat's `llm.request.data.messages`.
- *
- * `messages` is emitted by-reference; the orchestrator must forward a deep-equal of
- * what was emitted (it only transports — never reorders/mutates).
- *
- * Returns a handle exposing how many times it fired (so a test can assert it ran).
+ * Register a MESSAGE-target context block whose render() returns `messages` as its
+ * group. This is how a provider (e.g. `history`) now contributes the conversation:
+ * the orchestrator assembles message-blocks into the beat's llm.request.data.messages
+ * (blocks ordered by priority DESC; order WITHIN a group preserved; never mutated).
  */
-function emitSnapshotDuringGather(
-  events: ReturnType<typeof freshOrc>["events"],
+function setMessageBlock(
+  orc: ReturnType<typeof freshOrc>["orc"],
+  id: string,
+  priority: number,
   messages: Message[],
-): { gatherCount: number } {
-  const handle = { gatherCount: 0 };
-  events.on(Events.PROMPT_GATHER, () => {
-    handle.gatherCount++;
-    // Notify envelope: { at, data }. Emitted synchronously within the gather so the
-    // orchestrator captures it before composing + emitting llm.request.
-    events.emit(Events.CONVERSATION_SNAPSHOT, { at: 0, data: { messages } });
-  });
-  return handle;
+): void {
+  orc.setBlock({ id, priority, target: "messages", render: () => messages });
 }
 
 // ===========================================================================
@@ -559,56 +548,31 @@ test("compose: an empty-rendering block contributes NOTHING (no empty wrapper, n
 });
 
 // ===========================================================================
-// Behavior 6c — conversation.snapshot capture: the beat TRANSPORTS the messages
-// a provider emits DURING prompt.gather as the llm.request `messages`
+// Behavior 6c — messages from message-target blocks
 // ===========================================================================
 //
-// Contract (orchestrator header + shared/actions EventPayloads):
-//   - prompt.gather fires; a provider (history) emits `conversation.snapshot`
-//     Notify<{ messages: Message[] }> SYNCHRONOUSLY within that gather.
-//   - the orchestrator captures the latest snapshot's `data.messages` (when it is
-//     an array) and forwards it, DEEP-EQUAL (transport only — never reorders or
-//     mutates), as the beat's llm.request.data.messages, alongside the composed
-//     context.
-//   - messages are RESET to [] at the START of every beat (before prompt.gather),
-//     so a beat with no snapshot yields [] and a prior beat's messages never leak.
-//   - start() subscribes to conversation.snapshot; stop() unsubscribes it.
+// Contract (contracts/context ContextBlock + orchestrator compose()):
+//   - A block's `target` is "system" (default) or "messages".
+//   - MESSAGE-target blocks render to a Message[] group. compose() sorts the
+//     message-blocks by priority DESC and CONCATENATES their groups (in that
+//     order) into the beat's llm.request.data.messages. Order WITHIN a group is
+//     preserved exactly — the orchestrator never reorders inside a group.
+//   - A message-block whose render result is NOT an array contributes an EMPTY
+//     group (nothing). A render that THROWS/rejects also contributes nothing and
+//     never drops sibling blocks or the beat (degradation).
+//   - With no message-blocks, data.messages is [] (an array, never undefined).
+//   - Blocks are re-rendered each beat, so a changing group is reflected.
 
-// --- positive: a snapshot during gather lands as llm.request.messages ----------
+// --- positive: a message-block's group becomes data.messages -------------------
 
-test("snapshot: messages emitted during prompt.gather become the llm.request.data.messages (deep-equal); context is the composed context", async (t) => {
+test("messages: a single message-target block's Message[] becomes llm.request.data.messages (field-for-field)", async (t) => {
   const { orc, events } = freshOrc(t);
   const reqs = captureRequests(events);
 
-  // A composable block so we can also confirm context still composes alongside.
+  // A system block so we can also confirm context still composes alongside.
   orc.setBlock(block("persona", 100, "I am X"));
 
-  const messages: Message[] = [{ role: "user", content: "hi", name: "web" }];
-  const gather = emitSnapshotDuringGather(events, messages);
-
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(gather.gatherCount, 1, "the snapshot provider should have seen exactly one gather");
-  assert.equal(reqs.length, 1, "exactly one llm.request for one beat");
-  assert.deepEqual(
-    reqs[0].messages,
-    [{ role: "user", content: "hi", name: "web" }],
-    "the captured snapshot messages must be forwarded verbatim (deep-equal) as data.messages",
-  );
-  assert.equal(
-    (reqs[0].context as { text?: unknown })?.text,
-    "<persona>\nI am X\n</persona>",
-    "data.context must still be the beat's composed context (snapshot only fills messages)",
-  );
-});
-
-test("snapshot: a multi-turn snapshot (system + user + assistant-with-toolCalls + tool) is transported field-for-field", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  const messages: Message[] = [
+  setMessageBlock(orc, "conv", 5000, [
     { role: "system", content: "you are helpful" },
     { role: "user", content: "weather?", name: "web" },
     {
@@ -617,14 +581,13 @@ test("snapshot: a multi-turn snapshot (system + user + assistant-with-toolCalls 
       toolCalls: [{ id: "tc1", name: "get_weather", arguments: { city: "SF" } }],
     },
     { role: "tool", content: "72F", toolCallId: "tc1", name: "get_weather" },
-  ];
-  emitSnapshotDuringGather(events, messages);
+  ]);
 
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
 
-  assert.equal(reqs.length, 1);
+  assert.equal(reqs.length, 1, "exactly one llm.request for one beat");
   assert.deepEqual(
     reqs[0].messages,
     [
@@ -637,21 +600,25 @@ test("snapshot: a multi-turn snapshot (system + user + assistant-with-toolCalls 
       },
       { role: "tool", content: "72F", toolCallId: "tc1", name: "get_weather" },
     ],
-    "every Message field (role/content/name/toolCallId/toolCalls) must survive transport unchanged",
+    "every Message field (role/content/name/toolCallId/toolCalls) must survive into data.messages",
+  );
+  assert.equal(
+    (reqs[0].context as { text?: unknown })?.text,
+    "<persona>\nI am X\n</persona>",
+    "the system block still composes into context.text alongside the message-block",
   );
 });
 
-test("snapshot: the orchestrator forwards messages WITHOUT reordering them (order preserved as emitted)", async (t) => {
+test("messages: the order WITHIN a group is preserved (orchestrator never reorders a group)", async (t) => {
   const { orc, events } = freshOrc(t);
   const reqs = captureRequests(events);
 
-  // Deliberately NOT in any sorted order — transport must preserve emission order.
-  const messages: Message[] = [
+  // Deliberately NOT in any sorted order — the group's internal order must survive.
+  setMessageBlock(orc, "conv", 5000, [
     { role: "assistant", content: "third" },
     { role: "user", content: "first" },
     { role: "user", content: "second" },
-  ];
-  emitSnapshotDuringGather(events, messages);
+  ]);
 
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
@@ -660,232 +627,190 @@ test("snapshot: the orchestrator forwards messages WITHOUT reordering them (orde
   assert.deepEqual(
     (reqs[0].messages as Message[]).map((m) => m.content),
     ["third", "first", "second"],
-    "messages must appear in exactly the order the snapshot emitted them",
+    "messages must appear in exactly the order they were inside the block's group",
   );
 });
 
-test("snapshot: an EMPTY snapshot ({messages:[]}) during gather yields an empty messages array", async (t) => {
+test("messages: multiple message-blocks concatenate by priority DESC, each group contiguous", async (t) => {
   const { orc, events } = freshOrc(t);
   const reqs = captureRequests(events);
 
-  emitSnapshotDuringGather(events, []);
+  // Insert out of priority order; expect B(300) then C(200) then A(100), each intact.
+  setMessageBlock(orc, "a", 100, [
+    { role: "user", content: "a1" },
+    { role: "user", content: "a2" },
+  ]);
+  setMessageBlock(orc, "b", 300, [{ role: "user", content: "b1" }]);
+  setMessageBlock(orc, "c", 200, [{ role: "user", content: "c1" }]);
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.deepEqual(
+    (reqs[0].messages as Message[]).map((m) => m.content),
+    ["b1", "c1", "a1", "a2"],
+    "groups concatenate in priority DESC order; A's group stays contiguous and ordered",
+  );
+});
+
+test("messages: a message-block rendering [] contributes no messages", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  setMessageBlock(orc, "empty", 200, []);
+  setMessageBlock(orc, "real", 100, [{ role: "user", content: "real" }]);
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.deepEqual(
+    (reqs[0].messages as Message[]).map((m) => m.content),
+    ["real"],
+    "an empty group contributes nothing; only the non-empty group's messages appear",
+  );
+});
+
+// --- positive: no message-blocks => [] -----------------------------------------
+
+test("messages: NO message-target blocks => data.messages is [] (not undefined)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  // Only a system-target block exists.
+  orc.setBlock(block("persona", 100, "I am X"));
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.equal(reqs.length, 1, "the beat still emits a request with no message-blocks");
+  assert.ok(Array.isArray(reqs[0].messages), "messages must be present as an array");
+  assert.deepEqual(reqs[0].messages, [], "with no message-blocks, messages defaults to []");
+});
+
+// --- system vs messages split --------------------------------------------------
+
+test("messages: system + message blocks split cleanly (system->context.text, messages->data.messages)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  orc.setBlock(block("persona", 100, "I am X"));
+  setMessageBlock(orc, "conv", 5000, [{ role: "user", content: "hi", name: "web" }]);
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  const text = String((reqs[0].context as { text?: unknown })?.text);
+  assert.equal(text, "<persona>\nI am X\n</persona>", "the system block composes into context.text");
+  assert.ok(!text.includes("hi"), "a message-block's content must NOT leak into context.text");
+  assert.deepEqual(
+    reqs[0].messages,
+    [{ role: "user", content: "hi", name: "web" }],
+    "the message-block's group lands in data.messages, verbatim",
+  );
+});
+
+test("messages: default target is 'system' — a block with no target renders into context.text, not messages", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  // No `target` => defaults to "system".
+  orc.setBlock(block("persona", 100, "I am X"));
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  assert.ok(
+    String((reqs[0].context as { text?: unknown })?.text).includes("<persona>\nI am X\n</persona>"),
+    "an untargeted block composes into context.text (default target is 'system')",
+  );
+  assert.deepEqual(reqs[0].messages, [], "an untargeted block contributes nothing to data.messages");
+});
+
+// --- negative / robustness -----------------------------------------------------
+
+test("messages: a message-block whose render returns a NON-array is ignored (no messages)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  // render returns a string where a Message[] group is expected => empty group.
+  orc.setBlock({
+    id: "bad",
+    priority: 5000,
+    target: "messages",
+    render: () => "oops" as unknown as Message[],
+  });
 
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
 
   assert.equal(reqs.length, 1);
-  assert.deepEqual(reqs[0].messages, [], "an explicitly empty snapshot transports an empty array");
+  assert.deepEqual(
+    reqs[0].messages,
+    [],
+    "a non-array render result for a message-block contributes an empty group",
+  );
 });
 
-// --- positive: no snapshot => [] -----------------------------------------------
-
-test("snapshot: NO snapshot emitted during the beat => llm.request.data.messages is [] (not undefined)", async (t) => {
+test("messages: a message-block whose render THROWS contributes no messages; others survive (degradation)", async (t) => {
   const { orc, events } = freshOrc(t);
   const reqs = captureRequests(events);
 
-  orc.setBlock(block("persona", 100, "I am X"));
-
-  // No conversation.snapshot is ever emitted.
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(reqs.length, 1, "the beat still emits a request without any snapshot");
-  assert.ok(Array.isArray(reqs[0].messages), "messages must be present as an array");
-  assert.deepEqual(reqs[0].messages, [], "with no snapshot, messages defaults to an empty array");
-});
-
-// --- state transition: per-beat RESET (no leak across beats) --------------------
-
-test("snapshot: messages RESET each beat — a snapshot on beat 1 only does NOT leak into beat 2", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  // Only emit a snapshot on the FIRST gather; later gathers emit nothing.
-  let gathers = 0;
-  const beat1Messages: Message[] = [{ role: "user", content: "beat-1", name: "web" }];
-  events.on(Events.PROMPT_GATHER, () => {
-    gathers++;
-    if (gathers === 1) {
-      events.emit(Events.CONVERSATION_SNAPSHOT, { at: 0, data: { messages: beat1Messages } });
-    }
+  orc.setBlock({
+    id: "boom",
+    priority: 9000,
+    target: "messages",
+    render: () => {
+      throw new Error("x");
+    },
   });
+  setMessageBlock(orc, "ok", 100, [{ role: "user", content: "survived" }]);
 
   orc.start();
-
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
+
+  assert.equal(reqs.length, 1, "the throwing message-block must not drop the beat");
+  assert.deepEqual(
+    (reqs[0].messages as Message[]).map((m) => m.content),
+    ["survived"],
+    "the throwing block degrades to an empty group; the good block's group survives",
+  );
+});
+
+// --- state transition: re-rendered each beat -----------------------------------
+
+test("messages: message-blocks are re-rendered each beat (reflect the current group)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const reqs = captureRequests(events);
+
+  // A closure-backed group the test mutates between beats; render pulls it fresh.
+  let turns: Message[] = [{ role: "user", content: "t1" }];
+  orc.setBlock({ id: "conv", priority: 5000, target: "messages", render: () => turns });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+
+  turns = [{ role: "user", content: "t2" }];
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
   await settle();
 
   assert.equal(reqs.length, 2, "two beats, two requests");
   assert.deepEqual(
-    reqs[0].messages,
-    [{ role: "user", content: "beat-1", name: "web" }],
-    "beat 1 carries its snapshot",
+    (reqs[0].messages as Message[]).map((m) => m.content),
+    ["t1"],
+    "beat 1 reflects the group as it was then",
   );
   assert.deepEqual(
-    reqs[1].messages,
-    [],
-    "beat 2 (no snapshot) must reset to [] — beat 1's messages must NOT leak forward",
-  );
-});
-
-test("snapshot: a fresh snapshot on EACH beat replaces the prior beat's messages (latest-wins per beat)", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  let gathers = 0;
-  events.on(Events.PROMPT_GATHER, () => {
-    gathers++;
-    events.emit(Events.CONVERSATION_SNAPSHOT, {
-      at: 0,
-      data: { messages: [{ role: "user", content: `turn-${gathers}` }] },
-    });
-  });
-
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
-  await settle();
-
-  assert.equal(reqs.length, 2);
-  assert.deepEqual(reqs[0].messages, [{ role: "user", content: "turn-1" }]);
-  assert.deepEqual(
-    reqs[1].messages,
-    [{ role: "user", content: "turn-2" }],
-    "each beat reflects only its OWN snapshot, not an accumulation",
-  );
-});
-
-test("snapshot: when TWO snapshots fire within one gather, the LATEST is the one transported", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  // Two providers (or one provider twice) emit within the same gather; latest wins.
-  events.on(Events.PROMPT_GATHER, () => {
-    events.emit(Events.CONVERSATION_SNAPSHOT, {
-      at: 0,
-      data: { messages: [{ role: "user", content: "stale" }] },
-    });
-    events.emit(Events.CONVERSATION_SNAPSHOT, {
-      at: 0,
-      data: { messages: [{ role: "user", content: "fresh" }] },
-    });
-  });
-
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(reqs.length, 1);
-  assert.deepEqual(
-    reqs[0].messages,
-    [{ role: "user", content: "fresh" }],
-    "the last snapshot emitted within the gather is the one captured",
-  );
-});
-
-// --- negative / robustness -----------------------------------------------------
-
-test("snapshot: a snapshot whose data.messages is NOT an array is ignored (messages stays [])", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  // Emit a malformed snapshot: messages is not an array. The orchestrator only
-  // captures when it IS an array, so the request must fall back to [].
-  events.on(Events.PROMPT_GATHER, () => {
-    events.emit(Events.CONVERSATION_SNAPSHOT, {
-      at: 0,
-      data: { messages: "not-an-array" as unknown as Message[] },
-    });
-  });
-
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(reqs.length, 1);
-  assert.deepEqual(
-    reqs[0].messages,
-    [],
-    "a non-array snapshot payload must not become messages; it stays the reset []",
-  );
-});
-
-test("snapshot: a snapshot emitted OUTSIDE any beat (no in-flight gather) does not attach to the NEXT beat (reset wins)", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  orc.start();
-
-  // Emit a stray snapshot with NO beat running. The next beat resets messages to []
-  // at its start (before gather), so this stray snapshot must not leak in — and no
-  // snapshot fires during the beat's own gather.
-  events.emit(Events.CONVERSATION_SNAPSHOT, {
-    at: 0,
-    data: { messages: [{ role: "user", content: "stray" }] },
-  });
-
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(reqs.length, 1);
-  assert.deepEqual(
-    reqs[0].messages,
-    [],
-    "a snapshot emitted before the beat (outside its gather) must be cleared by the per-beat reset",
-  );
-});
-
-// --- lifecycle: stop() unsubscribes the snapshot capture ------------------------
-
-test("snapshot: after stop(), emitting conversation.snapshot then a tick produces NO llm.request (beat does not run)", async (t) => {
-  const { orc, events } = freshOrc(t);
-  let requestCount = 0;
-  events.on(Events.LLM_REQUEST, () => {
-    requestCount++;
-  });
-
-  orc.start();
-  orc.stop();
-
-  // A snapshot after stop must be ignored, and the subsequent tick must not run a beat.
-  events.emit(Events.CONVERSATION_SNAPSHOT, {
-    at: 0,
-    data: { messages: [{ role: "user", content: "late" }] },
-  });
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(requestCount, 0, "a stopped orchestrator runs no beat, so no llm.request fires");
-});
-
-test("snapshot: a snapshot emitted after stop() is NOT retained — a later start()+beat (no snapshot) yields []", async (t) => {
-  const { orc, events } = freshOrc(t);
-  const reqs = captureRequests(events);
-
-  orc.start();
-  orc.stop();
-
-  // Emit a snapshot while STOPPED (subscription should be gone, so it isn't captured).
-  events.emit(Events.CONVERSATION_SNAPSHOT, {
-    at: 0,
-    data: { messages: [{ role: "user", content: "while-stopped" }] },
-  });
-
-  // Restart and run a beat with NO snapshot during its gather.
-  orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  await settle();
-
-  assert.equal(reqs.length, 1, "the restarted orchestrator runs the beat");
-  assert.deepEqual(
-    reqs[0].messages,
-    [],
-    "the snapshot emitted while stopped must not survive into a later beat",
+    (reqs[1].messages as Message[]).map((m) => m.content),
+    ["t2"],
+    "beat 2 re-renders and reflects the mutated group",
   );
 });
 

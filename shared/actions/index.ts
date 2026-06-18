@@ -38,7 +38,6 @@ export const Events = {
   INPUT_MESSAGE: "input.message",
   OUTPUT_MESSAGE: "output.message",
   TOOL_RESULT: "tool.result",
-  CONVERSATION_SNAPSHOT: "conversation.snapshot",
   LOG: "log.entry",
 } as const;
 
@@ -67,20 +66,6 @@ export interface Reply<T = unknown> {
 }
 
 /**
- * One turn of conversation history in Hermes chat shape: an `llm` Message PLUS
- * provenance. `source` = where the turn came from (the input channel for a user turn,
- * "assistant" for an LLM turn, the tool name for a tool turn); `at` = epoch-ms.
- * `history` builds these internally (and persists them as JSONL); before contributing
- * the conversation to the orchestrator via `conversation.snapshot` it STRIPS `at`/`source`
- * down to the wire `Message[]` (a user turn's `source` is already surfaced to the model
- * via `Message.name`).
- */
-export interface ConversationMessage extends Message {
-  at: number;
-  source: string;
-}
-
-/**
  * Concrete well-known event payloads. Each specializes a base envelope. Keys are
  * the `Events` string values (kept literal so this compiles as an interface).
  */
@@ -102,14 +87,6 @@ export interface EventPayloads {
   "output.message": Notify<{ text: string; to?: string; channel?: string; meta?: Record<string, unknown> }>;
   /** Emitted by the orchestrator as each dispatched tool call settles (id = ToolCall id). */
   "tool.result": Reply<unknown> & { name: string };
-  /**
-   * A conversation provider (history) contributes the current conversation — as
-   * wire-ready `Message[]` (provenance already stripped) — in response to
-   * `prompt.gather`. The orchestrator captures the latest and forwards it as the
-   * `messages` of the beat's `llm.request`; it only transports these, never builds
-   * or inspects them.
-   */
-  "conversation.snapshot": Notify<{ messages: Message[] }>;
   /**
    * A plugin console line mirrored onto the bus by the loader-built ctx:
    * ctx.log.* carries its level; ctx.print carries level "print" (the plugin's

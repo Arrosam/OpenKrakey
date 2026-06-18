@@ -2,7 +2,8 @@
  * Contract: orchestrator  ·  connects: orchestrator (impl) ↔ agent_instance, loader
  *
  * The per-Agent conductor. The context-buffer lives INSIDE it. Responsibilities:
- *  1. compose the full context from its blocks by `priority` (DESC, high on top);
+ *  1. compose the beat from its blocks by `priority` (DESC): system-target blocks →
+ *     the system prompt text; message-target blocks → the messages array (groups);
  *  2. expose the eventbus (via event-system) so plugins add/modify/remove blocks;
  *  3. execute LLM-parsed tool calls async/non-blocking (via the actionbus);
  *  4. maintain the actionbus for plugin invocation;
@@ -12,12 +13,13 @@
  *     plugins can adjust the rhythm; they are unregistered on stop().
  *
  * Beat (EVENT-driven, fire-and-forget): clock tick (a `clock.tick` event) →
- * emit `prompt.gather` (plugins refresh blocks; a conversation provider — `history` —
- * contributes the current conversation as a `conversation.snapshot` event the
- * orchestrator captures) → compose → emit `llm.request` (Request<{context, messages}>)
- * WITHOUT awaiting — the beat ends at the emit. The orchestrator only TRANSPORTS
- * `messages` (the captured snapshot, already wire-ready); it never builds or inspects
- * them. The LLM round-trip returns later as an `llm.return` event (Reply<LLMResponse>)
+ * emit `prompt.gather` (plugins refresh blocks) → compose → emit `llm.request`
+ * (Request<{context, messages}>) WITHOUT awaiting — the beat ends at the emit. compose
+ * splits the block buffer by `target`: "system" blocks form the system prompt text
+ * (priority DESC, wrapped `<label>`); "messages" blocks each render a `Message[]` GROUP,
+ * concatenated by priority DESC (order within a group preserved) into `messages` — the
+ * conversation (`history`) is one such block. The orchestrator never inspects message
+ * content. The LLM round-trip returns later as an `llm.return` event (Reply<LLMResponse>)
  * whose tool calls are dispatched fire-and-forget on the actionbus. As EACH dispatched
  * call settles, a `tool.result` event is emitted (Reply: id = the ToolCall id,
  * name = the action name; ok+data on success, ok:false+error on rejection) so
