@@ -13,7 +13,7 @@
 
 - **全局**：`boot`（只负责启动，读配置拉起 Agent）、`cli`（独立的配置文件管理工具/UI，也可手改文件）。
 - **每个 Agent 实例**（互相隔离，由 `agent_instance` 包裹）：
-  - `orchestrator` —— 指挥（内含 context-buffer）：按序 compose context、暴露 eventbus 供插件改自己那块、异步 dispatch 工具调用、维持 actionbus、协调时钟。
+  - `orchestrator` —— 指挥（内含 context-buffer）：按各 context 块的 target/优先级 compose（system 提示 + messages 数组）、暴露 eventbus 供插件改自己那块、异步 dispatch 工具调用、维持 actionbus、协调时钟。
   - `event-system` —— 独立中枢总线（事件 + 动作），clock / loader / orchestrator / 插件都接它。
   - `clock` —— 哑计时器（只激活）。
   - `loader` —— 插件装卸：从 Agent 私有夹 + 共享 `public_plugin/` 加载、设好数据目录、注册进 event-system。
@@ -36,14 +36,14 @@ npm start                                     # 启动所有 agents/*/config.jso
 
 启动后打开浏览器到 `http://localhost:7717` 即可与各 agent 对话（每个 agent 独立会话、消息有 sent/read 状态）。
 
-MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份块）· `history`（对话记忆，重启不丢）·
-`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态；仅在 LLM 显式调用 `web.send_message` 工具时才发消息——LLM 的 output.message 独白不再自动推送）。
-把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本。
+MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份 system 块）·
+`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态；仅在 LLM 显式调用 `web.send_message` 工具时才发消息——LLM 的 output.message 独白不再自动推送；并**自己维护聊天记录**，渲染成 `web.conversation` 会话块喂给 LLM——只记用户输入与 Agent 显式发出的消息，独白与工具机制都不入账；作为带数据的插件默认私有，每个 Agent 各自一份）。
+把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本（`web` 默认即私有）。
 
 ## 状态
 
-✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 4 个插件，
-端到端测试覆盖完整一拍：输入 → compose → LLM → 工具调用 → 结果折叠进下一拍 → 输出）已完成，787 项测试全绿。
+✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 3 个核心插件 + `inspector` 调试面板，
+端到端测试覆盖完整一拍：输入 → web 记入会话 → compose（system + messages）→ LLM → `web.send_message` 发消息并记入会话 → 下一拍带上 → 输出）已完成，755 项测试全绿。
 栈：TypeScript + Node.js。
 
 ## License
