@@ -36,14 +36,14 @@ npm start                                     # 启动所有 agents/*/config.jso
 
 启动后打开浏览器到 `http://localhost:7717` 即可与各 agent 对话（每个 agent 独立会话、消息有 sent/read 状态）。
 
-MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份 system 块）·
+MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份 system 块）· `system-prompt`（操作模型 system 块：向 LLM 说明「每拍的纯文本回复是私有独白、要做任何事都得调工具」，通道无关、不点名具体通道工具）·
 `web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态；仅在 LLM 显式调用 `web.send_message` 工具时才发消息——LLM 的 output.message 独白不再自动推送；并**自己维护聊天记录**，渲染成 `web.conversation` 会话块喂给 LLM——只记用户输入与 Agent 显式发出的消息，独白与工具机制都不入账；作为带数据的插件默认私有，每个 Agent 各自一份）。
 把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本（`web` 默认即私有）。
 
 ## 状态
 
-✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 3 个核心插件 + `inspector` 调试面板，
-端到端测试覆盖完整一拍：输入 → web 记入会话 → compose（system + messages）→ LLM → `web.send_message` 发消息并记入会话 → 下一拍带上 → 输出）已完成，755 项测试全绿。
+✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 4 个核心插件 + `inspector` 调试面板，
+端到端测试覆盖完整一拍：输入 → web 记入会话 → compose（system + messages）→ LLM → `web.send_message` 发消息并记入会话 → 下一拍带上 → 输出）已完成，764 项测试全绿。
 栈：TypeScript + Node.js。
 
 ## License
