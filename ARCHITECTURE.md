@@ -76,12 +76,12 @@
 **agent_instance** —— **包裹一个 Agent**（门面）。持有并连好本 Agent 的 clock + event-system + orchestrator + loader；对外暴露 `start` / `stop`（及输入/输出）。`start()`：让 loader 装好插件 → 让 orchestrator 开始指挥；`stop()`：停 clock + 让 loader teardown。自己不含业务逻辑。
 
 **orchestrator** —— **指挥**（per-Agent；**context-buffer 在它内部**）。五个职责：
-1. 按各 context 块声明的**优先级**（`priority`，数字**大→小**，高的在最上）把各块 compose 成完整 context；
+1. 按各 context 块的 **target** 与**优先级**（`priority`，数字**大→小**）compose：`system` 块拼成系统提示（高的在最上、各包 `<label>`），`messages` 块各渲染一组 `Message[]` 拼成消息数组（块间按优先级排、组内顺序保留）；
 2. 经 event-system **暴露 eventbus**：插件注册进来、在特定事件下改 context 块——块按 **id 寻址**，任何插件都可改**别的插件**的块（如 A 改 B 的 `BBB`）；
 3. **异步、不阻塞**地执行从 LLM 解析出的指令（工具调用）；
 4. 经 event-system **维持 actionbus** 供插件被调用；
 5. **协调时钟节奏**：启动期间在 actionbus 注册 `clock.set_interval` / `clock.set_default_interval` / `clock.fire_now`（见 shared/actions `Actions.CLOCK_*`），插件可随时调节奏；stop 时注销。
-> 一拍（beat，**事件驱动**）：clock 发 tick（`clock.tick` 事件）→ orchestrator 发 `prompt.gather`（插件刷新各自块）→ compose 完整 context → 发 `llm.request` 事件（**不等待**，拍到此结束）。LLM 插件监听 `llm.request`、完成往返后发 `llm.return`（`Reply<LLMResponse>`，含已解析的 toolCalls）→ orchestrator dispatch 工具调用（异步、互相隔离）。compose 对每块**单独容错**：某块 render 失败仅降级为空文本，绝不拖垮整拍。
+> 一拍（beat，**事件驱动**）：clock 发 tick（`clock.tick` 事件）→ orchestrator 发 `prompt.gather`（插件刷新各自块）→ compose（按 target 拆出 system 提示 + messages 数组）→ 发 `llm.request` 事件（载 `{context, messages}`；**不等待**，拍到此结束）。LLM 插件监听 `llm.request`、完成往返后发 `llm.return`（`Reply<LLMResponse>`，含已解析的 toolCalls）→ orchestrator dispatch 工具调用（异步、互相隔离）。compose 对每块**单独容错**：某块 render 失败仅降级为空文本，绝不拖垮整拍。
 
 **event-system** —— **独立的中枢总线**：`eventbus`（emit/on）+ `actionbus`（register/invoke）。clock、loader、orchestrator、各插件**都接到这里**来收发各类事件、注册可调用动作。保持独立，正是因为接入它的东西多。
 
@@ -109,7 +109,7 @@
      └──invoke◀── event-system(actionbus) ◀── orchestrator 逐个 dispatch（工具异步甩出）
 ```
 
-**时间并行 = 非阻塞**：工具调用异步执行；跑到一半时新输入/已回的工具结果都折叠进**下一拍**的完整 context 快照。每个 Agent 各跑各的（互不阻塞）。
+**时间并行 = 非阻塞**：工具调用异步执行；跑到一半时的新输入、以及 Agent 经通道显式发出的消息，都由通道插件记进自己的会话，于**下一拍** compose 时一并带上。每个 Agent 各跑各的（互不阻塞）。
 
 ---
 
@@ -120,9 +120,9 @@
 - **public 插件**：代码在 `public_plugin/<id>/`，所有声明它的 Agent 都从这里加载 → 它们的 `dataDir` 都指向**同一个** `public_plugin/<id>/data/` → 图书馆例子：A 存的知识 B 能读到（共享数据、各自独立实例）。
 - **independent（私有）插件**：Agent 构建时把该插件代码**复制**进 `agents/<id>/plugins/<id>/` → `dataDir` 指向本 Agent 自己的 `data/` → 数据只此 Agent 可见，且**覆盖**同名 public。
 - **PluginContext** 提供 `dataDir`（= 该插件代码目录下的 `data/`），插件读写文件/DB 都用它；还提供 **`llm`**（无 key 的 `CommunicatorLibrary`）——插件按名字取 communicator 发 LLM 请求，看不到 key/具体请求。
-- 一个插件提供任意组合：**context 块**（带 `priority`，按 id 寻址）、**actions**（注册到 actionbus）、**listeners**（订阅 eventbus）。
+- 一个插件提供任意组合：**context 块**（带 `priority` + `target`，按 id 寻址）、**actions**（注册到 actionbus）、**listeners**（订阅 eventbus）。
 - **context 块按 id 共享寻址**：块由注册它的插件维护，但任何插件都能按 id **请求增/改/删别的插件的块**（如 A 改 B 的 `BBB` 块）。
-- **优先级 = 排序 + 缓存策略**：每块声明 `priority`（数字），orchestrator 按 **大→小** 渲染并排列（高的在最上）。约定：**固定/稳定**块（身份、系统提示）给**高优先级（10000+）置顶**——既好改、又让稳定前缀提升 prompt 缓存命中；**多变**块（history、工具结果）给**低优先级（0–10000）放下面**。
+- **target + 优先级 = 去向 + 排序**：每块声明 `target`——`system`（默认）拼进系统提示、`messages` 渲染一组 `Message[]` 放进消息数组；两边都按 `priority` **大→小** 排（messages 块的组内顺序保留）。**会话不是单独机制，就是一个 `messages` 块**——`web` 通道把自己的聊天记录渲染成会话喂给 LLM。约定：**固定/稳定**的 system 块（身份 persona、通道指引）给**高优先级（10000+）置顶**，让稳定前缀提升 prompt 缓存命中；会话等多变内容给较低优先级（persona 10000、web.guidance 9000、web.conversation 5000）。
 
 配置里：`plugins: string[]`（要加载的 public 插件）；`privatePlugins?: string[]`（要 independent 化、构建时复制进来的）。私有夹里已有的插件总是自动加载并覆盖同名 public。
 
@@ -164,7 +164,7 @@ OpenKrakey/
 
 ## 8. 契约（L1，纯类型）
 
-`clock`(含 default/current 双 interval、本拍即时 `setInterval`/`setDefaultInterval`)、`event-system`(EventBus+ActionBus)、`context`(ContextBlock`{id,priority,render}` / ComposedContext)、`plugin`(Plugin/PluginManifest/PluginContext——含 `dataDir`、无 key 的 `llm` library + 按 id 的 context 块 增/改/删/查)、`orchestrator`、`agent`(AgentDefinition 含 `privatePlugins?`、AgentHandle)、`loader`、`llm`(provider 无关的 LLM I/O envelope + 无 key 的 `Communicator`/`CommunicatorLibrary`——基础设施)，外加知名 event/action 名常量与 `Notify/Request/Reply` 事件基类。
+`clock`(含 default/current 双 interval、本拍即时 `setInterval`/`setDefaultInterval`)、`event-system`(EventBus+ActionBus)、`context`(ContextBlock`{id,priority,target?,render}`——render 返 `string`(system) 或 `Message[]`(messages) / ComposedContext)、`plugin`(Plugin/PluginManifest/PluginContext——含 `dataDir`、无 key 的 `llm` library + 按 id 的 context 块 增/改/删/查)、`orchestrator`、`agent`(AgentDefinition 含 `privatePlugins?`、AgentHandle)、`loader`、`llm`(provider 无关的 LLM I/O envelope + 无 key 的 `Communicator`/`CommunicatorLibrary`——基础设施)，外加知名 event/action 名常量与 `Notify/Request/Reply` 事件基类。
 
 ---
 
@@ -182,6 +182,6 @@ OpenKrakey/
 ## 10. 路线图
 
 - **Phase 0**：契约 + 五个 per-Agent 模块（clock / event-system / orchestrator(含 context-buffer) / loader / agent_instance）+ boot，能"裸 Agent 空跑一拍"。
-- **Phase 1**：示例插件（`library` 演示 public/independent + dataDir；llm + toolcall-parser + 几个 context 块 + history）→ 能对话、有记忆。
+- **Phase 1**：示例插件（`persona` 身份块；`llm-core` LLM 往返 + `llm.register_tool`；`web` 浏览器通道——`web.send_message` 工具 + `web.guidance` 指引块 + `web.conversation` 会话块，自己维护聊天记录；`inspector` 调试面板）→ 能对话、有记忆。
 - **Phase 2**：cli 配置工具（logo + `/new` + `/default` + 增改）。
 - **Phase 3**：依赖图可视化（从 KrakeyBot 搬来重做）、自我成长（`docs/PLUGIN_DEV.md`）等。
