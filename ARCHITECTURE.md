@@ -122,7 +122,7 @@
 - **PluginContext** 提供 `dataDir`（= 该插件代码目录下的 `data/`），插件读写文件/DB 都用它；还提供 **`llm`**（无 key 的 `CommunicatorLibrary`）——插件按名字取 communicator 发 LLM 请求，看不到 key/具体请求。
 - 一个插件提供任意组合：**context 块**（带 `priority` + `target`，按 id 寻址）、**actions**（注册到 actionbus）、**listeners**（订阅 eventbus）。
 - **context 块按 id 共享寻址**：块由注册它的插件维护，但任何插件都能按 id **请求增/改/删别的插件的块**（如 A 改 B 的 `BBB` 块）。
-- **target + 优先级 = 去向 + 排序**：每块声明 `target`——`system`（默认）拼进系统提示、`messages` 渲染一组 `Message[]` 放进消息数组；两边都按 `priority` **大→小** 排（messages 块的组内顺序保留）。**会话不是单独机制，就是一个 `messages` 块**——`web` 通道把自己的聊天记录渲染成会话喂给 LLM。约定：**固定/稳定**的 system 块（身份 persona、通道指引）给**高优先级（10000+）置顶**，让稳定前缀提升 prompt 缓存命中；会话等多变内容给较低优先级（persona 10000、web.guidance 9000、web.conversation 5000）。
+- **target + 优先级 = 去向 + 排序**：每块声明 `target`——`system`（默认）拼进系统提示、`messages` 渲染一组 `Message[]` 放进消息数组；两边都按 `priority` **大→小** 排（messages 块的组内顺序保留）。**会话不是单独机制，就是一个 `messages` 块**——`web` 通道把自己的聊天记录渲染成会话喂给 LLM。约定：**固定/稳定**的 system 块（身份 persona、操作模型 system-prompt）给**高优先级（10000+）置顶**，让稳定前缀提升 prompt 缓存命中；会话等多变内容给较低优先级（persona 10000、system-prompt 9000、web.conversation 5000）。
 
 配置里：`plugins: string[]`（要加载的 public 插件）；`privatePlugins?: string[]`（要 independent 化、构建时复制进来的）。私有夹里已有的插件总是自动加载并覆盖同名 public。
 
@@ -182,6 +182,6 @@ OpenKrakey/
 ## 10. 路线图
 
 - **Phase 0**：契约 + 五个 per-Agent 模块（clock / event-system / orchestrator(含 context-buffer) / loader / agent_instance）+ boot，能"裸 Agent 空跑一拍"。
-- **Phase 1**：示例插件（`persona` 身份块；`llm-core` LLM 往返 + `llm.register_tool`；`web` 浏览器通道——`web.send_message` 工具 + `web.guidance` 指引块 + `web.conversation` 会话块，自己维护聊天记录；`inspector` 调试面板）→ 能对话、有记忆。
+- **Phase 1**：示例插件（`persona` 身份块；`system-prompt` 操作模型块（独白规则 + 基本用法，通道无关）；`llm-core` LLM 往返 + `llm.register_tool`；`web` 浏览器通道——`web.send_message` 工具 + `web.conversation` 会话块，自己维护聊天记录；`inspector` 调试面板）→ 能对话、有记忆。
 - **Phase 2**：cli 配置工具（logo + `/new` + `/default` + 增改）。
 - **Phase 3**：依赖图可视化（从 KrakeyBot 搬来重做）、自我成长（`docs/PLUGIN_DEV.md`）等。
