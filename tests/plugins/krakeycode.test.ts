@@ -558,15 +558,56 @@ test("list_dir: missing dir rejects", async () => {
 // 9. sandbox mode (mode:"sandbox", root: temp dir) — path confinement + allowlist
 // ===========================================================================
 
-test("sandbox: read_file with a traversal path rejects (escapes the sandbox root)", async () => {
+// (A) Confinement is about LOCATION, not file-absence: a REAL file outside root,
+// addressed by its ABSOLUTE path, must be rejected.
+test("sandbox: read_file of a REAL file outside root (absolute path) rejects (escapes root)", async () => {
   const root = tmpDir();
-  // a real file OUTSIDE root, to ensure rejection is about confinement not absence.
-  const outsideDir = tmpDir();
-  fs.writeFileSync(path.join(outsideDir, "secret.txt"), "top-secret", "utf8");
+  const outsideDir = tmpDir(); // a DIFFERENT temp dir outside root
+  const outside = path.join(outsideDir, "secret.txt");
+  fs.writeFileSync(outside, "top-secret", "utf8");
   const { sys } = await setup({ mode: "sandbox", root });
   await assert.rejects(
-    sys.actions.invoke(READ, { path: "../../../../../../../../etc/passwd" }),
-    "traversal must be rejected",
+    sys.actions.invoke(READ, { path: outside }),
+    "absolute path escaping the sandbox root must be rejected even though the file exists",
+  );
+});
+
+// (B) A junction inside root pointing OUTSIDE must be rejected on read (realpath
+// escapes root). Skip cleanly if junction creation is not permitted on this host.
+test("sandbox: read_file through a junction that escapes root rejects (realpath escapes)", async () => {
+  const root = tmpDir();
+  const outsideTargetDir = tmpDir();
+  fs.writeFileSync(path.join(outsideTargetDir, "secret.txt"), "top-secret", "utf8");
+  try {
+    fs.symlinkSync(outsideTargetDir, path.join(root, "junc"), "junction");
+  } catch {
+    return; /* skip if junction creation not permitted */
+  }
+  const { sys } = await setup({ mode: "sandbox", root });
+  await assert.rejects(
+    sys.actions.invoke(READ, { path: path.join("junc", "secret.txt") }),
+    "reading through a junction whose realpath escapes root must be rejected",
+  );
+});
+
+// (C) Same junction trick for write_file must also be rejected.
+test("sandbox: write_file through a junction that escapes root rejects (realpath escapes)", async () => {
+  const root = tmpDir();
+  const outsideTargetDir = tmpDir();
+  try {
+    fs.symlinkSync(outsideTargetDir, path.join(root, "junc2"), "junction");
+  } catch {
+    return; /* skip if junction creation not permitted */
+  }
+  const { sys } = await setup({ mode: "sandbox", root });
+  await assert.rejects(
+    sys.actions.invoke(WRITE, { path: path.join("junc2", "x.txt"), content: "x" }),
+    "writing through a junction whose realpath escapes root must be rejected",
+  );
+  assert.equal(
+    fs.existsSync(path.join(outsideTargetDir, "x.txt")),
+    false,
+    "no file written outside root through the junction",
   );
 });
 
@@ -676,6 +717,170 @@ test("results fold: does NOT throw when clock.fire_now is not registered", async
     emitToolResult(sys, { name: BASH, ok: true, data: { exitCode: 0 } });
   });
   await new Promise((r) => setTimeout(r, 20));
+});
+
+// ===========================================================================
+// 10b. BUG FIXES (tests-first: each must FAIL against current impl, pass once fixed)
+// ===========================================================================
+
+// bash in LOCAL mode must spawn with cwd = process.cwd() (which always exists),
+// NOT cwd = config.root. We point config.root at a NON-EXISTENT directory: the
+// fix makes the spawn use process.cwd() (exists → runs → exit 0); the current
+// impl uses cwd=config.root=<nonexistent> → cp.spawn ENOENT → action resolves
+// exitCode -1. Discriminating: red now (exitCode -1), green after the fix.
+test("bash (fix): local-mode cwd defaults to process.cwd() even when root is nonexistent — exitCode 0, stdout 'ok'", async () => {
+  const root = path.join(tmpDir(), "nope-does-not-exist"); // NOT created on disk
+  assert.equal(fs.existsSync(root), false, "precondition: root must not exist");
+  const { sys } = await setup({ mode: "local", root });
+  const res: any = await sys.actions.invoke(BASH, {
+    command: `"${NODE}" -e "process.stdout.write('ok')"`,
+  });
+  assert.equal(res.exitCode, 0, "must exit 0 — spawn cwd must be process.cwd(), not the missing root");
+  assert.match(String(res.stdout), /ok/, "stdout must contain 'ok'");
+});
+
+// allowlist must reject shell-metachar chaining even when the FIRST token is
+// allowlisted. We use 'echo' (no spaces in the token) so the first whitespace
+// token is exactly 'echo' (allowlisted) — the metachar is what must trip the
+// guard. Current guardCommand only checks the first token ('echo' → allowed),
+// so the command RUNS and resolves (no rejection); the fix rejects on the
+// metachar. Discriminating: no-rejection now (red), rejects after the fix.
+test("bash (fix): allowlisted first token 'echo' but ' & ' chaining is rejected", async () => {
+  const root = tmpDir();
+  const { sys } = await setup({ mode: "sandbox", root, commandAllowlist: ["echo"] });
+  await assert.rejects(
+    sys.actions.invoke(BASH, { command: `echo ok & echo pwned` }),
+    "metachar chaining after an allowlisted first token must be rejected",
+  );
+});
+
+// Positive companion: an allowlisted first token with NO metachars must run.
+// Passes both before and after the fix (guards the fix doesn't over-reject).
+test("bash (fix): a clean allowlisted 'echo hello' (no metachars) still runs — exitCode 0", async () => {
+  const root = tmpDir();
+  const { sys } = await setup({ mode: "sandbox", root, commandAllowlist: ["echo"] });
+  const res: any = await sys.actions.invoke(BASH, { command: `echo hello` });
+  assert.equal(res.exitCode, 0, "clean allowlisted command must run and exit 0");
+});
+
+test("bash (fix): a clean allowlisted 'node ...' command still runs", async () => {
+  const root = tmpDir();
+  const { sys } = await setup({ mode: "sandbox", root, commandAllowlist: ["node"] });
+  const res: any = await sys.actions.invoke(BASH, {
+    command: `node -e "process.stdout.write('clean')"`,
+  });
+  assert.match(res.stdout, /clean/);
+});
+
+test("bash (fix): a non-allowlisted first token is rejected", async () => {
+  const root = tmpDir();
+  const { sys } = await setup({ mode: "sandbox", root, commandAllowlist: ["node"] });
+  await assert.rejects(
+    sys.actions.invoke(BASH, { command: `git status` }),
+    "first token not in the allowlist must be rejected",
+  );
+});
+
+// maxReadBytes must bound the read at the configured cap.
+// NOTE: this asserts the RESULT shape only (truncated/bytes/content length) and
+// cannot black-box observe the memory-bound fix (#4, reading at most the cap
+// rather than slurping the whole file) — it is a spec assertion, not a discriminator.
+test("read_file (fix): config maxReadBytes bounds the read (truncated, bytes==cap, content length==cap)", async () => {
+  const dir = tmpDir();
+  const fp = path.join(dir, "fifty.txt");
+  fs.writeFileSync(fp, "a".repeat(50), "utf8"); // ~50 ASCII bytes
+  const { sys } = await setup({ maxReadBytes: 8 });
+  const res: any = await sys.actions.invoke(READ, { path: fp });
+  assert.equal(res.truncated, true, "read past the cap must mark truncated");
+  assert.equal(res.bytes, 8, "bytes read must equal the cap");
+  assert.equal(String(res.content).length, 8, "content length must equal the cap (ASCII)");
+});
+
+// maxResults:0 must render no messages.
+test("results (fix): maxResults:0 renders [] even after a tool.result is emitted", async () => {
+  const { store, sys } = await setup({ maxResults: 0 });
+  emitToolResult(sys, { name: READ, ok: true, data: { content: "hi" } });
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "maxResults:0 keeps the ring empty");
+});
+
+// maxResultChars must clip an individual oversized result body.
+test("results (fix): maxResultChars clips a large body (has 'truncated' marker, much shorter than source)", async () => {
+  const { store, sys } = await setup({ maxResultChars: 20 });
+  emitToolResult(sys, { name: READ, ok: true, data: { content: "a".repeat(500) } });
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, 1);
+  const content = String(msgs[0].content);
+  assert.match(content, /truncated/i, "clipped body must carry a 'truncated' marker");
+  assert.ok(content.length < 500, `clipped content (${content.length}) must be much shorter than 500`);
+});
+
+// maxEntries must cap list_dir results.
+test("list_dir (fix): maxEntries caps the number of entries returned", async () => {
+  const dir = tmpDir();
+  for (let i = 0; i < 15; i++) {
+    fs.writeFileSync(path.join(dir, `f${i}.txt`), "x", "utf8");
+  }
+  const { sys } = await setup({ maxEntries: 5 });
+  const res: any = await sys.actions.invoke(LIST, { path: dir });
+  assert.ok(Array.isArray(res.entries), "entries is an array");
+  assert.ok(res.entries.length <= 5, `entries (${res.entries.length}) must be <= maxEntries 5`);
+});
+
+// ToolDef descriptions must contain the literal `"base64"` (with the quote chars)
+// and NOT an escaped backslash immediately before those quotes.
+test('ToolDefs (fix): read_file & write_file descriptions contain literal "base64" with no stray backslash', async () => {
+  const { tools } = await setup({});
+  const byName = new Map(tools.map((t) => [t.name, t]));
+  for (const name of [READ, WRITE]) {
+    const def = byName.get(name);
+    assert.ok(def, `${name} ToolDef declared`);
+    const desc = String(def!.description);
+    assert.ok(desc.includes('"base64"'), `${name} description must include the literal "base64"`);
+    assert.ok(
+      !desc.includes('\\"base64\\"'),
+      `${name} description must not escape the quotes around base64`,
+    );
+  }
+});
+
+// ===========================================================================
+// 10c. COMPACTION (new feature): bound the TOTAL rendered chars by stripping
+//      bodies from the OLDEST results first, keeping NEWEST results full.
+// ===========================================================================
+
+test("compaction (new): total budget strips oldest bodies (oldest header-only, newest full), chronological order", async () => {
+  const { store, sys } = await setup({
+    maxResults: 10,
+    maxResultChars: 1000, // generous per-result cap (does NOT trigger here)
+    maxResultsTotalChars: 200, // small TOTAL budget — forces compaction
+  });
+  // Emit several sizeable results in order; total must exceed 200.
+  const N = 6;
+  for (let i = 0; i < N; i++) {
+    emitToolResult(sys, { name: READ, ok: true, data: { content: "x".repeat(150) } });
+  }
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.ok(msgs.length >= 2, "expect multiple messages to compare oldest vs newest");
+
+  const first = String(msgs[0].content); // OLDEST
+  const last = String(msgs[msgs.length - 1].content); // NEWEST
+
+  // Newest keeps its full body; oldest is header-only.
+  assert.ok(last.includes("x".repeat(150)), "newest message must keep its full body");
+  assert.ok(
+    !first.includes("x".repeat(150)),
+    "oldest message must be stripped of its large body",
+  );
+  // Oldest is header-only: just the bracketed header line, no big 'x' run.
+  assert.match(first, /\[krakeycode tool result/, "oldest is the header line");
+  assert.ok(!/x{20,}/.test(first), "oldest header-only message has no large 'x' run");
+
+  // Concretely: newest is clearly larger than oldest.
+  assert.ok(
+    last.length > first.length,
+    `newest (${last.length}) must be clearly larger than oldest (${first.length})`,
+  );
 });
 
 // ===========================================================================
