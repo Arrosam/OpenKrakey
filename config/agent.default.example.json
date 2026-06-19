@@ -5,7 +5,8 @@
     "persona",
     "system-prompt",
     "web",
-    "krakeycode"
+    "krakeycode",
+    "searxng"
   ],
   "privatePlugins": [
     "web"
@@ -18,6 +19,7 @@
     "web": {
       "port": 7717
     },
-    "krakeycode": {}
+    "krakeycode": {},
+    "searxng": {}
   }
 }
