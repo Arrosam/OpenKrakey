@@ -1,0 +1,245 @@
+/**
+ * searxng plugin — BUS SIDE.
+ *
+ * Default export is a PluginFactory the loader calls ONCE PER AGENT. All mutable
+ * state (the `results` ring, `unsubs`) lives in the factory closure (R6); the only
+ * module-level values are immutable consts. Imports are restricted (R2) to the
+ * plugin/llm contracts, the shared/actions vocabulary, and the sibling ./searxng.
+ */
+import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
+import type { Message, ToolDef } from "../../contracts/llm";
+import { Actions, Events } from "../../shared/actions";
+import {
+  buildDefaultGuidance,
+  buildSearchUrl,
+  normalizeResults,
+  pushResult,
+  readConfig,
+  resolveEndpoints,
+  type NormalizedResult,
+} from "./searxng";
+
+/** Tool names this plugin owns — used to filter tool.result events. */
+const OWN_TOOLS = new Set(["searxng.search"]);
+
+const SEARCH_TOOL: ToolDef = {
+  name: "searxng.search",
+  description:
+    'Search the web via a SearXNG instance. Results (titles, URLs, snippets) arrive on the NEXT beat (not inline) as a user message tagged "searxng". Use it for current events, documentation lookups, or facts outside your training data.',
+  parameters: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "The search query." },
+      pageno: { type: "number", description: "Result page number (1-based). Default 1." },
+    },
+    required: ["query"],
+  },
+};
+
+/** One recorded tool outcome, fed by the tool.result listener, rendered as a message. */
+interface ResultEntry {
+  at: number;
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+const createSearxng: PluginFactory = (): Plugin => {
+  let results: ResultEntry[] = [];
+  let unsubs: Array<() => void> = [];
+
+  return {
+    manifest: { id: "searxng", version: "0.1.0", requires: ["llm.register_tool"] },
+
+    async setup(ctx: PluginContext): Promise<void> {
+      const cfg = readConfig(ctx.config);
+
+      // 1. The searxng.search action — validates, then a serial endpoint waterfall.
+      const offSearch = ctx.actions.register("searxng.search", async (params: unknown) => {
+        const p = (params ?? {}) as Record<string, unknown>;
+        if (typeof p.query !== "string" || p.query.trim().length === 0) {
+          throw new Error("searxng.search: 'query' must be a non-empty string");
+        }
+        const query = p.query.trim();
+        const pageno =
+          typeof p.pageno === "number" && p.pageno >= 1 ? Math.floor(p.pageno) : 1;
+
+        const tried: string[] = [];
+        let lastError = "";
+
+        for (const base of resolveEndpoints(cfg)) {
+          tried.push(base);
+          const url = buildSearchUrl(base, {
+            query,
+            language: cfg.language,
+            categories: cfg.categories,
+            safesearch: cfg.safesearch,
+            pageno,
+          });
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+          try {
+            const res = await globalThis.fetch(url, { signal: controller.signal });
+            clearTimeout(timer);
+            if (!res.ok) {
+              lastError = `HTTP ${res.status} from ${base}`;
+              continue;
+            }
+            let json: unknown;
+            try {
+              json = await res.json();
+            } catch {
+              lastError = `non-JSON from ${base}`;
+              continue;
+            }
+            let normalized: NormalizedResult[];
+            try {
+              normalized = normalizeResults(json, cfg.maxResults, cfg.maxSnippetChars);
+            } catch (e) {
+              lastError = String(e);
+              continue;
+            }
+            if (normalized.length === 0) {
+              lastError = `empty results from ${base}`;
+              continue;
+            }
+            return { endpoint: base, query, results: normalized };
+          } catch (err) {
+            clearTimeout(timer);
+            lastError = String(err);
+          }
+        }
+
+        throw new Error(
+          `searxng.search: all endpoints failed (tried: ${tried.join(", ")}); last error: ${lastError}`,
+        );
+      });
+
+      // 2. Register the tool (best-effort — a missing llm.register_tool isn't fatal).
+      try {
+        await ctx.actions.invoke("llm.register_tool", SEARCH_TOOL);
+      } catch (err) {
+        ctx.log.warn(`searxng: failed to register tool: ${String(err)}`);
+      }
+
+      // 3. Guidance block (system).
+      const guidanceText = cfg.guidance !== null ? cfg.guidance : buildDefaultGuidance(cfg);
+      ctx.setBlock({
+        id: "searxng.guidance",
+        label: "searxng.guidance",
+        target: "system",
+        priority: cfg.guidancePriority,
+        render: () => guidanceText,
+      });
+
+      // 4. Results block (messages) — renders recorded outcomes newest-first,
+      //    bounded by a total char budget. Pure and never throws.
+      ctx.setBlock({
+        id: "searxng.results",
+        target: "messages",
+        priority: cfg.resultsPriority,
+        render: (): Message[] => {
+          if (results.length === 0) return [];
+
+          const queryOf = (r: ResultEntry): string => {
+            const d = r.data as { query?: unknown } | null | undefined;
+            return d !== null && typeof d === "object" && typeof d.query === "string"
+              ? d.query
+              : "";
+          };
+          const headerOf = (r: ResultEntry): string =>
+            `[searxng result | searxng.search | ${r.ok ? "ok" : "error"} | query: ${queryOf(r)} | ${new Date(r.at).toISOString()}]`;
+
+          const bodyOf = (r: ResultEntry): string => {
+            let body: string;
+            if (r.ok) {
+              const data = r.data as { results?: unknown } | null | undefined;
+              if (data !== null && typeof data === "object" && Array.isArray(data.results)) {
+                body = (data.results as NormalizedResult[])
+                  .map((res, i) => `${i + 1}. ${res.title}\n   ${res.url}\n   ${res.snippet}`)
+                  .join("\n\n");
+              } else {
+                body = JSON.stringify(r.data);
+              }
+            } else {
+              body = `Error: ${r.error ?? "unknown"}`;
+            }
+            if (body.length > cfg.maxResultChars) {
+              const truncated = body.length - cfg.maxResultChars;
+              body = body.slice(0, cfg.maxResultChars) + `\n…(${truncated} chars truncated)`;
+            }
+            return body;
+          };
+
+          // Newest-first inclusion under the total budget; the newest entry is
+          // always rendered full, older ones until the budget is exhausted.
+          const full = new Array<boolean>(results.length).fill(false);
+          let total = 0;
+          for (let i = results.length - 1; i >= 0; i--) {
+            const h = headerOf(results[i]);
+            const b = bodyOf(results[i]);
+            const len = h.length + 1 + b.length;
+            if (i === results.length - 1 || total + len <= cfg.maxResultsTotalChars) {
+              full[i] = true;
+              total += len;
+            } else {
+              break;
+            }
+          }
+
+          return results.map(
+            (r, i) =>
+              ({
+                role: "user",
+                name: "searxng",
+                content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
+              }) as Message,
+          );
+        },
+      });
+
+      // 5. tool.result listener — records own-tool outcomes; nudges a beat. Never throws.
+      const offResult = ctx.events.on(Events.TOOL_RESULT, (payload: unknown) => {
+        if (payload === null || typeof payload !== "object") return;
+        const q = payload as {
+          name?: unknown;
+          at?: unknown;
+          ok?: unknown;
+          data?: unknown;
+          error?: unknown;
+        };
+        if (typeof q.name !== "string" || !OWN_TOOLS.has(q.name)) return;
+        results = pushResult(
+          results,
+          {
+            at: typeof q.at === "number" ? q.at : Date.now(),
+            ok: !!q.ok,
+            data: q.data,
+            error: typeof q.error === "string" ? q.error : undefined,
+          },
+          cfg.maxResults,
+        );
+        if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
+          ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
+        }
+      });
+
+      unsubs = [
+        offSearch,
+        offResult,
+        () => ctx.removeBlock("searxng.guidance"),
+        () => ctx.removeBlock("searxng.results"),
+      ];
+
+      ctx.print("searxng: web-search tool ready");
+    },
+
+    teardown(): void {
+      for (const off of unsubs) off();
+      unsubs = [];
+      results = [];
+    },
+  };
+};
+
+export default createSearxng;
