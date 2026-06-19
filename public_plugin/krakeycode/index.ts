@@ -22,6 +22,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as cp from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Message, ToolDef } from "../../contracts/llm";
@@ -34,183 +35,6 @@ const RESULTS_BLOCK_ID = "krakeycode.results";
 const DEFAULT_GUIDANCE_PRIORITY = 7000;
 const DEFAULT_RESULTS_PRIORITY = 4000;
 const PLUGIN_DEV_GUIDE = "docs/PLUGIN_DEV.md";
-const OWN_TOOLS = new Set([
-  "krakeycode.read_file",
-  "krakeycode.write_file",
-  "krakeycode.edit_file",
-  "krakeycode.bash",
-  "krakeycode.list_dir",
-]);
-
-interface ResultEntry {
-  at: number;
-  toolName: string;
-  ok: boolean;
-  data?: unknown;
-  error?: string;
-}
-
-/** Append `entry` to the ring, trimming the oldest so length stays <= max. */
-function pushResult(ring: ResultEntry[], entry: ResultEntry, max: number): ResultEntry[] {
-  const next = [...ring, entry];
-  return next.length > max ? next.slice(next.length - max) : next;
-}
-
-/** Run a shell command, capping captured output and enforcing a hard timeout. */
-function runShell(
-  command: string,
-  cwd: string,
-  timeoutMs: number,
-  maxOutputBytes: number,
-): Promise<{
-  command: string;
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  timedOut: boolean;
-  durationMs: number;
-}> {
-  return new Promise((resolve) => {
-    const t0 = Date.now();
-    const child = cp.spawn(command, [], { shell: true, cwd, env: process.env });
-    const outChunks: Buffer[] = [];
-    const errChunks: Buffer[] = [];
-    let outBytes = 0;
-    let errBytes = 0;
-    let killed = false;
-    let settled = false;
-
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGKILL");
-    }, timeoutMs);
-
-    child.stdout?.on("data", (c: Buffer) => {
-      const rem = maxOutputBytes - outBytes;
-      if (rem > 0) {
-        const s = c.subarray(0, rem);
-        outChunks.push(s);
-        outBytes += s.byteLength;
-      }
-    });
-    child.stderr?.on("data", (c: Buffer) => {
-      const rem = maxOutputBytes - errBytes;
-      if (rem > 0) {
-        const s = c.subarray(0, rem);
-        errChunks.push(s);
-        errBytes += s.byteLength;
-      }
-    });
-
-    const done = (r: {
-      command: string;
-      exitCode: number;
-      stdout: string;
-      stderr: string;
-      timedOut: boolean;
-      durationMs: number;
-    }): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(r);
-    };
-
-    child.on("close", (code) =>
-      done({
-        command,
-        exitCode: code ?? -1,
-        stdout: Buffer.concat(outChunks).toString("utf8"),
-        stderr: Buffer.concat(errChunks).toString("utf8"),
-        timedOut: killed,
-        durationMs: Date.now() - t0,
-      }),
-    );
-    child.on("error", (err) =>
-      done({
-        command,
-        exitCode: -1,
-        stdout: "",
-        stderr: String(err),
-        timedOut: killed,
-        durationMs: Date.now() - t0,
-      }),
-    );
-  });
-}
-
-/** Recursively collect directory entries. Sub-dir errors swallow to []. */
-function collectEntries(
-  dir: string,
-  depth: number,
-  cur: number,
-): Array<{ name: string; type: "file" | "dir" | "other"; size: number }> {
-  let dirents: fs.Dirent[];
-  try {
-    dirents = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const out: Array<{ name: string; type: "file" | "dir" | "other"; size: number }> = [];
-  for (const dirent of dirents) {
-    const type: "file" | "dir" | "other" = dirent.isFile()
-      ? "file"
-      : dirent.isDirectory()
-        ? "dir"
-        : "other";
-    const childPath = path.join(dir, dirent.name);
-    let size = 0;
-    if (type === "file") {
-      try {
-        size = fs.statSync(childPath).size;
-      } catch {
-        size = 0;
-      }
-    }
-    out.push({ name: dirent.name, type, size });
-    if (type === "dir" && (depth === 0 || cur + 1 < depth)) {
-      for (const child of collectEntries(childPath, depth, cur + 1)) {
-        out.push({
-          name: path.join(dirent.name, child.name),
-          type: child.type,
-          size: child.size,
-        });
-      }
-    }
-  }
-  return out;
-}
-
-/** Build the default SYSTEM guidance text from the resolved config. */
-function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
-  const security =
-    cfg.mode === "sandbox"
-      ? `Security mode: sandbox. File operations are confined to the root "${cfg.root}" — ` +
-        `paths that escape it are rejected, and krakeycode.bash is filtered by a command allowlist.`
-      : `Security mode: local. File operations use absolute paths or paths relative to the ` +
-        `working directory; there is no sandbox confinement.`;
-
-  return (
-    "krakeycode gives you computer-use tools:\n" +
-    "  - krakeycode.read_file — read a file (utf8 or base64).\n" +
-    "  - krakeycode.write_file — write/overwrite/append a file.\n" +
-    "  - krakeycode.edit_file — replace a unique snippet in an existing file.\n" +
-    "  - krakeycode.bash — run a shell command.\n" +
-    "  - krakeycode.list_dir — list a directory tree.\n" +
-    "\n" +
-    security +
-    "\n" +
-    `Read/output are capped (reads up to ${cfg.maxReadBytes} bytes, command output up to ${cfg.maxOutputBytes} bytes per stream).\n` +
-    "\n" +
-    "IMPORTANT: tool results do NOT come back in the same beat. After a tool call " +
-    "settles, its result appears on the NEXT beat as a user message tagged " +
-    '"krakeycode". Plan for that one-beat delay.\n' +
-    "\n" +
-    `Before building or extending a plugin, read the plugin-authoring guide at ` +
-    `"${PLUGIN_DEV_GUIDE}" via krakeycode.read_file.`
-  );
-}
 
 /** The five tool declarations registered with the LLM via llm.register_tool. */
 function toolDefs(): ToolDef[] {
@@ -219,7 +43,7 @@ function toolDefs(): ToolDef[] {
       name: "krakeycode.read_file",
       description:
         "Read a file from disk. Returns its content on the NEXT beat (not inline), as a " +
-        'user message tagged "krakeycode". Set encoding to \\"base64\\" for binary; defaults ' +
+        'user message tagged "krakeycode". Set encoding to "base64" for binary; defaults ' +
         "to utf8. Content is capped at maxBytes (and the configured read cap); truncation is " +
         "reported. In sandbox mode the path is confined to the configured root. Reading a " +
         "missing path fails.",
@@ -238,7 +62,7 @@ function toolDefs(): ToolDef[] {
       description:
         "Write a file. Result returns on the NEXT beat (not inline). Set append:true to " +
         "append instead of overwrite, createDirs:true to create missing parent directories, " +
-        'and encoding \\"base64\\" to decode base64 content (default utf8). Gated by allowWrite ' +
+        'and encoding "base64" to decode base64 content (default utf8). Gated by allowWrite ' +
         "— when disabled this tool throws. In sandbox mode the path is confined to the root.",
       parameters: {
         type: "object",
@@ -278,7 +102,8 @@ function toolDefs(): ToolDef[] {
         "returns on the NEXT beat (not inline). A non-zero exit is NOT an error — you get the " +
         "code. Output is capped per stream and the command is hard-killed on timeout " +
         "(timedOut:true, exitCode:-1). Gated by allowCommands — when disabled this tool throws. " +
-        "In sandbox mode commands run in the root and are filtered by the allowlist.",
+        "In sandbox mode commands run in the root and are filtered by the allowlist." +
+        " The command runs with the host process environment (PATH, etc. inherited).",
       parameters: {
         type: "object",
         properties: {
@@ -307,8 +132,210 @@ function toolDefs(): ToolDef[] {
   ];
 }
 
+const OWN_TOOLS = new Set(toolDefs().map((d) => d.name));
+
+interface ResultEntry {
+  at: number;
+  toolName: string;
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+}
+
+/** Append `entry` to the ring, trimming the oldest so length stays <= max. */
+function pushResult(ring: ResultEntry[], entry: ResultEntry, max: number): ResultEntry[] {
+  const next = [...ring, entry];
+  return next.length > max ? next.slice(next.length - max) : next;
+}
+
+/** Run a shell command, capping captured output and enforcing a hard timeout. */
+function runShell(
+  command: string,
+  cwd: string,
+  timeoutMs: number,
+  maxOutputBytes: number,
+): Promise<{
+  command: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+}> {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    const isWin = process.platform === "win32";
+    const child = cp.spawn(command, [], { shell: true, cwd, env: process.env, detached: !isWin });
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let outBytes = 0;
+    let errBytes = 0;
+    let killed = false;
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      killed = true;
+      if (isWin) {
+        try { cp.spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"]); } catch { /* best-effort */ }
+      } else {
+        try { process.kill(-(child.pid as number), "SIGKILL"); } catch { try { child.kill("SIGKILL"); } catch { /* ignore */ } }
+      }
+    }, timeoutMs);
+
+    child.stdout?.on("data", (c: Buffer) => {
+      const rem = maxOutputBytes - outBytes;
+      if (rem > 0) {
+        const s = c.subarray(0, rem);
+        outChunks.push(s);
+        outBytes += s.byteLength;
+      }
+    });
+    child.stderr?.on("data", (c: Buffer) => {
+      const rem = maxOutputBytes - errBytes;
+      if (rem > 0) {
+        const s = c.subarray(0, rem);
+        errChunks.push(s);
+        errBytes += s.byteLength;
+      }
+    });
+
+    const done = (r: {
+      command: string;
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+      timedOut: boolean;
+      durationMs: number;
+    }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+
+    child.on("close", (code) =>
+      done({
+        command,
+        exitCode: code ?? -1,
+        stdout: new StringDecoder("utf8").write(Buffer.concat(outChunks)),
+        stderr: new StringDecoder("utf8").write(Buffer.concat(errChunks)),
+        timedOut: killed,
+        durationMs: Date.now() - t0,
+      }),
+    );
+    child.on("error", (err) =>
+      done({
+        command,
+        exitCode: -1,
+        stdout: "",
+        stderr: String(err),
+        timedOut: killed,
+        durationMs: Date.now() - t0,
+      }),
+    );
+  });
+}
+
+interface CollectCtx {
+  count: number;
+  maxEntries: number;
+  visited: Set<string>;
+}
+
+/**
+ * Recursively collect directory entries. Capped at colCtx.maxEntries total,
+ * symlinks are listed but never followed, and realpath-deduped visited dirs
+ * guard against cycles (junctions/hardlink loops). Sub-dir read errors swallow
+ * and continue. `dirents` is the already-read listing of `dir`.
+ */
+function collectEntriesInner(
+  dir: string,
+  depth: number,
+  cur: number,
+  dirents: fs.Dirent[],
+  colCtx: CollectCtx,
+): Array<{ name: string; type: "file" | "dir" | "other"; size: number }> {
+  const out: Array<{ name: string; type: "file" | "dir" | "other"; size: number }> = [];
+  for (const dirent of dirents) {
+    if (colCtx.count >= colCtx.maxEntries) break;
+    const type: "file" | "dir" | "other" = dirent.isFile()
+      ? "file"
+      : dirent.isDirectory()
+        ? "dir"
+        : "other";
+    const childPath = path.join(dir, dirent.name);
+    let size = 0;
+    if (type === "file") {
+      try {
+        size = fs.statSync(childPath).size;
+      } catch {
+        size = 0;
+      }
+    }
+    out.push({ name: dirent.name, type, size });
+    colCtx.count++;
+
+    if (type === "dir" && !dirent.isSymbolicLink() && (depth === 0 || cur + 1 < depth)) {
+      let real: string;
+      try {
+        real = fs.realpathSync(childPath);
+      } catch {
+        continue;
+      }
+      if (colCtx.visited.has(real)) continue;
+      colCtx.visited.add(real);
+
+      let childDirents: fs.Dirent[];
+      try {
+        childDirents = fs.readdirSync(childPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const child of collectEntriesInner(childPath, depth, cur + 1, childDirents, colCtx)) {
+        out.push({
+          name: path.join(dirent.name, child.name),
+          type: child.type,
+          size: child.size,
+        });
+      }
+      if (colCtx.count >= colCtx.maxEntries) break;
+    }
+  }
+  return out;
+}
+
+/** Build the default SYSTEM guidance text from the resolved config. */
+function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
+  const security =
+    cfg.mode === "sandbox"
+      ? `Security mode: sandbox. File operations are confined to the root "${cfg.root}" — ` +
+        `paths that escape it are rejected, and krakeycode.bash is filtered by a command allowlist.`
+      : `Security mode: local. File operations use absolute paths or paths relative to the ` +
+        `working directory; there is no sandbox confinement.`;
+
+  return (
+    "krakeycode gives you computer-use tools:\n" +
+    "  - krakeycode.read_file — read a file (utf8 or base64).\n" +
+    "  - krakeycode.write_file — write/overwrite/append a file.\n" +
+    "  - krakeycode.edit_file — replace a unique snippet in an existing file.\n" +
+    "  - krakeycode.bash — run a shell command.\n" +
+    "  - krakeycode.list_dir — list a directory tree.\n" +
+    "\n" +
+    security +
+    "\n" +
+    `Read/output are capped (reads up to ${cfg.maxReadBytes} bytes, command output up to ${cfg.maxOutputBytes} bytes per stream).\n` +
+    "\n" +
+    "IMPORTANT: tool results do NOT come back in the same beat. After a tool call " +
+    "settles, its result appears on the NEXT beat as a user message tagged " +
+    '"krakeycode". Plan for that one-beat delay.\n' +
+    "\n" +
+    `Before building or extending a plugin, read the plugin-authoring guide at ` +
+    `"${PLUGIN_DEV_GUIDE}" via krakeycode.read_file.`
+  );
+}
+
 const createKrakeycode: PluginFactory = (): Plugin => {
-  let cfg: KrakeycodeConfig | undefined;
   let results: ResultEntry[] = [];
   let unsubs: Array<() => void> = [];
 
@@ -316,45 +343,41 @@ const createKrakeycode: PluginFactory = (): Plugin => {
     manifest: { id: "krakeycode", version: "0.1.0", requires: ["llm.register_tool"] },
 
     async setup(ctx: PluginContext): Promise<void> {
+      const { actions, events, log, setBlock, removeBlock, print } = ctx;
       const config = readConfig(ctx.config, ctx.dataDir);
-      cfg = config;
+      if (config.mode === "sandbox") {
+        try { fs.mkdirSync(config.root, { recursive: true }); } catch { /* best-effort */ }
+      }
 
       // Resolve a caller-supplied path per the active mode.
       const resolve = (p: string): string =>
         config.mode === "sandbox" ? guardPath(p, config) : path.resolve(p);
 
       // ---- action handlers ----
-      const offRead = ctx.actions.register("krakeycode.read_file", async (params: unknown) => {
+      const offRead = actions.register("krakeycode.read_file", async (params: unknown) => {
         const p = (params ?? {}) as { path?: unknown; maxBytes?: unknown; encoding?: unknown };
         if (typeof p.path !== "string" || p.path.length === 0) {
           throw new Error("krakeycode.read_file: 'path' must be a non-empty string");
         }
         const resolved = resolve(p.path);
         const cap = Math.min(
-          typeof p.maxBytes === "number" && p.maxBytes > 0 ? p.maxBytes : config.maxReadBytes,
+          typeof p.maxBytes === "number" && p.maxBytes >= 0 ? p.maxBytes : config.maxReadBytes,
           config.maxReadBytes,
         );
-        const buf = fs.readFileSync(resolved);
-        if (p.encoding === "base64") {
-          return {
-            path: resolved,
-            encoding: "base64",
-            bytes: Math.min(buf.byteLength, cap),
-            content: buf.subarray(0, cap).toString("base64"),
-            truncated: buf.byteLength > cap,
-          };
-        }
-        const t = truncate(buf, cap);
-        return {
-          path: resolved,
-          encoding: "utf8",
-          bytes: Math.min(buf.byteLength, cap),
-          content: t.content,
-          truncated: t.truncated,
-        };
+        const fd = fs.openSync(resolved, "r");
+        try {
+          const size = fs.fstatSync(fd).size;
+          const toRead = Math.min(size, cap);
+          const buf = Buffer.alloc(toRead);
+          if (toRead > 0) fs.readSync(fd, buf, 0, toRead, 0);
+          if (p.encoding === "base64") {
+            return { path: resolved, encoding: "base64", bytes: toRead, content: buf.toString("base64"), truncated: size > cap };
+          }
+          return { path: resolved, encoding: "utf8", bytes: toRead, content: truncate(buf, toRead).content, truncated: size > cap };
+        } finally { fs.closeSync(fd); }
       });
 
-      const offWrite = ctx.actions.register("krakeycode.write_file", async (params: unknown) => {
+      const offWrite = actions.register("krakeycode.write_file", async (params: unknown) => {
         if (!config.allowWrite) {
           throw new Error("krakeycode: write is disabled (allowWrite=false)");
         }
@@ -381,7 +404,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         return { path: resolved, bytesWritten: buf.byteLength, created: !existed };
       });
 
-      const offEdit = ctx.actions.register("krakeycode.edit_file", async (params: unknown) => {
+      const offEdit = actions.register("krakeycode.edit_file", async (params: unknown) => {
         if (!config.allowWrite) {
           throw new Error("krakeycode: write is disabled (allowWrite=false)");
         }
@@ -427,7 +450,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         };
       });
 
-      const offBash = ctx.actions.register("krakeycode.bash", async (params: unknown) => {
+      const offBash = actions.register("krakeycode.bash", async (params: unknown) => {
         if (!config.allowCommands) {
           throw new Error("krakeycode: commands are disabled (allowCommands=false)");
         }
@@ -443,7 +466,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
             ? config.root
             : typeof p.cwd === "string" && p.cwd
               ? path.resolve(p.cwd)
-              : config.root;
+              : process.cwd();
         const timeoutMs = Math.min(
           typeof p.timeoutMs === "number" && p.timeoutMs > 0 ? p.timeoutMs : config.commandTimeoutMs,
           config.commandTimeoutMs,
@@ -451,7 +474,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         return runShell(p.command, cwd, timeoutMs, config.maxOutputBytes);
       });
 
-      const offList = ctx.actions.register("krakeycode.list_dir", async (params: unknown) => {
+      const offList = actions.register("krakeycode.list_dir", async (params: unknown) => {
         const p = (params ?? {}) as { path?: unknown; depth?: unknown };
         if (typeof p.path !== "string" || p.path.length === 0) {
           throw new Error("krakeycode.list_dir: 'path' must be a non-empty string");
@@ -459,24 +482,30 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         const resolved = resolve(p.path);
         const depth = typeof p.depth === "number" ? Math.max(0, Math.floor(p.depth)) : 1;
         // Surface a missing/unreadable top-level dir as a throw (ok:false upstream).
-        fs.readdirSync(resolved, { withFileTypes: true });
-        const entries = collectEntries(resolved, depth, 0);
+        const topDirents = fs.readdirSync(resolved, { withFileTypes: true });
+        let realTop;
+        try { realTop = fs.realpathSync(resolved); } catch { realTop = resolved; }
+        const entries = collectEntriesInner(resolved, depth, 0, topDirents, {
+          count: 0,
+          maxEntries: config.maxEntries,
+          visited: new Set([realTop]),
+        });
         return { path: resolved, entries };
       });
 
       // ---- register tools with the LLM (best-effort; warn + continue) ----
       for (const def of toolDefs()) {
         try {
-          await ctx.actions.invoke("llm.register_tool", def);
+          await actions.invoke("llm.register_tool", def);
         } catch (err) {
-          ctx.log.warn(`krakeycode: failed to register tool ${def.name}: ${String(err)}`);
+          log.warn(`krakeycode: failed to register tool ${def.name}: ${String(err)}`);
         }
       }
 
       // ---- context blocks ----
       const guidanceText =
         typeof config.guidance === "string" ? config.guidance : buildDefaultGuidance(config);
-      ctx.setBlock({
+      setBlock({
         id: GUIDANCE_BLOCK_ID,
         label: GUIDANCE_BLOCK_ID,
         target: "system",
@@ -484,24 +513,40 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         render: () => guidanceText,
       });
 
-      ctx.setBlock({
+      setBlock({
         id: RESULTS_BLOCK_ID,
         target: "messages",
         priority: config.resultsPriority ?? DEFAULT_RESULTS_PRIORITY,
-        render: (): Message[] =>
-          results.length === 0
-            ? []
-            : results.map((r) => ({
-                role: "user",
-                name: "krakeycode",
-                content:
-                  `[krakeycode tool result | ${r.toolName} | ${r.ok ? "ok" : "error"} | ${new Date(r.at).toISOString()}]\n` +
-                  (r.ok ? JSON.stringify(r.data, null, 2) : `Error: ${r.error ?? "unknown"}`),
-              })),
+        render: (): Message[] => {
+          if (results.length === 0) return [];
+          const maxChars = config.maxResultChars;
+          const budget = config.maxResultsTotalChars;
+          const headerOf = (r: ResultEntry): string =>
+            `[krakeycode tool result | ${r.toolName} | ${r.ok ? "ok" : "error"} | ${new Date(r.at).toISOString()}]`;
+          const bodyOf = (r: ResultEntry): string => {
+            const raw = r.ok ? JSON.stringify(r.data, null, 2) : `Error: ${r.error ?? "unknown"}`;
+            return raw.length > maxChars ? raw.slice(0, maxChars) + `\n…(${raw.length - maxChars} chars truncated)` : raw;
+          };
+          // decide full vs header-only, newest first
+          const full = new Array(results.length).fill(false);
+          let total = 0;
+          for (let i = results.length - 1; i >= 0; i--) {
+            const h = headerOf(results[i]);
+            const b = bodyOf(results[i]);
+            const len = h.length + 1 + b.length;
+            if (i === results.length - 1 || total + len <= budget) { full[i] = true; total += len; }
+            else break; // this and all older stay header-only
+          }
+          return results.map((r, i) => ({
+            role: "user",
+            name: "krakeycode",
+            content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
+          } as Message));
+        },
       });
 
       // ---- record settled tool results onto the ring; nudge the clock ----
-      const offResult = ctx.events.on(Events.TOOL_RESULT, (payload) => {
+      const offResult = events.on(Events.TOOL_RESULT, (payload) => {
         if (payload === null || typeof payload !== "object") return;
         const p = payload as {
           name?: unknown;
@@ -523,8 +568,8 @@ const createKrakeycode: PluginFactory = (): Plugin => {
           },
           config.maxResults,
         );
-        if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
-          ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
+        if (actions.has(Actions.CLOCK_FIRE_NOW)) {
+          actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
         }
       });
 
@@ -535,18 +580,17 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         offBash,
         offList,
         offResult,
-        () => ctx.removeBlock(GUIDANCE_BLOCK_ID),
-        () => ctx.removeBlock(RESULTS_BLOCK_ID),
+        () => removeBlock(GUIDANCE_BLOCK_ID),
+        () => removeBlock(RESULTS_BLOCK_ID),
       ];
 
-      ctx.print(`krakeycode: computer-use tools ready (mode=${config.mode}, root=${config.root})`);
+      print(`krakeycode: computer-use tools ready (mode=${config.mode}, root=${config.root})`);
     },
 
     teardown(): void {
       for (const off of unsubs) off();
       unsubs = [];
       results = [];
-      cfg = undefined;
     },
   };
 };

@@ -1,10 +1,13 @@
 /**
  * krakeycode · sandbox — pure helpers (config parsing, path/command guards,
- * buffer truncation). NO I/O, NO bus, NO node:fs. Everything here is
- * deterministic and side-effect free so it can be reasoned about and tested in
- * isolation; the actual filesystem/process work lives in index.ts.
+ * buffer truncation). NO bus. readConfig/guardCommand/truncate stay pure (no
+ * I/O); guardPath uses node:fs (realpathSync) to resolve symlinks/junctions so
+ * confinement holds against link escapes. The actual filesystem/process work
+ * still lives in index.ts.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 /** Fully-resolved krakeycode configuration (all fields concrete). */
 export interface KrakeycodeConfig {
@@ -17,6 +20,9 @@ export interface KrakeycodeConfig {
   maxReadBytes: number;
   maxOutputBytes: number;
   maxResults: number;
+  maxResultChars: number;
+  maxEntries: number;
+  maxResultsTotalChars: number;
   guidance?: string;
   guidancePriority?: number;
   resultsPriority?: number;
@@ -59,7 +65,20 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
       : 200_000;
 
   const maxResults =
-    typeof c.maxResults === "number" && c.maxResults > 0 ? c.maxResults : 10;
+    typeof c.maxResults === "number" && c.maxResults >= 0 ? c.maxResults : 10;
+
+  const maxResultChars =
+    typeof c.maxResultChars === "number" && c.maxResultChars > 0
+      ? c.maxResultChars
+      : 4000;
+
+  const maxEntries =
+    typeof c.maxEntries === "number" && c.maxEntries > 0 ? c.maxEntries : 10000;
+
+  const maxResultsTotalChars =
+    typeof c.maxResultsTotalChars === "number" && c.maxResultsTotalChars > 0
+      ? c.maxResultsTotalChars
+      : 16000;
 
   const cfg: KrakeycodeConfig = {
     mode,
@@ -71,6 +90,9 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
     maxReadBytes,
     maxOutputBytes,
     maxResults,
+    maxResultChars,
+    maxEntries,
+    maxResultsTotalChars,
   };
 
   if (typeof c.guidance === "string") cfg.guidance = c.guidance;
@@ -85,11 +107,22 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
  * does not escape that root. Throws on traversal outside the sandbox.
  */
 export function guardPath(input: string, cfg: KrakeycodeConfig): string {
+  const realRoot = fs.realpathSync(cfg.root);
   const abs = path.resolve(cfg.root, input);
-  if (!abs.startsWith(cfg.root + path.sep) && abs !== cfg.root) {
-    throw new Error(
-      `krakeycode: path "${input}" escapes the sandbox root "${cfg.root}"`,
-    );
+  let existing = abs;
+  const tail: string[] = [];
+  for (;;) {
+    try { existing = fs.realpathSync(existing); break; }
+    catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) { existing = abs; break; }
+      tail.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+  const canonical = tail.length > 0 ? path.join(existing, ...tail) : existing;
+  if (canonical !== realRoot && !canonical.startsWith(realRoot + path.sep)) {
+    throw new Error(`krakeycode: path "${input}" escapes the sandbox root "${cfg.root}"`);
   }
   return abs;
 }
@@ -101,6 +134,9 @@ export function guardPath(input: string, cfg: KrakeycodeConfig): string {
  */
 export function guardCommand(command: string, cfg: KrakeycodeConfig): void {
   if (cfg.commandAllowlist.length === 0) return;
+  if (/[&|;<>`\n\r]/.test(command) || command.includes("$(")) {
+    throw new Error("krakeycode: command contains shell control characters that are not allowed in sandbox mode");
+  }
   const name = command.trimStart().split(/\s+/)[0] ?? "";
   if (!cfg.commandAllowlist.includes(name)) {
     throw new Error(`krakeycode: command "${name}" is not in the allowlist`);
@@ -112,8 +148,7 @@ export function guardCommand(command: string, cfg: KrakeycodeConfig): void {
  * occurred.
  */
 export function truncate(buf: Buffer, cap: number): { content: string; truncated: boolean } {
-  if (buf.byteLength <= cap) {
-    return { content: buf.toString("utf8"), truncated: false };
-  }
-  return { content: buf.subarray(0, cap).toString("utf8"), truncated: true };
+  if (buf.byteLength <= cap) return { content: buf.toString("utf8"), truncated: false };
+  const content = new StringDecoder("utf8").write(buf.subarray(0, cap));
+  return { content, truncated: true };
 }
