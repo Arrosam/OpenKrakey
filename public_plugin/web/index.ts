@@ -49,9 +49,12 @@ import {
   seedMsgSeq,
 } from "./hub";
 import { TranscriptStore } from "./transcript-store";
+import { windowTranscript } from "./windowing";
 
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
+const DEFAULT_MAX_TURNS = 60;
+const DEFAULT_MAX_CHARS = 24000;
 
 /** The chat-tool action the orchestrator dispatches when the LLM decides to speak. */
 const SEND_MESSAGE_ACTION = "web.send_message";
@@ -123,6 +126,8 @@ const createWeb: PluginFactory = (): Plugin => {
         token?: string;
         guidance?: string;
         guidancePriority?: number;
+        conversationMaxTurns?: number;
+        conversationMaxChars?: number;
       };
       const port = typeof cfg.port === "number" ? cfg.port : DEFAULT_PORT;
       const host = typeof cfg.host === "string" && cfg.host ? cfg.host : DEFAULT_HOST;
@@ -133,6 +138,18 @@ const createWeb: PluginFactory = (): Plugin => {
       const tk = validToken(cfg.token)
         ? (cfg.token as string)
         : crypto.randomBytes(24).toString("base64url");
+
+      // Conversation windowing bounds: how many trailing transcript entries and how
+      // many cumulative characters web's conversation block may render into the prompt.
+      // Each is config-overridable but only when a positive number; otherwise default.
+      const maxTurns =
+        typeof cfg.conversationMaxTurns === "number" && cfg.conversationMaxTurns > 0
+          ? cfg.conversationMaxTurns
+          : DEFAULT_MAX_TURNS;
+      const maxChars =
+        typeof cfg.conversationMaxChars === "number" && cfg.conversationMaxChars > 0
+          ? cfg.conversationMaxChars
+          : DEFAULT_MAX_CHARS;
 
       // Ensure the per-plugin (agent-isolated) data dir exists, then load any prior
       // transcript so history survives a restart. Best-effort: a dir/read failure
@@ -238,7 +255,7 @@ const createWeb: PluginFactory = (): Plugin => {
         target: "messages",
         priority: CONVERSATION_PRIORITY,
         render: (): Message[] =>
-          r.store.list().map((e) =>
+          windowTranscript(r.store.list(), maxTurns, maxChars).map((e) =>
             e.role === "agent"
               ? { role: "assistant", content: e.text }
               : { role: "user", content: e.text, name: "web" },
