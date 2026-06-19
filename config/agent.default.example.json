@@ -20,6 +20,10 @@
       "port": 7717
     },
     "krakeycode": {},
-    "searxng": {}
+    "searxng": {
+      "instanceUrl": null,
+      "localUrl": "http://localhost:8080",
+      "usePublicFallback": true
+    }
   }
 }
