@@ -4,7 +4,8 @@
     "llm-core",
     "persona",
     "system-prompt",
-    "web"
+    "web",
+    "krakeycode"
   ],
   "privatePlugins": [
     "web"
@@ -16,6 +17,7 @@
     "llm-core": {},
     "web": {
       "port": 7717
-    }
+    },
+    "krakeycode": {}
   }
 }

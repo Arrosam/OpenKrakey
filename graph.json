@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-18T00:00:00Z"
+    "updated_at": "2026-06-19T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -27,7 +27,8 @@
         "persona",
         "system-prompt",
         "web",
-        "inspector"
+        "inspector",
+        "krakeycode"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -211,6 +212,20 @@
       ],
       "status": "done",
       "overview": "overviews/nodes/inspector.md"
+    },
+    "krakeycode": {
+      "zone": "plugins",
+      "path": "public_plugin/krakeycode",
+      "description": "Coding-agent toolkit: gives a Krakey Agent real computer-use tools — krakeycode.read_file / write_file / edit_file (exact-substring replace) / bash (shell via cp.spawn; SIGKILL timeout; byte-capped output) / list_dir — declared as ToolDefs via llm.register_tool. Dual-mode security (local default | sandbox: root-confined + optional command allowlist; command timeout cap in both). Contributes a krakeycode.guidance SYSTEM block (priority 7000) describing the tools + current mode + pointing Krakey at the docs/PLUGIN_DEV.md authoring guide, and a krakeycode.results MESSAGES block (priority 4000) that folds tool.result outcomes back into the conversation on the next beat (plain user/name:krakeycode turns, not tool-role pairing) and nudges clock.fire_now.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/krakeycode.md"
     }
   },
   "contracts": {
