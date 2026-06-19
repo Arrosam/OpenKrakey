@@ -28,7 +28,8 @@
         "system-prompt",
         "web",
         "inspector",
-        "krakeycode"
+        "krakeycode",
+        "searxng"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -226,6 +227,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/krakeycode.md"
+    },
+    "searxng": {
+      "zone": "plugins",
+      "path": "public_plugin/searxng",
+      "description": "Web-search tool: gives a Krakey Agent a `searxng.search` tool (registered via llm.register_tool) that queries a SearXNG instance's JSON API (GET /search?format=json) over native fetch with an AbortController timeout. Open-box endpoint resolution: an explicit config `instanceUrl` is authoritative (remote OR local); otherwise a local instance (http://localhost:8080) is tried FIRST, then a built-in pool of public JSON-capable SearXNG instances (overridable via publicInstances, gateable via usePublicFallback) — the first endpoint returning valid JSON with results wins, failures fall through, all-fail throws. NEVER spawns containers; no persistence. Contributes a `searxng.guidance` SYSTEM block (priority 6000) describing the tool + the next-beat delay + endpoint strategy, and a `searxng.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:searxng turns, query in the header, newest-first total-char budget) and nudging clock.fire_now.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/searxng.md"
     }
   },
   "contracts": {
