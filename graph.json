@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-19T00:00:00Z"
+    "updated_at": "2026-06-20T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -29,7 +29,8 @@
         "web",
         "inspector",
         "krakeycode",
-        "searxng"
+        "searxng",
+        "browser"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -241,6 +242,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/searxng.md"
+    },
+    "browser": {
+      "zone": "plugins",
+      "path": "public_plugin/browser",
+      "description": "Browser-control tool: gives a Krakey Agent READ+NAVIGATE control of a Krakey-MANAGED Chrome via raw Chrome DevTools Protocol over Node's global WebSocket (ZERO deps). Chrome is spawned via child_process with --remote-debugging-port + a dedicated --user-data-dir profile under dataDir, launched LAZILY on the first tool call, reused, relaunched on crash, killed on teardown. Tools (registered via llm.register_tool): browser.navigate, browser.read_page (text|html, char-capped), browser.list_tabs (no auto-launch), browser.activate_tab, browser.screenshot (PNG written to dataDir/screenshots, returns path — the LLM envelope is text-only). NO click/type/eval. One CDP WebSocket multiplexes commands by id with per-command timeouts + flat sessions. Contributes a `browser.guidance` SYSTEM block (priority 5500) and a `browser.results` MESSAGES block (priority 3000) folding tool.result outcomes back as plain user/name:browser turns on the next beat + nudging clock.fire_now. Mirrors the searxng/krakeycode tool-plugin shape.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/browser.md"
     }
   },
   "contracts": {

@@ -6,7 +6,8 @@
     "system-prompt",
     "web",
     "krakeycode",
-    "searxng"
+    "searxng",
+    "browser"
   ],
   "privatePlugins": [
     "web"
@@ -24,6 +25,10 @@
       "instanceUrl": null,
       "localUrl": "http://localhost:8080",
       "usePublicFallback": true
+    },
+    "browser": {
+      "headless": true,
+      "chromePath": null
     }
   }
 }
