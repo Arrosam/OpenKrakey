@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="262" viewBox="0 0 600 262" role="img" aria-label="OpenKrakey — ultimate autonomous agent">
+  <title>OpenKrakey</title>
+  <desc>The Krakey wordmark, rendered as a vertical mint gradient on a terminal panel.</desc>
+  <defs>
+    <!-- Brand gradient, identical to the CLI banner: light mint at top, brand
+         mid-tone #2FD69C in the middle, deep teal at the bottom. -->
+    <linearGradient id="krakeyGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#97EBCE"/>
+      <stop offset="50%" stop-color="#2FD69C"/>
+      <stop offset="100%" stop-color="#186B4E"/>
+    </linearGradient>
+    <style>
+      text { white-space: pre; }
+      .word { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace; }
+    </style>
+  </defs>
+
+  <!-- Terminal-style panel so the gradient reads on both light and dark themes. -->
+  <rect x="1" y="1" width="598" height="260" rx="10" fill="#0D1117" stroke="#1F6F56" stroke-opacity="0.55"/>
+
+  <g class="word" font-size="13" fill="url(#krakeyGrad)">
+    <text x="40" y="44"  xml:space="preserve">    d8b                           d8b</text>
+    <text x="40" y="61"  xml:space="preserve">    ?88                           ?88</text>
+    <text x="40" y="78"  xml:space="preserve">     88b                           88b</text>
+    <text x="40" y="95"  xml:space="preserve">     888  d88'  88bd88b d888b8b    888  d88' d8888b?88   d8P</text>
+    <text x="40" y="112" xml:space="preserve">     888bd8P'   88P'  `d8P' ?88    888bd8P' d8b_,dPd88   88</text>
+    <text x="40" y="129" xml:space="preserve">    d88888b    d88     88b  ,88b  d88888b   88b    ?8(  d88</text>
+    <text x="40" y="146" xml:space="preserve">    d88' `?88b,d88'     `?88P'`88bd88' `?88b,`?888P'`?88P'?8b</text>
+    <text x="40" y="163" xml:space="preserve">                                                          )88</text>
+    <text x="40" y="180" xml:space="preserve">                                                          ,d8P</text>
+    <text x="40" y="197" xml:space="preserve">                                                      `?888P'</text>
+  </g>
+
+  <text class="word" x="40" y="232" font-size="11" letter-spacing="0.5" fill="#2FD69C" fill-opacity="0.9" xml:space="preserve">        u l t i m a t e   a u t o n o m o u s   a g e n t</text>
+</svg>

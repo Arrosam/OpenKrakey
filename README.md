@@ -1,56 +1,144 @@
-# OpenKrakey
+<div align="center">
 
-> 一个**极简、时间驱动、插件化**的自主 Agent 框架。
-> [`Arrosam/KrakeyBot`](https://github.com/Arrosam/KrakeyBot) 的从零重构版——同样的"持续心跳"理念，全新的、不再变成屎山的架构。
+<img src="assets/logo.svg" alt="OpenKrakey — the ultimate autonomous agent" width="560" />
 
-## 它是什么
+<p>
+  <a href="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml/badge.svg" /></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-2FD69C.svg" /></a>
+  <a href="package.json"><img alt="Node ≥ 22" src="https://img.shields.io/badge/node-%E2%89%A522-43853d.svg" /></a>
+  <a href="tsconfig.json"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.5-3178c6.svg" /></a>
+</p>
 
-普通 AI 助手是"自动贩卖机"：投问题、出答案、回去睡觉。OpenKrakey 跑在**心跳**上：每隔一段时间醒来，把当前所有信息组成一个完整 context 发给 LLM，执行返回的动作，然后继续。它**永不阻塞输入**——工具调用异步执行，跑到一半时你的新消息会在下一拍一并被处理。
+</div>
 
-运行时本身**领域无关**：内核不知道什么是 LLM、prompt、记忆。**"Agent" 是一个独立实例**，由一组插件跑起来后涌现行为；连记忆、对话历史、用哪个模型都是插件。
+**OpenKrakey runs autonomous AI agents on a heartbeat.** Instead of answering once and going
+quiet, an agent wakes on a timer, looks at everything it knows, decides what to do, fires off any
+tools, and goes back to sleep — over and over. You talk to it through a local web chat.
 
-## 核心结构
+The runtime core is tiny and knows nothing about LLMs, prompts, or memory. **Everything an agent
+can do is a plugin** — the chat window, the file/shell tools, web search, the browser, even which
+model it calls. Run one agent or many; each is isolated and keeps its own data.
 
-- **全局**：`boot`（只负责启动，读配置拉起 Agent）、`cli`（独立的配置文件管理工具/UI，也可手改文件）。
-- **每个 Agent 实例**（互相隔离，由 `agent_instance` 包裹）：
-  - `orchestrator` —— 指挥（内含 context-buffer）：按各 context 块的 target/优先级 compose（system 提示 + messages 数组）、暴露 eventbus 供插件改自己那块、异步 dispatch 工具调用、维持 actionbus、协调时钟。
-  - `event-system` —— 独立中枢总线（事件 + 动作），clock / loader / orchestrator / 插件都接它。
-  - `clock` —— 哑计时器（只激活）。
-  - `loader` —— 插件装卸：从 Agent 私有夹 + 共享 `public_plugin/` 加载、设好数据目录、注册进 event-system。
+[Architecture](ARCHITECTURE.md) · [Build a plugin](docs/PLUGIN_DEV.md) · [Docs index](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
-详见 **[ARCHITECTURE.md](ARCHITECTURE.md)**。
+## Quick start
 
-## 插件与数据
-
-- 共享插件放 `public_plugin/<id>/`（数据共享 → 多 Agent 共享知识）；Agent 私有插件放 `agents/<id>/plugins/<id>/`（数据隔离，覆盖同名共享插件）。
-- "共享代码、而非共享单例"：每个 Agent 各自实例化，共享/隔离取决于插件数据目录的位置。
-
-## 快速开始（MVP）
+> Requires **Node.js ≥ 22** (the `browser` plugin uses the global `WebSocket`, and the test
+> runner uses native globs). No database; an agent's whole state is files on disk.
 
 ```bash
 npm install
-cp config/llm.example.json config/llm.json   # 填入你的 API key（或用 "${ENV_VAR}" 引用环境变量）
-npm run cli                                   # → ✦ Guided setup：选服务、填模型/端点/密钥、起 agent，一路引导
-npm start                                     # 启动所有 agents/*/config.json —— 控制台打印 ✦ Web chat: http://localhost:7717
+
+# Tell it about an AI provider (paste a key, or reference an env var like "${ANTHROPIC_API_KEY}")
+cp config/llm.example.json config/llm.json
+
+# Guided setup: pick a provider, create your first agent
+npm run cli
+
+# Start every agent you've configured
+npm start
 ```
 
-启动后打开浏览器到 `http://localhost:7717` 即可与各 agent 对话（每个 agent 独立会话、消息有 sent/read 状态）。
+`npm start` prints a startup report and a **Web chat** URL (with a one-time access token), e.g.
+`http://127.0.0.1:7717/?token=…`. Open it and start talking. Each agent has its own chat, and
+every message shows a *sent* → *read* status as the agent picks it up on its next beat.
 
-MVP 插件集（`public_plugin/`）：`llm-core`（LLM 往返）· `persona`（身份 system 块）· `system-prompt`（操作模型 system 块：向 LLM 说明「每拍的纯文本回复是私有独白、要做任何事都得调工具」，通道无关、不点名具体通道工具）·
-`web`（浏览器聊天通道：refcounted http hub + SSE 流 + sent/read 状态；仅在 LLM 显式调用 `web.send_message` 工具时才发消息——LLM 的 output.message 独白不再自动推送；贡献一个 `web.guidance` 系统块（优先级 8000，文本/优先级可配）讲清**本通道**的用法——Web Chat 是一条消息通道，只有调用 `web.send_message` 才能触达它的用户（通用独白规则仍归 `system-prompt`，本块不复述）；并**自己维护聊天记录**，渲染成 `web.conversation` 会话块喂给 LLM——只记用户输入与 Agent 显式发出的消息，独白与工具机制都不入账；作为带数据的插件默认私有，每个 Agent 各自一份）。
+## What your agent can do
 
-此外（工具类插件，已随 `config/agent.default.example.json` 默认启用）：
-`krakeycode`（编程工具箱：给 Krakey 读/写/改文件、跑 shell、列目录等计算机工具，经 `llm.register_tool` 注册为 ToolDef；本地/sandbox 双模式安全；贡献 `krakeycode.guidance` 系统块与 `krakeycode.results` 消息块——工具结果下一拍折回会话）·
-`searxng`（网页搜索：给 Krakey 一个 `searxng.search` 工具，查询 SearXNG 实例的 JSON API（`GET /search?format=json`），结果在**下一拍**以 user 消息折回会话。端点策略：配置了 `instanceUrl` 即以它为准；否则**先试本地实例 `http://localhost:8080`，再回退到一组内置的公共 SearXNG 实例**——也就是说**默认情况下、当你没有本地实例时，查询会发往第三方公共实例**。要保持本地私有：把 `instanceUrl` 指向你自己的实例，或设 `usePublicFallback: false` 关掉公共回退）·
-`browser`（浏览器控制：给 Krakey 一套**只读 + 导航**的 Chrome 控制工具——`browser.navigate` / `browser.read_page`（取页面文本或 HTML，有字数上限）/ `browser.list_tabs` / `browser.activate_tab` / `browser.screenshot`，经 `llm.register_tool` 注册为 ToolDef。机制：用 Node 原生全局 `WebSocket` 直接讲 **Chrome DevTools Protocol**（**零依赖**），插件自己经 `child_process` 拉起一个**受管的 Chrome**（`--remote-debugging-port` + `dataDir` 下专属 `--user-data-dir` 配置目录），**首次调用工具时才惰性启动**、复用、崩溃自动重启、teardown 时杀掉，Chrome 路径找不到/起不来会优雅报错而非崩溃。**只读不交互**：不点击、不输入、不执行脚本。结果在**下一拍**以 `name:browser` 的 user 消息折回会话；截图写入 `dataDir/screenshots` 并返回文件路径（LLM 信封是纯文本，不内联图片）。贡献 `browser.guidance` 系统块（优先级 5500）与 `browser.results` 消息块（优先级 3000）。默认 `headless: true`，可经 `chromePath` 指定 Chrome 路径）。
+Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads every
+plugin below except `inspector`; add or remove them per agent in its config.
 
-把插件 id 放进 agent 配置的 `privatePlugins` 即可获得该插件的独立私有数据副本（`web` 默认即私有）。
+| Plugin | Gives the agent | Notes |
+|---|---|---|
+| **web** | A chat window to talk with you — the agent replies by calling `web.send_message`. | Binds to loopback only and is access-token gated. Keeps its own transcript with sent/read status. |
+| **krakeycode** | Files and shell: `read_file`, `write_file`, `edit_file`, `bash`, `list_dir`. | `local` mode (real paths) or `sandbox` mode (confined to a root + command allowlist). |
+| **searxng** | Web search: `searxng.search`. | Uses your SearXNG instance if set, else a local one, else built-in **public** instances — see [SECURITY.md](SECURITY.md). |
+| **browser** | Read-only Chrome: `navigate`, `read_page`, `list_tabs`, `activate_tab`, `screenshot`. | Drives Chrome over the DevTools Protocol with **zero dependencies**. Never clicks, types, or runs scripts. |
+| **llm-core** | The LLM round-trip, and the tool registry every tool plugin registers into. | Required by all of the above. Picks the model from config (or by capability). |
+| **persona** | Its identity — the top of the system prompt. | Set the text in the agent's config. |
+| **system-prompt** | Its operating rules (the *monologue rule*, below). | Channel-agnostic; teaches the general model. |
+| **inspector** | A live, read-only dashboard of everything on the agent's bus. | Loopback + token gated. Great for watching beats, prompts, and tool results. |
 
-## 状态
+Tool calls don't answer inline — a tool's result comes back as a message on the agent's **next
+beat** (tagged with the plugin name), and the agent wakes immediately to read it.
 
-✅ Phase 0（内核：契约 + 五个 per-Agent 模块 + boot/cli/llm-gateway）与 **Phase 1 MVP**（上述 4 个核心插件 + `inspector` 调试面板，
-端到端测试覆盖完整一拍：输入 → web 记入会话 → compose（system + messages）→ LLM → `web.send_message` 发消息并记入会话 → 下一拍带上 → 输出）已完成，996 项测试全绿。
-栈：TypeScript + Node.js。
+## How it works
+
+Each agent advances on a **beat** (every `intervalMs`, default 30s):
+
+1. **Gather** — every plugin refreshes the context it contributes (identity, rules, the
+   conversation, recent tool results).
+2. **Compose** — the pieces are ordered into a system prompt + a message list.
+3. **Send** — the prompt goes to the configured model, with all registered tools attached. *The
+   beat ends here; it doesn't wait.*
+4. **Act** — when the model answers, each tool call is dispatched asynchronously; results fold
+   into a later beat.
+
+**The monologue rule.** The plain text a model produces each beat is a *private monologue shown to
+no one.* To do anything in the world — answer you, read a file, search the web — it must call a
+**tool**. This is what keeps an idle beat cheap (just thinking) and makes every real action
+explicit. It's taught by the `system-prompt` plugin and respected by every tool.
+
+Because tool calls are fire-and-forget, the agent **never blocks on input** — a message you send
+mid-task is simply read on the following beat. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full
+design.
+
+## The CLI
+
+`npm run cli` opens an arrow-key configuration tool. It's just an editor for the JSON files — you
+can also edit them by hand.
+
+| Command | Opens |
+|---|---|
+| `npm run cli` | Landing menu — Guided setup, Agents, Default settings, AI services |
+| `node packages/cli/src/bin.ts agent` | Agents — create and edit agents |
+| `node packages/cli/src/bin.ts default` | Default settings — the template new agents copy |
+| `node packages/cli/src/bin.ts providers` | AI services — providers, endpoints, API keys |
+
+## Configuration
+
+Two files, both shipped as `.example.json` templates (your live copies are git-ignored).
+
+**`config/llm.json`** — the providers your agents may use. Keys come from the environment via
+`${VAR}` and never reach a plugin:
+
+```jsonc
+{
+  "communicators": {
+    "claude": { "provider": "anthropic", "model": "claude-opus-4-8", "apiKey": "${ANTHROPIC_API_KEY}", "capabilities": ["chat"] }
+  },
+  "default": "claude"
+}
+```
+
+**`agents/<id>/config.json`** — one agent. The CLI clones it from `config/agent.default.json`:
+
+```jsonc
+{
+  "intervalMs": 30000,                  // beat period
+  "plugins": ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
+  "privatePlugins": ["web"],            // ids whose data is isolated to this agent
+  "config": {
+    "persona": { "text": "You are Krakey, an autonomous agent. Be concise and helpful." },
+    "web": { "port": 7717 }
+  }
+}
+```
+
+`boot` starts an agent for every `agents/<id>/config.json` it finds.
+
+## Development
+
+```bash
+npm test          # contract-derived edge tests (run via tsx)
+npm run typecheck # tsc over contracts/ + packages/ + shared/
+npm run build     # compile
+```
+
+The codebase is a tiny kernel (`packages/`) over a set of typed contracts (`contracts/`), with all
+capabilities as plugins (`public_plugin/`). To add a capability, write a plugin — start with
+[docs/PLUGIN_DEV.md](docs/PLUGIN_DEV.md). Contributions welcome; see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
