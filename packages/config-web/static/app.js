@@ -64,8 +64,8 @@ const TYPE_TO_CONTROL = {
   multienum: "multiselect",
   list: "taglist",
 };
-function toControl(field) {
-  return {
+function toControl(field, pluginId) {
+  const c = {
     key: field.key,
     label: field.label,
     control: TYPE_TO_CONTROL[field.type] || "text",
@@ -75,8 +75,16 @@ function toControl(field) {
     min: field.min, max: field.max, step: field.step, unit: field.unit,
     placeholder: field.placeholder, example: field.example, showIf: field.showIf,
   };
+  // llm-core's `communicator` names a configured AI service — render it as a
+  // dropdown of the configured service names (the plugin can't enumerate them,
+  // so it ships the field as a plain string and we upgrade it here).
+  if (pluginId === "llm-core" && field.key === "communicator") {
+    c.control = "select";
+    c.optionsFrom = "services";
+  }
+  return c;
 }
-const toControls = (fields) => (fields || []).map(toControl);
+const toControls = (fields, pluginId) => (fields || []).map((f) => toControl(f, pluginId));
 
 /* ── Schema (filled from /api/schema at boot) ──────────────────────────────*/
 let PROVIDERS = [];
@@ -1012,7 +1020,7 @@ async function boot() {
   MODALITY_LABELS = schema.modalityLabels || {};
   PLUGINS = schema.plugins || [];
   PLUGIN_SCHEMAS = {};
-  for (const [pid, fields] of Object.entries(schema.pluginSchemas || {})) PLUGIN_SCHEMAS[pid] = toControls(fields);
+  for (const [pid, fields] of Object.entries(schema.pluginSchemas || {})) PLUGIN_SCHEMAS[pid] = toControls(fields, pid);
   AGENT_FIELDS = toControls(schema.agentFields || []);
 
   // Populate live state. Each call is best-effort: a missing default (404) is a
