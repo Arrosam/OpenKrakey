@@ -339,6 +339,28 @@ test("list_tabs: never-launched -> resolves {launched:false, tabs:[]} (no auto-l
   assert.deepEqual(res.tabs, [], "tabs is empty when Chrome was never launched");
 });
 
+// REGRESSION (smoke-test bug): a misconfigured chromePath used to crash the whole
+// host process via an unhandled child-process 'error' (ENOENT) on spawn, instead
+// of rejecting the tool call. Contract: a launch failure MUST reject the tool
+// call (a normal promise rejection) and never tear down the process. This test
+// lets the plugin attempt a REAL spawn of a non-existent binary — that fails
+// immediately with ENOENT (no real Chrome, no network needed); the failure must
+// arrive as a rejection that assert.rejects can catch. A valid data: URL is used
+// so the failure is the launch, not URL validation.
+test("navigate: a bad chromePath fails GRACEFULLY (rejects, does not crash the host)", async () => {
+  const p = plugin();
+  const { ctx } = makeCtx({ headless: true, chromePath: "C:/nonexistent/definitely-not-chrome.exe" });
+  await p.setup(ctx);
+  await assert.rejects(
+    () => ctx.actions.invoke("browser.navigate", { url: "data:text/html,x" }),
+    /chrome|launch|spawn|ENOENT/i,
+    "a bad chromePath must reject browser.navigate, not crash the host",
+  );
+  await assert.doesNotReject(async () => {
+    await p.teardown();
+  }, "teardown must be safe when Chrome never came up");
+});
+
 // ===========================================================================
 // 5. tool.result loop -> browser.results block  (state transition + negative)
 // ===========================================================================
