@@ -466,8 +466,15 @@ test("listAgents: multiple agents are returned in sorted order", async () => {
 });
 
 // ===========================================================================
-// 10. listAvailablePlugins() — subdir names under public_plugin/; missing => []
+// 10. listAvailablePlugins() — subdirs under public_plugin/ that hold an
+//     index.ts/index.js entry (i.e. real, loadable plugins); missing => []
 // ===========================================================================
+
+/** Make `<publicPluginDir>/<id>/` look like a real plugin (has an entry point). */
+function makePlugin(id: string): void {
+  fs.mkdirSync(path.join(publicPluginDir, id), { recursive: true });
+  fs.writeFileSync(path.join(publicPluginDir, id, "index.ts"), "export {};", "utf8");
+}
 
 test("listAvailablePlugins: returns [] when public_plugin/ does not exist", async () => {
   const cli = makeCli();
@@ -482,8 +489,8 @@ test("listAvailablePlugins: returns [] when public_plugin/ exists but is empty",
 });
 
 test("listAvailablePlugins: returns the subdirectory names (sorted)", async () => {
-  fs.mkdirSync(path.join(publicPluginDir, "weather"), { recursive: true });
-  fs.mkdirSync(path.join(publicPluginDir, "memory"), { recursive: true });
+  makePlugin("weather");
+  makePlugin("memory");
   const cli = makeCli();
   const got = await cli.listAvailablePlugins();
   assert.deepEqual([...got].sort(), ["memory", "weather"]);
@@ -491,13 +498,24 @@ test("listAvailablePlugins: returns the subdirectory names (sorted)", async () =
 
 test("listAvailablePlugins: ignores plain files at the top of public_plugin/", async () => {
   fs.mkdirSync(publicPluginDir, { recursive: true });
-  fs.mkdirSync(path.join(publicPluginDir, "realplugin"), { recursive: true });
+  makePlugin("realplugin");
   // A stray file (e.g. README) must NOT be reported as a plugin.
   fs.writeFileSync(path.join(publicPluginDir, "README.md"), "# plugins", "utf8");
   const cli = makeCli();
   const got = await cli.listAvailablePlugins();
   assert.equal(got.includes("realplugin"), true, "the directory must be listed");
   assert.equal(got.includes("README.md"), false, "a file must not be listed as a plugin");
+});
+
+test("listAvailablePlugins: excludes a subdir with no index entry (a bare data dir)", async () => {
+  makePlugin("realplugin");
+  // A bare directory (e.g. a data-only dir like notes/) with no index.ts/.js is
+  // NOT a loadable plugin and must not be offered as one.
+  fs.mkdirSync(path.join(publicPluginDir, "notesy", "data"), { recursive: true });
+  const cli = makeCli();
+  const got = await cli.listAvailablePlugins();
+  assert.equal(got.includes("realplugin"), true, "a real plugin must be listed");
+  assert.equal(got.includes("notesy"), false, "a dir without an index entry must be excluded");
 });
 
 // ===========================================================================

@@ -304,7 +304,7 @@ test("krakeycode: root has showIf { key:'mode', equals:'sandbox' }", () => {
 // ===========================================================================
 // 7. searxng — 14 keys + targeted type/option assertions
 // ===========================================================================
-test("searxng: schema is contract-valid and covers exactly its fourteen keys", () => {
+test("searxng: schema is contract-valid and covers exactly its fifteen keys", () => {
   assertValidConfigSchema(SEARXNG_SCHEMA, "SEARXNG_SCHEMA");
   assertKeysExactly(
     SEARXNG_SCHEMA as ConfigSchema,
@@ -321,6 +321,7 @@ test("searxng: schema is contract-valid and covers exactly its fourteen keys", (
       "maxSnippetChars",
       "maxResultChars",
       "maxResultsTotalChars",
+      "guidance",
       "guidancePriority",
       "resultsPriority",
     ],
@@ -370,7 +371,7 @@ test("searxng: instanceUrl and localUrl are url fields", () => {
 // ===========================================================================
 // 8. browser — 12 keys + targeted type assertion
 // ===========================================================================
-test("browser: schema is contract-valid and covers exactly its twelve keys", () => {
+test("browser: schema is contract-valid and covers exactly its thirteen keys", () => {
   assertValidConfigSchema(BROWSER_SCHEMA, "BROWSER_SCHEMA");
   assertKeysExactly(
     BROWSER_SCHEMA as ConfigSchema,
@@ -382,6 +383,7 @@ test("browser: schema is contract-valid and covers exactly its twelve keys", () 
       "commandTimeoutMs",
       "maxTextChars",
       "screenshotDir",
+      "guidance",
       "guidancePriority",
       "resultsPriority",
       "maxResults",

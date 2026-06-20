@@ -136,6 +136,30 @@ test("assembleSchema: plugins is metadata listing AT LEAST the 8 required ids (w
   }
 });
 
+test("assembleSchema: a bare subdir with no index entry is NOT surfaced as a plugin", async () => {
+  assert.equal(typeof schemaMod.assembleSchema, "function", "assembleSchema not implemented yet");
+  // A throwaway public_plugin dir: one real plugin (index + schema) and one bare
+  // data dir (no index.ts) — the loader can't load the bare one, so the config UI
+  // must not offer it.
+  const root = await mkdtemp(join(tmpdir(), "cw-pp-"));
+  try {
+    await mkdir(join(root, "realplug"), { recursive: true });
+    await writeFile(join(root, "realplug", "index.ts"), "export {};");
+    await writeFile(
+      join(root, "realplug", "config-schema.ts"),
+      'import type { ConfigSchema } from "../../contracts/plugin";\nexport const REALPLUG_SCHEMA: ConfigSchema = [{ key: "x", label: "X", type: "number", default: 1 }];\n',
+    );
+    await mkdir(join(root, "baredata", "data"), { recursive: true }); // no index.ts
+    const payload = await schemaMod.assembleSchema({ publicPluginDir: root });
+    const ids = new Set(payload.plugins.map((p: any) => p && p.id));
+    assert.ok(ids.has("realplug"), "the real plugin must be surfaced");
+    assert.equal(ids.has("baredata"), false, "a dir without an index entry must be excluded");
+    assert.equal("baredata" in payload.pluginSchemas, false, "no schema for a non-plugin dir");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // ===========================================================================
 // B. server + API
 // ---------------------------------------------------------------------------
