@@ -16,6 +16,7 @@
         "agent_instance",
         "boot",
         "cli",
+        "config-web",
         "llm-gateway"
       ],
       "overview": "overviews/zones/core.md"
@@ -124,13 +125,25 @@
     "cli": {
       "zone": "core",
       "path": "packages/cli",
-      "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links.",
+      "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links. Pure fs-ops live in shared/config-ops (index.ts is a re-export barrel) — shared with config-web.",
       "depends_on_contracts": [
         "agent"
       ],
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/cli.md"
+    },
+    "config-web": {
+      "zone": "core",
+      "path": "packages/config-web",
+      "description": "Global standalone config management web UI: serves a static SPA + token-gated loopback JSON API (inspector-style auth); reads/writes the same files as cli via shared/config-ops; auto-renders every plugin's settings from the plugins' self-described configSchema (assembleSchema globs public_plugin/*/config-schema.ts) plus an onboarding wizard. Decoupled from the runtime; npm run config:web.",
+      "depends_on_contracts": [
+        "agent",
+        "plugin"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/config-web.md"
     },
     "llm-gateway": {
       "zone": "core",
@@ -296,7 +309,8 @@
       "path": "contracts/plugin",
       "connects": [
         "loader",
-        "orchestrator"
+        "orchestrator",
+        "config-web"
       ],
       "test": "tests/plugin.test.ts",
       "status": "locked",
@@ -318,7 +332,8 @@
       "connects": [
         "agent_instance",
         "boot",
-        "cli"
+        "cli",
+        "config-web"
       ],
       "test": "tests/agent.test.ts",
       "status": "locked",
