@@ -27,19 +27,26 @@ model it calls. Run one agent or many; each is isolated and keeps its own data.
 > runner uses native globs). No database; an agent's whole state is files on disk.
 
 ```bash
-npm install
+# Install once: checks Node ≥ 22, installs dependencies, and puts `krakey` on your PATH.
+./install.sh                                            # macOS / Linux
+# powershell -ExecutionPolicy Bypass -File install.ps1  # Windows
 
 # Tell it about an AI provider (paste a key, or reference an env var like "${ANTHROPIC_API_KEY}")
 cp config/llm.example.json config/llm.json
 
 # Guided setup: pick a provider, create your first agent
-npm run cli          # …or do it in your browser: npm run config:web
+krakey setup          # …or do it in your browser: krakey dashboard
 
 # Start every agent you've configured
-npm start
+krakey start
 ```
 
-`npm start` prints a startup report and a **Web chat** URL (with a one-time access token), e.g.
+The installer never touches your system toolchain — it only checks for Node ≥ 22 and points you at
+[nodejs.org](https://nodejs.org/) if it's missing. Haven't installed? Every command still works as
+an npm script (`npm run cli` · `npm start` · `npm run config:web`) or by running the launcher
+directly: `./bin/krakey <command>`.
+
+`krakey start` prints a startup report and a **Web chat** URL (with a one-time access token), e.g.
 `http://127.0.0.1:7717/?token=…`. Open it and start talking. Each agent has its own chat, and
 every message shows a *sent* → *read* status as the agent picks it up on its next beat.
 
@@ -85,17 +92,23 @@ design.
 
 ## The CLI
 
-`npm run cli` opens an arrow-key configuration tool. It's just an editor for the JSON files — you
-can also edit them by hand.
+`krakey` is the single entry point for everything. With no arguments (or `krakey setup`) it opens an
+arrow-key configuration tool — just an editor for the JSON files, which you can also edit by hand.
 
-| Command | Opens |
+| Command | Does |
 |---|---|
-| `npm run cli` | Landing menu — Guided setup, Agents, Default settings, AI services |
-| `node packages/cli/src/bin.ts agent` | Agents — create and edit agents |
-| `node packages/cli/src/bin.ts default` | Default settings — the template new agents copy |
-| `node packages/cli/src/bin.ts providers` | AI services — providers, endpoints, API keys |
+| `krakey` · `krakey setup` | Landing menu — Guided setup, Agents, Default settings, AI services |
+| `krakey agent` | Agents — create and edit agents |
+| `krakey default` | Default settings — the template new agents copy |
+| `krakey providers` | AI services — providers, endpoints, API keys |
+| `krakey start` | Launch the runtime — every configured agent (Ctrl+C to stop) |
+| `krakey dashboard` | Open the Config console web UI (optional port: `krakey dashboard 7700`) |
+| `krakey help` · `krakey version` | Usage · version |
 
-**Prefer a browser?** `npm run config:web` serves the same configuration as a local web app — the
+`start` and `dashboard` simply launch the runtime and the web console as child processes; the same
+work is available as `npm start` and `npm run config:web` if you'd rather not install.
+
+**Prefer a browser?** `krakey dashboard` serves the same configuration as a local web app — the
 **Config console**. It prints a token-gated URL (`http://127.0.0.1:7700/?token=…`), edits the exact
 same JSON files, and **auto-renders every plugin's settings from the plugin's own schema** (a new
 plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and access-token
