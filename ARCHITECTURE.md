@@ -1,187 +1,310 @@
-# OpenKrakey 架构设计
+# OpenKrakey — Architecture
 
-> **状态**：设计定稿（v1.0，全仓重写起点）。**栈**：TypeScript + Node.js（npm；测试经 tsx）。**许可**：MIT。
-> **前身**：[`Arrosam/KrakeyBot`](https://github.com/Arrosam/KrakeyBot)（Python）——因缺乏规划、抽象反复重切而成"屎山"。OpenKrakey 从零重做。
-
----
-
-## 0. 一句话定位
-
-> **内核是一个领域无关的「时间驱动 + 非阻塞 + 插件化」运行时。"Agent" 是一个独立实例，由一组插件跑在心跳上涌现出行为。** 内核不含 LLM/prompt/记忆的**行为**（怎么建 prompt、调哪个模型、怎么记忆）——这些都在插件里；但它认得 LLM I/O 的通用**数据形状**，并自带一个 **LLM 通信网关**（业界通用、已固化的基础设施；密钥仅限核心）。
+> **Status:** design finalized (v1.0, the starting point of a full clean-room rewrite).
+> **Stack:** TypeScript + Node.js (npm; tests run via tsx). **License:** MIT.
+> **Predecessor:** [`Arrosam/KrakeyBot`](https://github.com/Arrosam/KrakeyBot) (Python) — which,
+> for lack of up-front planning, had its abstractions re-cut repeatedly until it decayed.
+> OpenKrakey rebuilds from zero.
 
 ---
 
-## 1. 设计原则
+## 0. Thesis
 
-| # | 原则 | 含义 |
-|---|------|------|
-| P1 | **时间驱动 · 非阻塞** | 每个 Agent 有自己的心跳；工具调用异步甩出、永不阻塞输入；新消息/工具结果折叠进下一拍。 |
-| P2 | **一切皆插件** | LLM、记忆、prompt/context 块、工具、通道……全是插件。 |
-| P3 | **Agent 即独立实例** | 每个 Agent 自带 clock / event-system / orchestrator / loader / 插件 / 数据，互相隔离；可并发多个。 |
-| P4 | **最小耦合** | 模块与插件之间只经 **event-system** 沟通（事件 + 动作），不互相 import 实现。 |
-| P5 | **职责单一** | 见 §3——每个模块只做一件事，边界清晰（这是本项目存在的理由）。 |
-| P6 | **抗漂移** | 契约（L1）是唯一共享词汇；一组测试强制的不变量（§9）锁死边界。 |
+> **The kernel is a domain-agnostic "time-driven + non-blocking + plugin-everything" runtime.
+> An *Agent* is an independent instance whose behavior emerges from a set of plugins running on
+> a heartbeat.** The kernel contains none of the *behavior* of LLMs, prompts, or memory — how a
+> prompt is built, which model is called, how memory works all live in plugins. It does,
+> however, know the general *data shapes* of LLM I/O, and it ships a single **LLM communication
+> gateway** (commodity, settled infrastructure; keys confined to the core).
 
 ---
 
-## 2. 模块结构
+## 1. Design principles
+
+| # | Principle | Meaning |
+|---|---|---|
+| **P1** | **Time-driven · non-blocking** | Each Agent has its own heartbeat; tool calls are fired asynchronously and never block input; new messages and tool results fold into the next beat. |
+| **P2** | **Everything is a plugin** | LLM, memory, prompt/context blocks, tools, channels — all plugins. |
+| **P3** | **An Agent is an independent instance** | Each Agent owns its clock / event-system / orchestrator / loader / plugins / data, mutually isolated; many may run concurrently. |
+| **P4** | **Minimal coupling** | Modules and plugins communicate **only** through the event-system (events + actions); they never import one another's implementations. |
+| **P5** | **Single responsibility** | See §3 — each module does exactly one thing, with sharp boundaries. *This is the reason the project exists.* |
+| **P6** | **Drift-resistant** | The contracts (L1) are the only shared vocabulary; a set of test-enforced invariants (§9) pins the boundaries shut. |
+
+---
+
+## 2. Module structure
 
 ```
-┌──────────────────────────── 全局（运行时一份）────────────────────────────┐
-│  boot  ——只负责启动：读各 Agent 配置文件 → 拉起 Agent                       │
-│  cli   ——独立的配置文件管理工具（UI）：按格式增改 Agent 配置 / Default 设置   │
-│          （用户也可直接手改文件；显示 Krakey logo）                          │
-└───────────────────────────────────────────────────────────────────────────┘
-            │ 启动时按配置创建
+┌──────────────────────────── Global (one per process) ─────────────────────────────┐
+│  boot  — startup only: read each Agent's config file → bring the Agent up           │
+│  cli   — an independent config-file management tool (UI): create/edit Agent configs  │
+│          and Default settings by the correct schema (users may also edit by hand;    │
+│          displays the Krakey logo)                                                   │
+└──────────────────────────────────────────────────────────────────────────────────────┘
+            │ creates per config at startup
             ▼
-┌──────────── Agent 实例（每个一套，互相隔离，由 agent_instance 包裹）────────┐
-│                                                                            │
-│   agent_instance ——包裹一个 Agent：持有并连好下面四件，对外暴露 start/stop  │
-│                                                                            │
-│   ┌── event-system ──(独立中枢：eventbus + actionbus)──┐                    │
-│   │      ▲          ▲              ▲           ▲        │                    │
-│   │   clock      loader       orchestrator   插件…      │                    │
-│   │  (发tick)  (注册插件)   (订阅/compose/dispatch)      │                    │
-│   └──────────────────────────────────────────────────┘                    │
-│                                                                            │
-│   orchestrator 内部含 context-buffer（有序 context 块）                      │
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────── Agent instance (one set each, mutually isolated, wrapped by agent_instance) ┐
+│                                                                                          │
+│   agent_instance — wraps one Agent: holds and wires the four below; exposes start/stop   │
+│                                                                                          │
+│   ┌── event-system ──(independent hub: eventbus + actionbus)──┐                          │
+│   │      ▲          ▲              ▲           ▲               │                          │
+│   │   clock      loader       orchestrator   plugins…         │                          │
+│   │  (emit tick) (register)  (subscribe/compose/dispatch)     │                          │
+│   └────────────────────────────────────────────────────────────┘                        │
+│                                                                                          │
+│   orchestrator internally contains the context-buffer (ordered context blocks)          │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| 范围 | 模块 | 一句话 |
-|------|------|--------|
-| 全局 | **boot** | 启动器（顺带建全局 llm library） |
-| 全局 | **cli** | 配置文件管理 UI（独立工具） |
-| 全局 | **llm-gateway** | LLM 通信网关：从 `config/llm.json` 生成无 key 的 communicator library |
-| 每 Agent | **agent_instance** | 包裹一个 Agent（门面/容器） |
-| 每 Agent | **orchestrator** | 指挥（内含 context-buffer） |
-| 每 Agent | **event-system** | 独立中枢总线（事件 + 动作） |
-| 每 Agent | **clock** | 哑计时器 |
-| 每 Agent | **loader** | 插件装卸 |
+| Scope | Module | One line |
+|---|---|---|
+| Global | **boot** | Startup launcher (also builds the global LLM library) |
+| Global | **cli** | Config-file management UI (independent tool) |
+| Global | **llm-gateway** | LLM communication gateway: builds a key-less communicator library from `config/llm.json` |
+| Per-Agent | **agent_instance** | Wraps one Agent (façade / container) |
+| Per-Agent | **orchestrator** | The conductor (contains the context-buffer) |
+| Per-Agent | **event-system** | Independent central bus (events + actions) |
+| Per-Agent | **clock** | Dumb timer |
+| Per-Agent | **loader** | Plugin install / register |
+
+> **Nomenclature.** The runtime wrapper module is `agent_instance`; the word *Agent* denotes
+> the conceptual instance. The `context-buffer` is **not** a module — it lives *inside* the
+> orchestrator. There is no "host" module.
 
 ---
 
-## 3. 各模块职责
+## 3. Module responsibilities
 
-### 全局
+### Global
 
-**boot** —— **只负责启动**。读取每个 Agent 个人文件夹下的配置文件（`agents/<id>/config.json`），为每个配置创建并启动一个 `agent_instance`。仅此而已（不做运行期管理）。
+**boot** — **startup only.** Reads the configuration file in each Agent's personal folder
+(`agents/<id>/config.json`) and, for each, constructs and starts one `agent_instance`. Nothing
+more (it performs no run-time management).
 
-**cli** —— **独立的配置文件管理工具**（一种 User Interface）。一个 `@inquirer/prompts` 的**方向键交互界面**：landing page → Agents / Default / **Providers(LLM 目录)** 各页,按正确格式增/改/删 Agent 配置、维护 **Default Plugin Setting** 与 `config/llm.json` 的 communicator 定义；新建 Agent 时以 Default 为模板复制。`krakey` 进 landing、`krakey agent`/`krakey default` 深链直达。它**与运行时解耦**——用户完全可以手改文件代替它。启动显示 Krakey ASCII logo。
+**cli** — an **independent config-file management tool** (a user interface). An
+[`@inquirer/prompts`](https://github.com/SBoudrias/Inquirer.js) arrow-key interface: a landing
+page leading to **Agents / Default / Providers (the LLM catalogue)**, each of which
+creates/edits/removes Agent configuration, the **Default plugin settings**, and the communicator
+definitions in `config/llm.json` by the correct schema. A new Agent is cloned from Default as a
+template. `krakey` enters the landing page; `krakey agent` / `krakey default` / `krakey providers`
+deep-link directly. It is **decoupled from the runtime** — a user may edit the files by hand
+instead. It displays the Krakey ASCII logo on launch.
 
-**llm-gateway** —— **LLM 通信网关**（全局基础设施）。读 `config/llm.json`(含 API key)→ 为每个 communicator 选 provider adapter(anthropic / openai-compatible,原生 `fetch`)→ 生成一个**无 key 的 `CommunicatorLibrary`**:每个 `Communicator` 内部完成"建请求 + 发送 + 解析响应/工具调用",返回规范化的 `LLMResponse`。**key 闭包内持有,绝不暴露给插件**;插件只按名字调 communicator,从而既防泄露、又能灵活切换 LLM。boot 建一份全局 library,经 agent_instance→loader 注入每个 `PluginContext.llm`。这是把"业界通用、无拓展空间"的 LLM 请求/解析**固化进核心**(R1 允许:基础设施而非策略)。
+**llm-gateway** — the **LLM communication gateway** (global infrastructure). It reads
+`config/llm.json` (which contains API keys), selects a provider adapter per communicator
+(e.g. `anthropic`, `openai-completion`, `jina`; native `fetch`), and produces a **key-less**
+`CommunicatorLibrary`: each `Communicator` internally builds the request, sends it, and parses
+the response / tool calls into a normalized `LLMResponse`. **Keys are held in the closure and are
+never exposed to plugins**; a plugin only calls a communicator by name. This confines the
+"commodity, no-room-for-extension" LLM request/parse logic to the core (permitted by R1: this is
+infrastructure, not policy). `boot` builds one global library and injects it through
+`agent_instance` → `loader` into every `PluginContext.llm`.
 
-### 每个 Agent 实例内
+### Within each Agent instance
 
-**agent_instance** —— **包裹一个 Agent**（门面）。持有并连好本 Agent 的 clock + event-system + orchestrator + loader；对外暴露 `start` / `stop`（及输入/输出）。`start()`：让 loader 装好插件 → 让 orchestrator 开始指挥；`stop()`：停 clock + 让 loader teardown。自己不含业务逻辑。
+**agent_instance** — **wraps one Agent** (a façade). Holds and wires this Agent's clock +
+event-system + orchestrator + loader, and exposes `start` / `stop` (plus input/output). `start()`
+has the loader install plugins, then has the orchestrator begin conducting; `stop()` halts the
+clock and has the loader tear down. It contains no business logic of its own.
 
-**orchestrator** —— **指挥**（per-Agent；**context-buffer 在它内部**）。五个职责：
-1. 按各 context 块的 **target** 与**优先级**（`priority`，数字**大→小**）compose：`system` 块拼成系统提示（高的在最上、各包 `<label>`），`messages` 块各渲染一组 `Message[]` 拼成消息数组（块间按优先级排、组内顺序保留）；
-2. 经 event-system **暴露 eventbus**：插件注册进来、在特定事件下改 context 块——块按 **id 寻址**，任何插件都可改**别的插件**的块（如 A 改 B 的 `BBB`）；
-3. **异步、不阻塞**地执行从 LLM 解析出的指令（工具调用）；
-4. 经 event-system **维持 actionbus** 供插件被调用；
-5. **协调时钟节奏**：启动期间在 actionbus 注册 `clock.set_interval` / `clock.set_default_interval` / `clock.fire_now`（见 shared/actions `Actions.CLOCK_*`），插件可随时调节奏；stop 时注销。
-> 一拍（beat，**事件驱动**）：clock 发 tick（`clock.tick` 事件）→ orchestrator 发 `prompt.gather`（插件刷新各自块）→ compose（按 target 拆出 system 提示 + messages 数组）→ 发 `llm.request` 事件（载 `{context, messages}`；**不等待**，拍到此结束）。LLM 插件监听 `llm.request`、完成往返后发 `llm.return`（`Reply<LLMResponse>`，含已解析的 toolCalls）→ orchestrator dispatch 工具调用（异步、互相隔离）。compose 对每块**单独容错**：某块 render 失败仅降级为空文本，绝不拖垮整拍。
+**orchestrator** — **the conductor** (per-Agent; **the context-buffer lives inside it**). Five
+responsibilities:
 
-**event-system** —— **独立的中枢总线**：`eventbus`（emit/on）+ `actionbus`（register/invoke）。clock、loader、orchestrator、各插件**都接到这里**来收发各类事件、注册可调用动作。保持独立，正是因为接入它的东西多。
+1. **Compose** by each context block's **target** and **priority** (numeric, larger → earlier):
+   `system` blocks concatenate into the system prompt (highest first, each wrapped in `<label>`);
+   `messages` blocks each render a `Message[]` group concatenated into the messages array
+   (ordered across blocks by priority; order *within* a group preserved).
+2. **Expose the eventbus** via the event-system: plugins register and, on specific events, modify
+   context blocks — blocks are addressed **by id**, and any plugin may modify *another* plugin's
+   block (e.g. A modifies B's `BBB`).
+3. **Dispatch** the instructions parsed from the LLM (tool calls) **asynchronously and
+   non-blockingly**.
+4. **Maintain the actionbus** via the event-system, so plugins can be invoked.
+5. **Coordinate the clock's cadence:** during startup it registers `clock.set_interval` /
+   `clock.set_default_interval` / `clock.fire_now` on the actionbus (see `shared/actions`
+   `Actions.CLOCK_*`); plugins may adjust the cadence at any time; these are unregistered on stop.
 
-**clock** —— **哑计时器**：自行倒数，到点只负责**激活**（经 event-system 发一个 tick）；不调度、不决定内容；节奏可被 orchestrator 调整（setInterval / fireNow）。
+> **A beat** (event-driven): `clock` emits a tick (`clock.tick`) → the orchestrator emits
+> `prompt.gather` (plugins refresh their blocks) → compose (split by target into a system prompt
+> + a messages array) → emit `llm.request` (carrying `{context, messages}`; **does not wait** —
+> the beat ends here). The LLM plugin listens for `llm.request`, completes the round-trip, and
+> emits `llm.return` (`Reply<LLMResponse>`, with parsed `toolCalls`) → the orchestrator
+> dispatches each tool call (asynchronous, isolated). Composition is fault-isolated per block: a
+> block whose `render` fails degrades to empty text and never drags down the beat.
 
-**loader** —— **插件装卸**（loader 只负责启动期 + 注册）：
-- 构建时把 config 里 `privatePlugins` 声明的插件从 `public_plugin/` **复制**进本 Agent 的 `agents/<id>/plugins/`（已存在则不覆盖，保留其私有数据）；
-- 加载：本 Agent 私有夹 `agents/<id>/plugins/` **整夹自动加载并覆盖**同名 public + config 声明的 public 插件；
-- 给每个插件设好 `dataDir`、构建 PluginContext、调 `setup` **把插件注册进本 Agent 的 event-system**（动作/监听/context 块）；
-- `stop` 时逐个 teardown。
+**event-system** — the **independent central bus**: an `eventbus` (`emit` / `on`) plus an
+`actionbus` (`register` / `invoke`). The clock, loader, orchestrator, and every plugin **all
+connect here** to exchange events and register callable actions. It stays independent precisely
+because so many things connect to it.
+
+**clock** — a **dumb timer**: it counts down on its own and, on expiry, only *activates* (emits a
+tick via the event-system). It does not schedule and does not decide content; its cadence may be
+adjusted by the orchestrator (`setInterval` / `fireNow`).
+
+**loader** — **plugin install / register** (startup + registration only):
+
+- at build time, copies plugins declared in the config's `privatePlugins` from `public_plugin/`
+  into the Agent's `agents/<id>/plugins/` (never overwriting an existing one, preserving its
+  private data);
+- at load time, the Agent's private folder `agents/<id>/plugins/` is **loaded wholesale and
+  overrides** same-named public plugins, plus the public plugins declared in the config;
+- sets each plugin's `dataDir`, builds the `PluginContext`, and calls `setup` to **register the
+  plugin into this Agent's event-system** (actions / listeners / context blocks);
+- tears each down on `stop`.
 
 ---
 
-## 4. 一拍的数据流（单个 Agent 内）
+## 4. Data flow of one beat (within a single Agent)
 
 ```
-   插件 ──emit──▶ event-system(eventbus) ──▶ 插件按 id 增/改/删 context 块（在 orchestrator 的 context-buffer 里）
-     ▲                                                          │
-     │                                          clock 倒数到点 → 发 tick
+   plugin ──emit──▶ event-system (eventbus) ──▶ plugin adds/modifies/removes a context block by id
+     ▲                                                          │   (in the orchestrator's buffer)
+     │                                          clock counts down → emit tick
      │                                                          ▼
-     │              orchestrator: 发 prompt.gather → compose 完整 context → emit "llm.request" ─▶ LLM 插件（监听）
-     │                                                          │ (在途；不阻塞，拍到此结束)
+     │     orchestrator: emit prompt.gather → compose full context → emit "llm.request" ─▶ LLM plugin
+     │                                                          │ (in flight; non-blocking; beat ends)
      │                                                          ▼
-     │                LLM 插件完成往返 + 解析 → emit "llm.return"（Reply<LLMResponse>，含 toolCalls）
-     └──invoke◀── event-system(actionbus) ◀── orchestrator 逐个 dispatch（工具异步甩出）
+     │           LLM plugin finishes round-trip + parse → emit "llm.return" (Reply<LLMResponse>, toolCalls)
+     └──invoke◀── event-system (actionbus) ◀── orchestrator dispatches each tool call (fired async)
 ```
 
-**时间并行 = 非阻塞**：工具调用异步执行；跑到一半时的新输入、以及 Agent 经通道显式发出的消息，都由通道插件记进自己的会话，于**下一拍** compose 时一并带上。每个 Agent 各跑各的（互不阻塞）。
+**Temporal parallelism = non-blocking.** Tool calls run asynchronously; a new input arriving
+mid-flight, and any message the Agent explicitly sends through a channel, are recorded by the
+channel plugin into its own conversation and carried along at the **next** beat's composition.
+Each Agent runs its own loop (no cross-blocking).
 
 ---
 
-## 5. 插件模型
+## 5. Plugin model
 
-**共享代码，而非共享单例**——每个 Agent 各自实例化插件；"共享 / 隔离"取决于插件把文件存到哪，而**数据目录跟着代码位置走**。
+**Shared code, not shared singletons** — each Agent instantiates plugins itself; whether data is
+*shared or isolated* depends on where a plugin writes its files, and **the data directory follows
+the code location**.
 
-- **public 插件**：代码在 `public_plugin/<id>/`，所有声明它的 Agent 都从这里加载 → 它们的 `dataDir` 都指向**同一个** `public_plugin/<id>/data/` → 图书馆例子：A 存的知识 B 能读到（共享数据、各自独立实例）。
-- **independent（私有）插件**：Agent 构建时把该插件代码**复制**进 `agents/<id>/plugins/<id>/` → `dataDir` 指向本 Agent 自己的 `data/` → 数据只此 Agent 可见，且**覆盖**同名 public。
-- **PluginContext** 提供 `dataDir`（= 该插件代码目录下的 `data/`），插件读写文件/DB 都用它；还提供 **`llm`**（无 key 的 `CommunicatorLibrary`）——插件按名字取 communicator 发 LLM 请求，看不到 key/具体请求。
-- 一个插件提供任意组合：**context 块**（带 `priority` + `target`，按 id 寻址）、**actions**（注册到 actionbus）、**listeners**（订阅 eventbus）。
-- **context 块按 id 共享寻址**：块由注册它的插件维护，但任何插件都能按 id **请求增/改/删别的插件的块**（如 A 改 B 的 `BBB` 块）。
-- **target + 优先级 = 去向 + 排序**：每块声明 `target`——`system`（默认）拼进系统提示、`messages` 渲染一组 `Message[]` 放进消息数组；两边都按 `priority` **大→小** 排（messages 块的组内顺序保留）。**会话不是单独机制，就是一个 `messages` 块**——`web` 通道把自己的聊天记录渲染成会话喂给 LLM。约定：**固定/稳定**的 system 块（身份 persona、操作模型 system-prompt、本通道用法 web.guidance）给**高优先级置顶**，让稳定前缀提升 prompt 缓存命中；会话等多变内容给较低优先级（persona 10000、system-prompt 9000、web.guidance 8000、web.conversation 5000）。
+- **public plugin:** code lives in `public_plugin/<id>/`; every Agent that declares it loads from
+  there → all their `dataDir`s point to the **same** `public_plugin/<id>/data/`. *Library
+  example: knowledge A writes, B can read (shared data, separate instances).*
+- **independent (private) plugin:** at build time the code is **copied** into
+  `agents/<id>/plugins/<id>/` → its `dataDir` points to that Agent's own `data/` → the data is
+  visible only to that Agent and **overrides** a same-named public plugin.
+- **PluginContext** supplies `dataDir` (= the `data/` under the plugin's code directory), used for
+  all file/DB access; and **`llm`** (the key-less `CommunicatorLibrary`) — a plugin fetches a
+  communicator by name to make an LLM request without ever seeing a key or the wire format.
+- A plugin provides any combination of: **context blocks** (with `priority` + `target`, addressed
+  by id), **actions** (registered on the actionbus), **listeners** (subscribed on the eventbus).
+- **Context blocks are shared, addressed by id:** a block is maintained by the plugin that
+  registers it, but any plugin may request to add/modify/remove *another* plugin's block by id
+  (e.g. A modifies B's `BBB`).
+- **target + priority = destination + ordering:** each block declares a `target` — `system`
+  (default) concatenates into the system prompt; `messages` renders a `Message[]` group into the
+  messages array — both ordered by `priority` (larger → earlier; within a `messages` group, order
+  preserved). **The conversation is not a separate mechanism — it is simply a `messages` block:**
+  the `web` channel renders its own chat log as a conversation fed to the LLM. **Convention:**
+  give *stable* system blocks (the `persona` identity, the `system-prompt` operating model, the
+  `web.guidance` channel usage) **high priority on top**, so a stable prefix improves prompt-cache
+  hit rates; give volatile content like the conversation a lower priority (persona 10000,
+  system-prompt 9000, web.guidance 8000, web.conversation 5000).
 
-配置里：`plugins: string[]`（要加载的 public 插件）；`privatePlugins?: string[]`（要 independent 化、构建时复制进来的）。私有夹里已有的插件总是自动加载并覆盖同名 public。
+In configuration: `plugins: string[]` (public plugins to load); `privatePlugins?: string[]` (those
+to make independent, copied in at build time). Plugins already present in the private folder are
+always auto-loaded and override same-named public ones.
 
 ---
 
-## 6. 个人文件夹 / 配置 / cli
+## 6. Personal folder / configuration / cli
 
 ```
-agents/<id>/                  # 一个 Agent 的"个人文件夹"
-├─ config.json                # AgentDefinition（intervalMs / plugins / privatePlugins / config / persona…）
-├─ plugins/<pid>/             # 私有插件代码（+ data/ 私有数据）
-└─ data/ …                    # 该 Agent 的其它数据
-public_plugin/<pid>/          # 共享插件代码（+ data/ 共享数据）
-config/agent.default.json     # Default Plugin Setting（/new 以它为模板）
+agents/<id>/                  # an Agent's "personal folder"
+├─ config.json                # AgentDefinition (intervalMs / plugins / privatePlugins / config / persona…)
+├─ plugins/<pid>/             # private plugin code (+ data/ private data)
+└─ data/ …                    # this Agent's other data
+public_plugin/<pid>/          # shared plugin code (+ data/ shared data)
+config/agent.default.json     # Default plugin settings (a new Agent is templated from it)
 ```
 
-- **boot** 启动时读 `agents/*/config.json` 全部拉起。
-- **cli** 是改这些文件的便捷工具：`/new <id>`（按 default 复制出 `agents/<id>/config.json`）、`/default`、增改插件声明等；用户也可直接手改。
+- **boot** reads `agents/*/config.json` at startup and brings them all up.
+- **cli** is the convenient tool for editing these files: create an Agent (clone
+  `agents/<id>/config.json` from Default), edit Default, add/modify plugin declarations; a user
+  may also edit by hand.
 
 ---
 
-## 7. 目录骨架（仓库）
+## 7. Repository layout
 
 ```
 OpenKrakey/
-├─ package.json  tsconfig.json  LICENSE  .gitignore
-├─ src/
-│  ├─ contracts/        # L1 唯一共享词汇（纯类型 + 知名 action/event 名）
-│  │   clock · event-system · context · plugin · orchestrator · agent · loader · index
-│  ├─ core/             # 模块实现：boot · cli · agent-instance · orchestrator · event-system · clock · loader
-│  └─ ...
-├─ public_plugin/<id>/  # 共享插件（含示例 library）
-├─ agents/<id>/         # 各 Agent 个人文件夹（config.json + plugins/ + data/）
-├─ config/agent.default.json
-└─ docs/                # 文档（含从 KrakeyBot 搬来的依赖图工具，待重做）
+├─ package.json  tsconfig.json  LICENSE  README.md  ARCHITECTURE.md
+├─ contracts/          # L1 — the only shared vocabulary (pure types + well-known action/event names)
+│   agent · clock · context · event-system · llm · loader · orchestrator · plugin
+├─ packages/           # module implementations
+│   agent_instance · boot · cli · clock · event-system · llm-gateway · loader · orchestrator
+├─ public_plugin/<id>/ # shared plugins
+│   llm-core · persona · system-prompt · web · krakeycode · searxng · browser · inspector
+├─ shared/             # cross-cutting helpers (actions, config, errors, http-auth, logging, theme)
+├─ config/             # *.example.json templates (llm, agent.default)
+├─ tests/              # contract-derived edge tests (run via tsx)
+└─ docs/               # documentation (architecture-graph tooling under docs/scripts/)
 ```
 
----
-
-## 8. 契约（L1，纯类型）
-
-`clock`(含 default/current 双 interval、本拍即时 `setInterval`/`setDefaultInterval`)、`event-system`(EventBus+ActionBus)、`context`(ContextBlock`{id,priority,target?,render}`——render 返 `string`(system) 或 `Message[]`(messages) / ComposedContext)、`plugin`(Plugin/PluginManifest/PluginContext——含 `dataDir`、无 key 的 `llm` library + 按 id 的 context 块 增/改/删/查)、`orchestrator`、`agent`(AgentDefinition 含 `privatePlugins?`、AgentHandle)、`loader`、`llm`(provider 无关的 LLM I/O envelope + 无 key 的 `Communicator`/`CommunicatorLibrary`——基础设施)，外加知名 event/action 名常量与 `Notify/Request/Reply` 事件基类。
+> **Runtime state is git-ignored**, not source: `agents/<id>/`, `public_plugin/*/data/`, and the
+> live `config/llm.json` / `config/agent.default.json` are produced at run time from the
+> committed `.example.json` templates.
 
 ---
 
-## 9. 不变量（抗屎山 · 测试强制）
+## 8. Contracts (L1, pure types)
 
-- **R1** 核心不含领域**策略/内容**：不构造 prompt、不做 memory、不含"选哪个模型/何时调"的逻辑、不含 agent 行为或工具实现。核心**可**含稳定、业界通用的**基础设施**——数据形状（`llm` envelope、context block）与 **LLM 通信执行**（发送+解析，见 `llm-gateway`）。**API key 仅限核心**，绝不交给插件（插件只拿无 key 的 `Communicator`）。
-- **R2** 插件只经本 Agent 的 event-system + L1 契约沟通；不互相 import、不碰核心内部、不跨 Agent。
-- **R3** 一个零插件的 Agent 能跑完一拍不报错。
-- **R4** 职责单一：每个模块只做 §3 写的事（如 loader 不跑 beat、agent_instance 不 setup 插件）。
-- **R5** 契约（L1）是唯一共享词汇，改动需版本化。
-- **R6** per-Agent 隔离：A 的插件/数据/事件不泄漏到 B（public 插件的共享数据除外，且那是显式的）。
+The single shared vocabulary. Each is a pure-type definition plus well-known event/action name
+constants:
+
+- **clock** — including dual `default` / `current` intervals and this-beat-immediate
+  `setInterval` / `setDefaultInterval`.
+- **event-system** — `EventBus` + `ActionBus`.
+- **context** — `ContextBlock` `{ id, priority, target?, render }`; `render` returns a `string`
+  (system) or `Message[]` (messages), or a `ComposedContext`.
+- **plugin** — `Plugin` / `PluginManifest` / `PluginContext`, including `dataDir`, the key-less
+  `llm` library, and the by-id context-block add/modify/remove/query operations.
+- **orchestrator** — the conductor's interface.
+- **agent** — `AgentDefinition` (with `privatePlugins?`) and `AgentHandle`.
+- **loader** — the install/register interface.
+- **llm** — the provider-agnostic LLM I/O envelope plus the key-less `Communicator` /
+  `CommunicatorLibrary` (infrastructure).
+
+Plus the well-known event/action name constants and the `Notify` / `Request` / `Reply` event base
+envelopes.
 
 ---
 
-## 10. 路线图
+## 9. Invariants (anti-rot · test-enforced)
 
-- **Phase 0**：契约 + 五个 per-Agent 模块（clock / event-system / orchestrator(含 context-buffer) / loader / agent_instance）+ boot，能"裸 Agent 空跑一拍"。
-- **Phase 1**：示例插件（`persona` 身份块；`system-prompt` 操作模型块（独白规则 + 基本用法，通道无关）；`llm-core` LLM 往返 + `llm.register_tool`；`web` 浏览器通道——`web.send_message` 工具 + `web.guidance` 通道用法块 + `web.conversation` 会话块，自己维护聊天记录；`inspector` 调试面板）→ 能对话、有记忆。
-- **Phase 2**：cli 配置工具（logo + `/new` + `/default` + 增改）。
-- **Phase 3**：依赖图可视化（从 KrakeyBot 搬来重做）、自我成长（`docs/PLUGIN_DEV.md`）等。
+- **R1** — The core holds no domain **policy / content**: it does not construct prompts, do
+  memory, decide "which model / when to call", or implement agent behavior or tools. The core
+  *may* hold stable, commodity **infrastructure** — the data shapes (`llm` envelope, context
+  block) and the **LLM communication execution** (send + parse, see `llm-gateway`). **API keys are
+  confined to the core** and are never handed to a plugin (a plugin only receives a key-less
+  `Communicator`).
+- **R2** — Plugins communicate only through this Agent's event-system + the L1 contracts; they do
+  not import one another, do not touch core internals, and do not cross Agents.
+- **R3** — A zero-plugin Agent completes a beat without error.
+- **R4** — Single responsibility: each module does only what §3 specifies (e.g. the loader does
+  not run a beat; `agent_instance` does not set up plugins).
+- **R5** — The contracts (L1) are the only shared vocabulary; a change is versioned.
+- **R6** — Per-Agent isolation: one Agent's plugins / data / events never leak into another (the
+  shared data of a public plugin is the sole, explicit exception).
+
+---
+
+## 10. Roadmap
+
+- **Phase 0** — Contracts + the five per-Agent modules (clock / event-system / orchestrator
+  (with context-buffer) / loader / agent_instance) + boot; a bare Agent can spin a beat with no
+  plugins.
+- **Phase 1** — Example plugins (`persona`, the identity block; `system-prompt`, the operating
+  model block (the monologue rule + basic usage, channel-agnostic); `llm-core`, the LLM
+  round-trip + `llm.register_tool`; `web`, the browser channel — the `web.send_message` tool +
+  `web.guidance` usage block + `web.conversation` block, maintaining its own chat log;
+  `inspector`, the debugging panel) → conversation, with memory.
+- **Phase 2** — The cli configuration tool (logo + `agent` / `default` / `providers` management).
+- **Phase 3** — Dependency-graph visualization (rebuilt from KrakeyBot) and self-extension via
+  [`docs/PLUGIN_DEV.md`](docs/PLUGIN_DEV.md).

@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a capability, a new plugin, or a contract change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before proposing a kernel change, please skim the
+        [invariants](../blob/main/ARCHITECTURE.md#9-invariants-anti-rot--test-enforced) —
+        much new capability belongs in a **plugin**, not the core.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the use case, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you build, and where (a plugin, a kernel module, a contract)?
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where does this live?
+      options:
+        - A new plugin (no core change)
+        - An existing plugin
+        - A kernel module
+        - A contract (L1) change
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
