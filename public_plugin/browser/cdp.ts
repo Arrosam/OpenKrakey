@@ -156,6 +156,51 @@ export class ChromeClient {
       this.pending.clear();
       this.sessions.clear();
     });
+
+    const child = this.child;
+
+    // 1) wait for the process to actually start (or fail to start) — no uncaught 'error'
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const onSpawn = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.exited = true;
+        this.child = null;
+        reject(new Error(`browser: failed to launch Chrome (${bin}): ${err.message}`));
+      };
+      const cleanup = () => {
+        child.removeListener("spawn", onSpawn);
+        child.removeListener("error", onError);
+      };
+      child.once("spawn", onSpawn);
+      child.once("error", onError);
+    });
+
+    // 2) keep a PERSISTENT error handler so a later spawn/runtime error never crashes the host
+    child.on("error", (err: Error) => {
+      this.exited = true;
+      this.child = null;
+      try {
+        this.ws?.close();
+      } catch {
+        /* ignore */
+      }
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(new Error(`browser: Chrome process error: ${err.message}`));
+      }
+      this.pending.clear();
+      this.sessions.clear();
+    });
+
     const debuggerUrl = await this.waitForDebuggerReady();
     await this.connectWs(debuggerUrl);
   }
