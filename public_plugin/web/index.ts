@@ -50,6 +50,7 @@ import {
 } from "./hub";
 import { TranscriptStore } from "./transcript-store";
 import { windowTranscript } from "./windowing";
+import { WEB_SCHEMA } from "./config-schema";
 
 const DEFAULT_PORT = 7717;
 const DEFAULT_HOST = "127.0.0.1";
@@ -109,7 +110,7 @@ const createWeb: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "web", version: "0.1.0", requires: ["llm.register_tool"] },
+    manifest: { id: "web", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       // Destructure the only ctx members the long-lived closures need, so the rest
