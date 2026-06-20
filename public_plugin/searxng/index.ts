@@ -9,6 +9,7 @@
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events } from "../../shared/actions";
+import { SEARXNG_SCHEMA } from "./config-schema";
 import {
   buildDefaultGuidance,
   buildSearchUrl,
@@ -49,7 +50,7 @@ const createSearxng: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "searxng", version: "0.1.0", requires: ["llm.register_tool"] },
+    manifest: { id: "searxng", version: "0.1.0", requires: ["llm.register_tool"], configSchema: SEARXNG_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       const cfg = readConfig(ctx.config);
