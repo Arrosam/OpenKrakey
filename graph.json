@@ -369,6 +369,11 @@
       "description": "OpenKrakeyConfig / DefaultAgentSetting / LLMConfig types + path constants.",
       "status": "done"
     },
+    "config-ops": {
+      "path": "shared/config-ops",
+      "description": "Pure fs-only config operations (Cli interface + createCli + CliError/CliParseError/normalizeBaseURL) shared by the cli and config-web tools. Extracted from packages/cli/src/index.ts (now a re-export barrel).",
+      "status": "done"
+    },
     "theme": {
       "path": "shared/theme",
       "description": "Krakey brand primitives (mint/dim/bold/red painters, ✦ glyph, ✔/✖ verdict lines) shared by every console surface (cli, boot startup report); degrades plain on non-TTY/NO_COLOR.",
