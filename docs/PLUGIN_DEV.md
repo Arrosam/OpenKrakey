@@ -113,11 +113,11 @@ Rules:
 
 ```ts
 interface PluginManifest {
-  id: string;            // your plugin id; also the prefix for your tool/action names
-  version: string;       // e.g. "0.1.0"
-  requires?: string[];   // dependencies the LOADER verifies before your setup runs
-  provides?: string[];   // capability names other plugins may "require"
-  configSchema?: unknown;
+  id: string;             // your plugin id; also the prefix for your tool/action names
+  version: string;        // e.g. "0.1.0"
+  requires?: string[];    // dependencies the LOADER verifies before your setup runs
+  provides?: string[];    // capability names other plugins may "require"
+  configSchema?: ConfigSchema; // self-describe your settings — see §2.4
 }
 ```
 
@@ -154,6 +154,55 @@ interface PluginContext {
 
 `log.*` lines go to the host console **and** are pushed on the bus as `log.entry` events (so channels/the
 inspector can mirror them). `print` is your one clean line — during `setup` it lands in the startup report.
+
+### 2.4 Declare your settings (config schema) — REQUIRED if you read config
+
+If your plugin reads anything from `ctx.config`, **self-describe those keys** with a `configSchema` on your
+manifest. The config tools — the interactive `cli` and the `config-web` UI — render your settings
+**automatically** from this: they never hardcode a per-plugin form, so a key you don't declare is a key the
+user can't discover. Declaring it once keeps every config surface in sync with your actual reader.
+
+Describe each field by the **NATURE OF ITS VALUE**, never a UI control. The config tool maps the value type
+to a control for you:
+
+| `type` | what it is | rendered as |
+|---|---|---|
+| `string` · `text` · `url` · `secret` · `number` | free input (`text` = multi-line, `secret` = masked) | input field |
+| `boolean` | true / false | toggle |
+| `enum` | exactly one value from `options` | dropdown |
+| `multienum` | any subset of `options` | multi-pick |
+| `list` | an ordered list of free strings (no fixed set) | tag input |
+
+```ts
+// public_plugin/<your-id>/config-schema.ts  — PURE DATA, import only the type
+import type { ConfigSchema } from "../../contracts/plugin";
+
+export const PERSONA_SCHEMA: ConfigSchema = [
+  { key: "text",     label: "Persona text",   type: "text",   default: "You are Krakey, …",
+    help: "The identity system block." },
+  { key: "priority", label: "Block priority", type: "number", default: 10000, min: 0, step: 100 },
+];
+```
+
+```ts
+// public_plugin/<your-id>/index.ts — reference the SAME constant from your manifest
+import { PERSONA_SCHEMA } from "./config-schema";
+// …
+manifest: { id: "persona", version: "0.1.0", configSchema: PERSONA_SCHEMA },
+```
+
+Field options beyond the basics: `options: [{ value, label, summary? }]` for `enum`/`multienum`; `default`;
+`help`; `min`/`max`/`step`/`unit` for numbers; `placeholder`/`example`; and `showIf: { key, equals }` to
+reveal a field only when another field in your slice has a given value (e.g. a sandbox-only `root` that
+appears when `mode = "sandbox"`).
+
+**Keep the schema module PURE DATA.** Put it in its own `config-schema.ts` that imports *only* the
+`ConfigField`/`ConfigSchema` types (which are erased at compile time). A config tool reads these files
+**without executing your plugin** — so the module must never import a hub, `node:http`, `child_process`, the
+filesystem, or anything with a side effect. That is what keeps the config tools decoupled from the runtime.
+
+`configSchema` is **optional and inert at runtime** — the loader and orchestrator never read it. It exists
+purely so your settings are discoverable. Omit it only if your plugin reads no config at all.
 
 ---
 
@@ -456,6 +505,7 @@ If any appear, delete them before finishing (`tsc` is scoped to `contracts/`+`pa
 
 - [ ] `public_plugin/<id>/index.ts` default-exports a `PluginFactory`; all state in the closure.
 - [ ] `manifest` has `id`, `version`, and a `requires` for every action/plugin you depend on.
+- [ ] Declared a `configSchema` (pure-data `config-schema.ts` + manifest reference) for every key you read from `ctx.config` (§2.4).
 - [ ] Imports are only `contracts/*`, `shared/*`, Node builtins — **no other plugin** (R2).
 - [ ] Every action you register and every block you set is undone in `teardown` (and teardown is idempotent).
 - [ ] Tools are declared via `llm.register_tool`; descriptions say what they do and where output goes.
