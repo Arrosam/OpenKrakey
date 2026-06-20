@@ -42,7 +42,7 @@ body:
       description: OS, Node version (`node -v`), and the commit/branch you are on.
       placeholder: |
         - OS: Windows 11
-        - Node: v20.11.0
+        - Node: v22.11.0
         - Commit: abc1234
     validations:
       required: true

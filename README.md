@@ -5,7 +5,7 @@
 <p>
   <a href="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml/badge.svg" /></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-2FD69C.svg" /></a>
-  <a href="package.json"><img alt="Node ≥ 20" src="https://img.shields.io/badge/node-%E2%89%A520-43853d.svg" /></a>
+  <a href="package.json"><img alt="Node ≥ 22" src="https://img.shields.io/badge/node-%E2%89%A522-43853d.svg" /></a>
   <a href="tsconfig.json"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.5-3178c6.svg" /></a>
 </p>
 
@@ -23,7 +23,8 @@ model it calls. Run one agent or many; each is isolated and keeps its own data.
 
 ## Quick start
 
-> Requires **Node.js ≥ 20**. No database; an agent's whole state is files on disk.
+> Requires **Node.js ≥ 22** (the `browser` plugin uses the global `WebSocket`, and the test
+> runner uses native globs). No database; an agent's whole state is files on disk.
 
 ```bash
 npm install

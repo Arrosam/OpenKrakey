@@ -26,7 +26,7 @@
     "self-hosted"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "krakey": "packages/cli/src/bin.ts"

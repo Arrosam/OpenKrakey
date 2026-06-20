@@ -8,7 +8,8 @@ to evolve a contract rather than work around it.
 
 ## Development setup
 
-> **Prerequisites:** Node.js **≥ 20** and npm.
+> **Prerequisites:** Node.js **≥ 22** and npm. (The `browser` plugin relies on the global
+> `WebSocket`, and `npm test` uses the native `node --test` glob — both Node 22+.)
 
 ```bash
 git clone https://github.com/Arrosam/OpenKrakey.git
