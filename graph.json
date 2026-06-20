@@ -3,7 +3,7 @@
     "name": "OpenKrakey",
     "description": "Minimalist microkernel autonomous-agent framework (TypeScript/Node). Per-Agent: clock + event-system + orchestrator(+context-buffer) + loader, wrapped by agent_instance. Global: boot + cli.",
     "created_at": "2026-06-07T00:00:00Z",
-    "updated_at": "2026-06-20T00:00:00Z"
+    "updated_at": "2026-06-21T00:00:00Z"
   },
   "zones": {
     "core": {
@@ -125,7 +125,7 @@
     "cli": {
       "zone": "core",
       "path": "packages/cli",
-      "description": "Global standalone interactive (@inquirer/prompts) config tool: arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue; Krakey logo; krakey/krakey agent/krakey default deep-links. Pure fs-ops live in shared/config-ops (index.ts is a re-export barrel) — shared with config-web.",
+      "description": "Global `krakey <command>` CLI: a top-level dispatcher (pure argv parser in dispatcher.ts) wrapping the interactive (@inquirer/prompts) config tool — bare/setup/agent/default/providers open the arrow-key pages to edit agent configs, the Default Setting, and the LLM communicator catalogue (Krakey logo); `krakey start` and `krakey dashboard` launch the boot runtime and the config-web Config console as CHILD PROCESSES (node --import tsx; never imported — cli's only contract is agent); plus help/version. Pure fs-ops live in shared/config-ops (index.ts is a re-export barrel) — shared with config-web.",
       "depends_on_contracts": [
         "agent"
       ],
