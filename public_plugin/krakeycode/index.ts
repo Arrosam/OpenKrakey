@@ -29,6 +29,7 @@ import type { Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events } from "../../shared/actions";
 
 import { readConfig, guardPath, guardCommand, truncate, type KrakeycodeConfig } from "./sandbox";
+import { KRAKEYCODE_SCHEMA } from "./config-schema";
 
 const GUIDANCE_BLOCK_ID = "krakeycode.guidance";
 const RESULTS_BLOCK_ID = "krakeycode.results";
@@ -340,7 +341,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "krakeycode", version: "0.1.0", requires: ["llm.register_tool"] },
+    manifest: { id: "krakeycode", version: "0.1.0", requires: ["llm.register_tool"], configSchema: KRAKEYCODE_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       const { actions, events, log, setBlock, removeBlock, print } = ctx;
