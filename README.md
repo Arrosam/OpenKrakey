@@ -33,7 +33,7 @@ npm install
 cp config/llm.example.json config/llm.json
 
 # Guided setup: pick a provider, create your first agent
-npm run cli
+npm run cli          # …or do it in your browser: npm run config:web
 
 # Start every agent you've configured
 npm start
@@ -94,6 +94,12 @@ can also edit them by hand.
 | `node packages/cli/src/bin.ts agent` | Agents — create and edit agents |
 | `node packages/cli/src/bin.ts default` | Default settings — the template new agents copy |
 | `node packages/cli/src/bin.ts providers` | AI services — providers, endpoints, API keys |
+
+**Prefer a browser?** `npm run config:web` serves the same configuration as a local web app — the
+**Config console**. It prints a token-gated URL (`http://127.0.0.1:7700/?token=…`), edits the exact
+same JSON files, and **auto-renders every plugin's settings from the plugin's own schema** (a new
+plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and access-token
+gated, like everything else.
 
 ## Configuration
 
