@@ -11,7 +11,7 @@
  * the capability/modality labels come straight from shared/config (single source
  * of truth — no copies live here).
  */
-import { readdir } from "node:fs/promises";
+import { readdir, access } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 
@@ -105,7 +105,13 @@ async function loadPluginSchema(schemaPath: string): Promise<ConfigSchema | unde
 export async function assembleSchema(deps: {
   publicPluginDir: string;
 }): Promise<SchemaPayload> {
-  const ids = await listPluginDirs(deps.publicPluginDir);
+  const allDirs = await listPluginDirs(deps.publicPluginDir);
+  const ids: string[] = [];
+  for (const name of allDirs) {
+    for (const entry of ["index.ts", "index.js"]) {
+      try { await access(join(deps.publicPluginDir, name, entry)); ids.push(name); break; } catch { /* absent */ }
+    }
+  }
 
   const pluginSchemas: Record<string, ConfigSchema> = {};
   const plugins: SchemaPayload["plugins"] = [];

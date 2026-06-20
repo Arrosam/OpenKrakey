@@ -365,6 +365,7 @@ function pickControl(field, get, set, ctx) {
     if (!o.required) opt.onclick = () => {
       const cur = new Set(selected());
       cur.has(o.value) ? cur.delete(o.value) : cur.add(o.value);
+      for (const o2 of options) { if (o2.required) cur.add(o2.value); }
       // keep schema order
       const ordered = options.map((x) => x.value).filter((v) => cur.has(v));
       set(ordered); markDirty();
@@ -594,6 +595,7 @@ function editService(name) {
   bar.appendChild(btn("Save service", "primary", async () => {
     if (!workingName) { toastErr("Name the connection first"); return; }
     if (!working.model) { toastErr("Enter a model id"); return; }
+    if (workingName in state.services && (isNew || workingName !== name)) { toastErr('"' + workingName + '" already exists'); return; }
     const next = buildLLMConfig();
     if (!isNew && workingName !== name) delete next.communicators[name];
     next.communicators[workingName] = working;
@@ -615,7 +617,7 @@ views.agents = (main) => {
     const a = state.agents[id];
     const row = el("div", "row");
     row.innerHTML = `<span class="g">${icon("robot")}</span><div class="rt"><div class="name"><span class="id">${esc(id)}</span></div>` +
-      `<div class="sub">every ${(a.intervalMs / 1000)}s · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
+      `<div class="sub">every ${a.intervalMs != null ? a.intervalMs / 1000 : "—"}s · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
       `<span class="arrow">${icon("arrowRight")}</span>`;
     row.onclick = () => editAgent(id);
     list.appendChild(row);
@@ -880,7 +882,7 @@ function wzReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(wz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (wz.agent.intervalMs / 1000) + "s", true) +
+    reviewLine("Wakes", "every " + (wz.agent.intervalMs != null ? wz.agent.intervalMs / 1000 : "—") + "s", true) +
     reviewLine("Persona", (wz.agent.persona || "").slice(0, 48) + ((wz.agent.persona || "").length > 48 ? "…" : ""));
   body.appendChild(ag);
 
@@ -925,7 +927,7 @@ async function commitWizard() {
     await apiGet("/api/default");
   } catch (e) {
     if (e instanceof ApiError && e.status === 404) {
-      const seeded = { intervalMs: wz.agent.intervalMs, plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((x) => x === "web"), config: {} };
+      const seeded = { intervalMs: wz.agent.intervalMs, plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((id) => PLUGINS.find((p) => p.id === id)?.dataCarrier), config: {} };
       try { await apiPut("/api/default", seeded); state.defaultSetting = seeded; }
       catch (e2) { return handleApiError(e2); }
     } else { return handleApiError(e); }
@@ -941,7 +943,7 @@ async function commitWizard() {
     id,
     intervalMs: wz.agent.intervalMs,
     plugins: [...wz.plugins],
-    privatePlugins: wz.plugins.filter((x) => x === "web"),
+    privatePlugins: wz.plugins.filter((id) => PLUGINS.find((p) => p.id === id)?.dataCarrier),
     config: { persona: { text: wz.agent.persona }, "llm-core": { communicator: svcName } },
   };
   try {

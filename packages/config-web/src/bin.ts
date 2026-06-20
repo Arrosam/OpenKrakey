@@ -13,7 +13,17 @@ import { startServer } from "./server";
 
 const cwd = process.cwd();
 
-const port = Number(process.env.CONFIG_WEB_PORT ?? process.argv[2] ?? 7700);
+function parsePort(raw: string | undefined): number {
+  const s = (raw ?? "").trim();
+  if (s === "") return 7700;
+  const n = Number(s);
+  if (!Number.isInteger(n) || n < 1 || n > 65535) {
+    console.warn(`[config-web] invalid port "${s}", falling back to 7700`);
+    return 7700;
+  }
+  return n;
+}
+const port = parsePort(process.env.CONFIG_WEB_PORT ?? process.argv[2]);
 const host = process.env.CONFIG_WEB_HOST ?? "127.0.0.1";
 const token = process.env.CONFIG_WEB_TOKEN || randomBytes(16).toString("hex");
 

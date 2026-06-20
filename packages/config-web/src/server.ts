@@ -62,7 +62,7 @@ function presentedToken(req: http.IncomingMessage, search: string): string | und
   return (
     queryToken(new URLSearchParams(search)) ??
     bearerToken(req) ??
-    cookieToken(req, COOKIE_NAME, { decode: false })
+    cookieToken(req, COOKIE_NAME, { decode: true })
   );
 }
 
@@ -101,7 +101,7 @@ export async function startServer(
       };
       if (tokenOk(presented, deps.token)) {
         headers["set-cookie"] =
-          COOKIE_NAME + "=" + deps.token + "; HttpOnly; SameSite=Strict; Path=/";
+          COOKIE_NAME + "=" + encodeURIComponent(deps.token) + "; HttpOnly; SameSite=Strict; Path=/";
       }
       res.writeHead(200, headers);
       res.end(index.body);
@@ -171,7 +171,7 @@ export async function startServer(
   // library function stays silent so callers (incl. tests that start many
   // servers) never spam stdout.
   const display = deps.host === "0.0.0.0" || deps.host === "::" ? "127.0.0.1" : deps.host;
-  const url = "http://" + display + ":" + port + "/?token=" + deps.token;
+  const url = "http://" + display + ":" + port + "/?token=" + encodeURIComponent(deps.token);
 
   const close = (): Promise<void> =>
     new Promise<void>((resolve) => {
