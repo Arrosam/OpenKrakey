@@ -8,6 +8,7 @@ export const BROWSER_SCHEMA: ConfigSchema = [
   { key: "commandTimeoutMs", label: "Command timeout", type: "number", default: 10000, min: 1, step: 500, unit: "ms", help: "Maximum time for individual browser commands." },
   { key: "maxTextChars", label: "Max page text chars", type: "number", default: 50000, min: 1, step: 1000, help: "Character cap on text extracted from a page." },
   { key: "screenshotDir", label: "Screenshot directory", type: "string", default: null, placeholder: "(plugin data dir)/screenshots", help: "Directory where screenshots are saved. Leave blank to use the plugin data dir." },
+  { key: "guidance", label: "Guidance override", type: "text", placeholder: "(uses built-in guidance)", help: "Overrides the browser.guidance system block text shown to the LLM." },
   { key: "guidancePriority", label: "Guidance block priority", type: "number", default: 5500, min: 0, step: 100 },
   { key: "resultsPriority", label: "Results block priority", type: "number", default: 3000, min: 0, step: 100 },
   { key: "maxResults", label: "Results kept", type: "number", default: 10, min: 0, step: 1, help: "How many recent browser tool results are kept in the ring." },
