@@ -13,6 +13,53 @@ import type { EventBus, ActionBus, Unsub } from "../event-system";
 import type { ContextBlock } from "../context";
 import type { CommunicatorLibrary } from "../llm";
 
+/**
+ * One configurable setting a plugin exposes, described by the NATURE OF ITS
+ * VALUE — never a UI control. Config tools (the cli, the config-web UI) map each
+ * `type` to a control: string/text/url/secret/number → inputs, boolean → toggle,
+ * enum → dropdown, multienum → multi-pick, list → tag input. A plugin declares
+ * these on its manifest (`configSchema`) so its settings render automatically;
+ * keep the declaring module PURE DATA (import only this type) so a config tool
+ * can read it without executing the plugin's runtime code.
+ */
+export interface ConfigField {
+  /** Key under the agent's `config[pluginId]` slice. */
+  key: string;
+  /** Human-readable label. */
+  label: string;
+  /** The value's nature — config tools choose the control from this. */
+  type:
+    | "string"    // short free text (host, language…)
+    | "text"      // long / multi-line free text (persona, guidance overrides)
+    | "url"       // a URL string
+    | "secret"    // sensitive string — masked in UIs (token, apiKey)
+    | "number"    // numeric (port, timeout, priority…)
+    | "boolean"   // true / false
+    | "enum"      // exactly one value from `options`
+    | "multienum" // any subset of `options`
+    | "list";     // an ordered list of free strings (no fixed set)
+  /** Default value (omit when the plugin treats "absent" specially). */
+  default?: unknown;
+  /** One-line explanation shown beside the control. */
+  help?: string;
+  /** Allowed choices for `enum` / `multienum`. */
+  options?: Array<{ value: string | number; label: string; summary?: string }>;
+  /** Numeric constraints — apply when `type` is "number". */
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  /** Hint shown when no value is set. */
+  placeholder?: string;
+  /** A concrete example (format guidance, not a recommendation). */
+  example?: string;
+  /** Show this field only when another field in the same slice equals a value. */
+  showIf?: { key: string; equals: unknown };
+}
+
+/** A plugin's full settings description — an ordered list of fields. */
+export type ConfigSchema = ConfigField[];
+
 export interface PluginManifest {
   id: string;
   version: string;
@@ -25,7 +72,12 @@ export interface PluginManifest {
   requires?: string[];
   /** Capability names this plugin provides; another plugin's `requires` may name them. */
   provides?: string[];
-  configSchema?: unknown;
+  /**
+   * This plugin's settings, self-described so config tools can auto-render them.
+   * Optional + inert at runtime (the loader/orchestrator never read it). See
+   * `ConfigField`; declare it from a pure-data module (e.g. `config-schema.ts`).
+   */
+  configSchema?: ConfigSchema;
 }
 
 /** Everything a plugin is handed at setup. Scoped to exactly one Agent. */
