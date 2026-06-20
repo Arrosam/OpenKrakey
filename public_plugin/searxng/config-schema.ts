@@ -14,6 +14,7 @@ export const SEARXNG_SCHEMA: ConfigSchema = [
   { key: "maxSnippetChars", label: "Snippet length", type: "number", default: 400, min: 1, step: 50, help: "Character cap per result snippet." },
   { key: "maxResultChars", label: "Chars per result", type: "number", default: 1200, min: 1, step: 100, help: "Character cap per result entry injected into the prompt." },
   { key: "maxResultsTotalChars", label: "Total result chars", type: "number", default: 12000, min: 1, step: 100, help: "Total character budget across all searxng results in the prompt." },
+  { key: "guidance", label: "Guidance override", type: "text", placeholder: "(uses built-in guidance)", help: "Overrides the searxng.guidance system block text shown to the LLM." },
   { key: "guidancePriority", label: "Guidance block priority", type: "number", default: 6000, min: 0, step: 100 },
   { key: "resultsPriority", label: "Results block priority", type: "number", default: 3500, min: 0, step: 100 },
 ];
