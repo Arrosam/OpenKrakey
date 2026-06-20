@@ -5,6 +5,29 @@
   "type": "module",
   "license": "MIT",
   "author": "Samuel",
+  "homepage": "https://github.com/Arrosam/OpenKrakey#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arrosam/OpenKrakey.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Arrosam/OpenKrakey/issues"
+  },
+  "keywords": [
+    "agent",
+    "autonomous-agent",
+    "ai-agent",
+    "llm",
+    "microkernel",
+    "plugin",
+    "event-driven",
+    "non-blocking",
+    "typescript",
+    "self-hosted"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "krakey": "packages/cli/src/bin.ts"
   },
