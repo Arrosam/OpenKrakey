@@ -164,3 +164,4 @@ public_plugin/*/data/
 # as config/agent.default.example.json; the cli's guided setup seeds it too)
 config/agent.default.json
 .mdsmoke/
+.mdsmoke/
