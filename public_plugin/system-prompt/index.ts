@@ -16,6 +16,7 @@
  * captured context lives in this closure, never in shared module scope.
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
+import { SYSTEM_PROMPT_SCHEMA } from "./config-schema";
 
 const BLOCK_ID = "system-prompt";
 const DEFAULT_PRIORITY = 9000;
@@ -39,7 +40,7 @@ const createSystemPrompt: PluginFactory = (): Plugin => {
   let context: PluginContext | undefined;
 
   return {
-    manifest: { id: "system-prompt", version: "0.1.0" },
+    manifest: { id: "system-prompt", version: "0.1.0", configSchema: SYSTEM_PROMPT_SCHEMA },
 
     setup(ctx: PluginContext): void {
       context = ctx;

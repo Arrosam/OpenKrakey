@@ -20,6 +20,7 @@ import {
   type BrowserConfig,
 } from "./config";
 import { ChromeClient } from "./cdp";
+import { BROWSER_SCHEMA } from "./config-schema";
 import { Actions, Events } from "../../shared/actions";
 import type { Message, ToolDef } from "../../contracts/llm";
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
@@ -98,7 +99,12 @@ const createBrowser: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "browser", version: "0.1.0", requires: ["llm.register_tool"] },
+    manifest: {
+      id: "browser",
+      version: "0.1.0",
+      requires: ["llm.register_tool"],
+      configSchema: BROWSER_SCHEMA,
+    },
 
     async setup(ctx: PluginContext): Promise<void> {
       const cfg: BrowserConfig = readConfig(ctx.config);

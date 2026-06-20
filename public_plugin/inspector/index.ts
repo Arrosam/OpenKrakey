@@ -22,6 +22,7 @@ import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugi
 import type { Unsub } from "../../contracts/event-system";
 import { Events } from "../../shared/actions";
 import { resolveConfig } from "./config";
+import { INSPECTOR_SCHEMA } from "./config-schema";
 import {
   hubRegister,
   hubDeregister,
@@ -33,7 +34,7 @@ import {
 
 // ---- the plugin factory ------------------------------------------------------
 
-const manifest = { id: "inspector", version: "0.1.0" };
+const manifest = { id: "inspector", version: "0.1.0", configSchema: INSPECTOR_SCHEMA };
 
 /** Map each captured event name onto its dashboard `kind`. */
 const KIND: { [eventName: string]: string } = {

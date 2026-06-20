@@ -36,6 +36,7 @@ import {
   type Reply,
   type Notify,
 } from "../../shared/actions";
+import { LLM_CORE_SCHEMA } from "./config-schema";
 
 /** The config slice this plugin reads (everything optional). */
 interface LLMCoreConfig {
@@ -135,6 +136,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
       id: "llm-core",
       version: "0.1.0",
       provides: ["llm.register_tool"],
+      configSchema: LLM_CORE_SCHEMA,
     },
 
     setup(pluginCtx: PluginContext) {

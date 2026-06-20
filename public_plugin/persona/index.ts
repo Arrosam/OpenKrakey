@@ -10,6 +10,7 @@
  * so the captured context lives in this closure, never in shared module scope.
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
+import { PERSONA_SCHEMA } from "./config-schema";
 
 const BLOCK_ID = "persona";
 const DEFAULT_PRIORITY = 10000;
@@ -24,7 +25,7 @@ const createPersona: PluginFactory = (): Plugin => {
   let context: PluginContext | undefined;
 
   return {
-    manifest: { id: "persona", version: "0.1.0" },
+    manifest: { id: "persona", version: "0.1.0", configSchema: PERSONA_SCHEMA },
 
     setup(ctx: PluginContext): void {
       context = ctx;
