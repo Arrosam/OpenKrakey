@@ -12,8 +12,8 @@
  * resolves nothing; it only joins agent ids onto `agentsDir` via the shared
  * `agentPaths` helper. NO `@inquirer/prompts`, NO process/runtime state.
  */
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import type { AgentDefinition } from "../../contracts/agent";
 import type {
@@ -108,6 +108,19 @@ async function listSubdirs(dir: string): Promise<string[]> {
     .filter((e) => e.isDirectory())
     .map((e) => e.name)
     .sort();
+}
+
+/** True when `dir` holds a plugin entry point (index.ts or index.js). */
+async function hasPluginEntry(dir: string): Promise<boolean> {
+  for (const entry of ["index.ts", "index.js"]) {
+    try {
+      await access(join(dir, entry));
+      return true;
+    } catch {
+      // entry absent — try the next
+    }
+  }
+  return false;
 }
 
 /** Read + JSON.parse a file. ENOENT → undefined; parse error → CliParseError(badJsonMsg). */
@@ -251,7 +264,14 @@ export function createCli(deps: CliDeps): Cli {
     },
 
     async listAvailablePlugins(): Promise<string[]> {
-      return listSubdirs(publicPluginDir);
+      // Only dirs with an index.ts/index.js entry are loadable plugins — a bare
+      // data dir (e.g. a plugin's leftover data/) is NOT offered as a plugin.
+      const dirs = await listSubdirs(publicPluginDir);
+      const present: string[] = [];
+      for (const name of dirs) {
+        if (await hasPluginEntry(join(publicPluginDir, name))) present.push(name);
+      }
+      return present;
     },
 
     readLLMConfig,
