@@ -1059,7 +1059,16 @@ async function boot() {
   try { const { plugins } = await apiGet("/api/plugins"); state.availablePlugins = plugins; } catch (e) { handleApiError(e); }
 
   buildShell();
-  setView("overview");
+  // Deep-link: a #wizard / #guided-setup hash (e.g. from the Console's "Quick
+  // setup" button) opens the Guided-setup wizard straight away; otherwise land
+  // on the overview as usual.
+  setView(isWizardHash() ? "wizard" : "overview");
+}
+
+// True when the URL hash names the onboarding wizard anchor (case-insensitive).
+function isWizardHash() {
+  const h = (location.hash || "").replace(/^#/, "").toLowerCase();
+  return h === "wizard" || h === "guided-setup";
 }
 
 boot();
