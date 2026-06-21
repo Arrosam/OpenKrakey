@@ -247,9 +247,11 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 /* ── Dashboard hero ────────────────────────────────────────────────────────*/
 .hero {
   position: relative; overflow: hidden;
+  display: flex; gap: 30px; align-items: stretch;
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
   padding: 36px 38px; margin-bottom: 6px; box-shadow: var(--shadow);
 }
+.hero .he-left { flex: 1 1 auto; min-width: 0; position: relative; }
 .hero::after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
   background: radial-gradient(circle at 88% 18%, var(--mint-glow), transparent 55%);
@@ -270,11 +272,30 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 .he-stat .n { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); }
 .he-stat .l { font-size: 12px; color: var(--muted); }
 
-/* Hero call-to-action — the prominent "Quick setup" first-run button + its
-   one-line helper. Sits above the status strip as the obvious first action. */
-.hero .he-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 22px; position: relative; }
-.hero .he-cta .btn .ic { width: 16px; height: 16px; }
-.hero .he-cta .he-hint { color: var(--muted); font-size: 13px; max-width: 46ch; }
+/* Hero call-to-action — a BIG, unmissable first-run setup card filling the
+   hero's right column. Centered: a mint disc, a heading, one line, and a large
+   "Quick setup" button. The obvious first action for a new user. */
+.hero .he-cta-card {
+  flex: 0 0 326px; align-self: stretch;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px;
+  background: linear-gradient(180deg, rgba(47,214,156,0.08), var(--panel2));
+  border: 1px solid var(--mint-deep); border-radius: var(--r);
+  padding: 30px 26px; position: relative;
+  box-shadow: 0 0 0 1px var(--mint-glow), 0 16px 44px -18px rgba(47,214,156,0.35);
+}
+.hero .he-cta-card .disc {
+  width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center;
+  background: rgba(47,214,156,0.14); border: 1px solid var(--mint-deep); color: var(--mint);
+}
+.hero .he-cta-card .disc .ic { width: 28px; height: 28px; filter: drop-shadow(0 0 10px rgba(47,214,156,0.55)); }
+.hero .he-cta-card h3 { font-size: 20px; font-weight: 800; letter-spacing: -0.3px; }
+.hero .he-cta-card p { color: var(--muted); font-size: 13.5px; max-width: 32ch; }
+.hero .he-cta-card .btn.big {
+  width: 100%; justify-content: center; gap: 10px;
+  font-size: 16px; font-weight: 700; padding: 15px 28px; margin-top: 2px;
+}
+.hero .he-cta-card .btn.big .ic { width: 18px; height: 18px; }
+.hero .he-cta-card .tiny { font-family: var(--mono); font-size: 11px; letter-spacing: .5px; color: var(--faint); }
 
 /* ── Surface cards (the three big openers) ─────────────────────────────────*/
 .surface-card { display: flex; flex-direction: column; }
@@ -383,6 +404,8 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
   .topnav .foot p { display: none; }
   .main.is-dashboard { padding: 28px 22px 70px; }
   .grid.cols-3 { grid-template-columns: 1fr; }
+  .hero { flex-direction: column; gap: 22px; }
+  .hero .he-cta-card { flex-basis: auto; }
 }
 @media (max-width: 620px) {
   .topnav .foot .status { display: none; }
@@ -513,18 +536,23 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       // hero
       const hero = el("div", "hero");
       hero.innerHTML =
-        `<div class="he-mark">${icon("stars")}<span>KRAKEY CONSOLE</span></div>` +
-        `<h1>One cockpit for your <span class="accent">autonomous agents</span>.</h1>` +
-        `<p class="lede">Configure, converse with, and observe every Krakey agent from a single shell. Pick a surface below — or use the nav up top at any time.</p>` +
-        `<div class="he-cta">` +
-          `<button class="btn primary" data-quick-setup>${icon("stars", "btn-ic")} Quick setup</button>` +
-          `<span class="he-hint">First-time setup — connect an AI service and create your first agent.</span>` +
+        `<div class="he-left">` +
+          `<div class="he-mark">${icon("stars")}<span>KRAKEY CONSOLE</span></div>` +
+          `<h1>One cockpit for your <span class="accent">autonomous agents</span>.</h1>` +
+          `<p class="lede">Configure, converse with, and observe every Krakey agent from a single shell. Pick a surface below — or use the nav up top at any time.</p>` +
+          `<div class="he-strip">` +
+            statEl("robot", "3", "agents") +
+            statEl("server", "4", "AI services") +
+            statEl("cpu", "30s", "heartbeat") +
+            statEl("activity", "42", "events / min") +
+          `</div>` +
         `</div>` +
-        `<div class="he-strip">` +
-          statEl("robot", "3", "agents") +
-          statEl("server", "4", "AI services") +
-          statEl("cpu", "30s", "heartbeat") +
-          statEl("activity", "42", "events / min") +
+        `<div class="he-cta-card">` +
+          `<div class="disc">${icon("stars")}</div>` +
+          `<h3>First-time setup</h3>` +
+          `<p>Connect an AI service and create your first agent — right here in your browser.</p>` +
+          `<button class="btn primary big" data-quick-setup>${icon("stars", "btn-ic")} Quick setup</button>` +
+          `<span class="tiny">~2 min · no install</span>` +
         `</div>`;
       main.appendChild(hero);
 
