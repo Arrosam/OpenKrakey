@@ -31,8 +31,29 @@ The surfaces must be running **separately** — the console only embeds them:
   serve their own loopback port. Point the console at those ports via the env
   vars below.
 
-An embedded surface whose app isn't running will simply show a blank/failed
-iframe — that's expected. The console's own shell still loads.
+### "Not connected" handling
+
+The console **probes** each surface for reachability before showing it, so a
+surface whose server is down never renders as a dead, connection-refused iframe.
+The probe is a cross-origin-safe `fetch(url, { mode: 'no-cors' })` with a short
+timeout: it resolves (opaquely) when the server answers — treated as
+**reachable** — and rejects on connection-refused/timeout — treated as
+**not connected**.
+
+- **Reachable** → the surface loads in its iframe as usual (kept alive once
+  loaded, so it keeps its state across tab switches).
+- **Not connected** → a branded **"Not connected"** panel renders in the surface
+  area instead: the surface name, a short message (e.g. _"Chat isn't running.
+  Start a Krakey agent with `krakey start`, then Retry."_), and a **Retry**
+  button that re-probes and swaps to the live iframe if the server is now up.
+- The **Dashboard** cards each carry a per-surface status dot — **mint
+  (connected)** vs **slate (offline)** — so you can see at a glance what's up
+  before clicking in. Cards probe on Dashboard load.
+
+This means **Config is usable before the runtime is running**: the dashboard
+launches config-web (with a token in its URL), so Config is reachable for
+pre-run setup, while Chat and Inspector — which only come up with a running agent
+— show their "Not connected" panels with Retry until you `krakey start`.
 
 ### Environment
 
