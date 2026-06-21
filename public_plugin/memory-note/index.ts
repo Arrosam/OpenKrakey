@@ -42,11 +42,8 @@ function parseRemember(params: unknown): { text: string; kind: NoteKind; importa
   }
 
   let importance = 3;
-  if (p.importance !== undefined && p.importance !== null) {
-    const n = typeof p.importance === "number" ? p.importance : Number(p.importance);
-    if (Number.isFinite(n)) {
-      importance = Math.min(5, Math.max(1, Math.round(n)));
-    }
+  if (typeof p.importance === "number" && Number.isFinite(p.importance)) {
+    importance = Math.min(5, Math.max(1, Math.round(p.importance)));
   }
 
   return { text: p.note, kind, importance };

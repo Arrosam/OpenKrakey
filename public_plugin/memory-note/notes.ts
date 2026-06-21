@@ -54,8 +54,7 @@ const SECTIONS: ReadonlyArray<{ kind: NoteKind; heading: string }> = [
 
 /** Coerce an arbitrary value to a finite number, or fall back. */
 function numberOr(value: unknown, fallback: number): number {
-  const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) ? n : fallback;
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 /**
@@ -74,8 +73,11 @@ export function readConfig(raw: unknown): MemoryNoteConfig {
     guidancePriority: numberOr(cfg.guidancePriority, DEFAULTS.guidancePriority),
     notesPriority: numberOr(cfg.notesPriority, DEFAULTS.notesPriority),
     maxNotes: Math.max(1, Math.floor(numberOr(cfg.maxNotes, DEFAULTS.maxNotes))),
-    maxNoteChars: numberOr(cfg.maxNoteChars, DEFAULTS.maxNoteChars),
-    maxNotesTotalChars: numberOr(cfg.maxNotesTotalChars, DEFAULTS.maxNotesTotalChars),
+    maxNoteChars: Math.max(1, Math.floor(numberOr(cfg.maxNoteChars, DEFAULTS.maxNoteChars))),
+    maxNotesTotalChars: Math.max(
+      1,
+      Math.floor(numberOr(cfg.maxNotesTotalChars, DEFAULTS.maxNotesTotalChars)),
+    ),
   };
 }
 
@@ -97,10 +99,8 @@ export function guidanceText(cfg: MemoryNoteConfig): string {
   return cfg.guidance !== null ? cfg.guidance : buildGuidance(cfg.maxNotes);
 }
 
-/** Order notes within a section: importance DESC, then newest (at DESC). */
-function sortForRender(notes: Note[]): Note[] {
-  return [...notes].sort((a, b) => b.importance - a.importance || b.at - a.at);
-}
+/** Room reserved for the trailing "(… N more notes hidden)" footer line. */
+const FOOTER_RESERVE = 32;
 
 /**
  * Render the whole notebook into a single string for the context block.
@@ -113,14 +113,25 @@ export function renderNotes(notes: Note[], cfg: MemoryNoteConfig): string {
     `Your notebook (${notes.length}/${cfg.maxNotes}). ` +
     `Maintain it with memory-note.remember / memory-note.forget.`;
 
+  // Bucket by kind in a SINGLE pass, then sort each bucket.
+  const buckets = new Map<NoteKind, Note[]>();
+  for (const n of notes) {
+    const arr = buckets.get(n.kind);
+    if (arr) arr.push(n);
+    else buckets.set(n.kind, [n]);
+  }
+  for (const arr of buckets.values()) {
+    arr.sort((a, b) => b.importance - a.importance || b.at - a.at);
+  }
+
   const budget = cfg.maxNotesTotalChars;
   const lines: string[] = [header];
   let used = header.length;
   let shown = 0;
 
-  outer: for (const { kind, heading } of SECTIONS) {
-    const inKind = sortForRender(notes.filter((n) => n.kind === kind));
-    if (inKind.length === 0) continue;
+  for (const { kind, heading } of SECTIONS) {
+    const inKind = buckets.get(kind);
+    if (!inKind || inKind.length === 0) continue;
 
     const headingLine = `## ${heading}`;
     let headingShown = false;
@@ -130,8 +141,11 @@ export function renderNotes(notes: Note[], cfg: MemoryNoteConfig): string {
       // +1 per added line for the newline join cost; charge the heading the first
       // time this section contributes a note.
       const cost = noteLine.length + 1 + (headingShown ? 0 : headingLine.length + 1);
-      // Stop adding further note lines once the budget would be exceeded.
-      if (used + cost > budget) break outer;
+      // The first eligible note always renders, even if it alone busts the budget,
+      // so the block is never just a header. Otherwise skip (don't abandon later
+      // sections) any note that would exceed the budget, reserving room for the
+      // footer line.
+      if (shown > 0 && used + cost > budget - FOOTER_RESERVE) continue;
 
       if (!headingShown) {
         lines.push(headingLine);

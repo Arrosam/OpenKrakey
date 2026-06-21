@@ -84,11 +84,15 @@ export class NotesStore {
     this.notes = parsed.filter(isValidNote);
     // Seed the counter past the max n found in ANY loaded id (globally unique ids).
     this.counter = this.notes.reduce((max, n) => Math.max(max, counterOf(n.id)), 0);
+    // Enforce capacity at load time so a lowered cap converges on disk even for an
+    // agent that never calls remember; persist only if the trim actually dropped notes.
+    const trimmed = this.enforceCapacity() !== null;
+    if (trimmed) this.persist();
   }
 
   /** A read-only snapshot for rendering. */
   list(): Note[] {
-    return this.notes;
+    return this.notes.slice();
   }
 
   remember(input: RememberInput): RememberResult {
@@ -143,28 +147,24 @@ export class NotesStore {
     return counterOf(a.id) < counterOf(b.id);
   }
 
+  /** Best-effort synchronous raw write. Never throws. */
+  private writeRaw(data: string): void {
+    try {
+      mkdirSync(this.dataDir, { recursive: true });
+      writeFileSync(this.path, data, "utf8");
+    } catch {
+      /* best-effort */
+    }
+  }
+
   /** Best-effort, serialized full-array rewrite. Never throws out of here. */
   private persist(): void {
     const snapshot = JSON.stringify(this.notes);
-    this.writeChain = this.writeChain
-      .then(() => {
-        try {
-          mkdirSync(this.dataDir, { recursive: true });
-          writeFileSync(this.path, snapshot, "utf8");
-        } catch {
-          /* best-effort: degrade silently if dataDir is unwritable */
-        }
-      })
-      .catch(() => {});
+    this.writeChain = this.writeChain.then(() => this.writeRaw(snapshot)).catch(() => {});
   }
 
   /** Final best-effort SYNCHRONOUS flush on teardown. Never throws. */
   flushSync(): void {
-    try {
-      mkdirSync(this.dataDir, { recursive: true });
-      writeFileSync(this.path, JSON.stringify(this.notes), "utf8");
-    } catch {
-      /* best-effort */
-    }
+    this.writeRaw(JSON.stringify(this.notes));
   }
 }
