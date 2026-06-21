@@ -25,8 +25,99 @@ done
 ROOT=$(cd "$(dirname "$self")" && pwd)
 cd "$ROOT"
 
-echo "OpenKrakey installer"
-echo "  install dir: $ROOT"
+# --- presentation: mint brand, gated to interactive color terminals ----------
+# Color, banner glyphs, and the spinner appear ONLY on an interactive color
+# terminal. Piped / redirected / CI / NO_COLOR => PLAIN ASCII (no escapes, no
+# spinner), so output stays clean in logs (e.g. `krakey update`).
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  FANCY=1
+  C_MINT=$(printf '\033[38;2;47;214;156m')
+  C_DIM=$(printf '\033[2m')
+  C_BOLD=$(printf '\033[1m')
+  C_RED=$(printf '\033[38;2;255;107;107m')
+  C_RESET=$(printf '\033[0m')
+else
+  FANCY=0
+  C_MINT='' C_DIM='' C_BOLD='' C_RED='' C_RESET=''
+fi
+
+# paint COLOR TEXT -> TEXT (with ANSI when FANCY, plain otherwise).
+paint() { printf '%s%s%s' "$1" "$2" "$C_RESET"; }
+
+# banner: a mint KRAKEY wordmark + dim tagline (fancy), or a plain title.
+banner() {
+  if [ "$FANCY" = "1" ]; then
+    printf '\n'
+    printf '%s' "$C_MINT$C_BOLD"
+    printf '%s\n' " _  __  ____    _    _  __ _____  __   __"
+    printf '%s\n' "| |/ / |  _ \  / \  | |/ /| ____| \ \ / /"
+    printf '%s\n' "| ' /  | |_) |/ _ \ | ' / |  _|    \ V / "
+    printf '%s\n' "| . \  |  _ </ ___ \| . \ | |___    | |  "
+    printf '%s\n' "|_|\_\ |_| \_\_/   \_\_|\_\|_____|   |_|  "
+    printf '%s' "$C_RESET"
+    printf '%s\n\n' "$C_DIM✦ the ultimate autonomous agent$C_RESET"
+  else
+    printf '\n'
+    printf '%s\n' "KRAKEY"
+    printf '%s\n\n' "the ultimate autonomous agent"
+  fi
+}
+
+# step LABEL CMD...  -> run CMD with a spinner (fancy) or plain markers.
+# On success: ✔ LABEL. On failure: ✖ LABEL + the tail of captured output, and
+# returns the command's non-zero status (never aborts via set -e itself).
+step() {
+  _label=$1
+  shift
+  _log=$(mktemp 2>/dev/null || printf '/tmp/krakey-step.%s' "$$")
+  if [ "$FANCY" = "1" ]; then
+    # Run the phase in the background; animate a spinner until it exits.
+    ( "$@" >"$_log" 2>&1 ) &
+    _pid=$!
+    _frames='|/-\'
+    _i=0
+    # Hide cursor for a cleaner spin; restored after the loop.
+    printf '\033[?25l'
+    while kill -0 "$_pid" 2>/dev/null; do
+      _i=$(( (_i + 1) % 4 ))
+      _frame=$(printf '%s' "$_frames" | cut -c $((_i + 1)))
+      printf '\r%s %s ' "$(paint "$C_MINT" "$_frame")" "$_label"
+      sleep 0.1
+    done
+    # `wait` may return non-zero; capture it without tripping set -e.
+    if wait "$_pid"; then _rc=0; else _rc=$?; fi
+    printf '\033[?25h\r\033[K'
+  else
+    printf '%s\n' "-> $_label"
+    # Subshell may fail; capture status in a tested context (set -e safe).
+    if ( "$@" >"$_log" 2>&1 ); then _rc=0; else _rc=$?; fi
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    if [ "$FANCY" = "1" ]; then
+      printf '%s %s\n' "$(paint "$C_MINT" '✔')" "$_label"
+    else
+      printf '%s\n' "[ok] $_label"
+    fi
+  else
+    if [ "$FANCY" = "1" ]; then
+      printf '%s %s\n' "$(paint "$C_RED" '✖')" "$_label"
+    else
+      printf '%s\n' "[fail] $_label"
+    fi
+    # Surface the error: don't hide it behind the spinner.
+    if [ -s "$_log" ]; then
+      printf '%s\n' "    --- last output ---"
+      tail -n 20 "$_log" 2>/dev/null | while IFS= read -r _line; do
+        printf '    %s\n' "$_line"
+      done
+    fi
+  fi
+  rm -f "$_log" 2>/dev/null || true
+  return "$_rc"
+}
+
+banner
+printf '%s\n' "$(paint "$C_DIM" "install dir: $ROOT")"
 
 # --- helpers -----------------------------------------------------------------
 KRAKEY_YES="${KRAKEY_YES:-}"
@@ -101,16 +192,23 @@ install_node() {
 
 # --- 1. Node.js >= 22 --------------------------------------------------------
 if node_ok; then
-  echo "  node: $(node -v) ok"
+  step "Checking Node.js ($(node -v))" true || true
 else
-  echo "  node: not found (or older than 22)"
+  printf '%s\n' "$(paint "$C_DIM" "node: not found (or older than 22)")"
   if confirm "Install Node.js 22 now? (Homebrew on macOS, otherwise a user-local nvm)"; then
+    # Run inline (NOT in a backgrounded step): install_node sources nvm / shifts
+    # PATH into THIS shell, which a subshell would lose. It prints its own
+    # progress and swallows failures; the node_ok check below is the real gate.
     install_node || true
   fi
   if node_ok; then
-    echo "  node: $(node -v) ok (installed)"
+    step "Checking Node.js ($(node -v))" true || true
   else
-    echo "error: Node.js >= 22 is required and could not be installed automatically." >&2
+    if [ "$FANCY" = "1" ]; then
+      printf '%s\n' "$(paint "$C_RED" '✖') Node.js >= 22 is required and could not be installed automatically." >&2
+    else
+      echo "error: Node.js >= 22 is required and could not be installed automatically." >&2
+    fi
     echo "       Install it from https://nodejs.org/ (or 'nvm install 22') and re-run ./install.sh." >&2
     echo "       Tip: if you just installed Node, open a NEW terminal and re-run." >&2
     exit 1
@@ -118,22 +216,28 @@ else
 fi
 
 # --- 2. dependencies ---------------------------------------------------------
-echo "Installing dependencies (npm install)..."
-npm install
+if ! step "Installing dependencies (npm install)" npm install; then
+  exit 1
+fi
 
 # --- 3. put `krakey` on PATH -------------------------------------------------
 launcher="$ROOT/bin/krakey"
 chmod +x "$launcher"
 
+# Where we ended up linking, and a PATH-hint to print after the verdict (so the
+# spinner line stays clean). Populated by link_into / the fallback below.
+LINK_TARGET=''
+PATH_HINT=''
+
 link_into() {
   dir=$1
   if [ -d "$dir" ] && [ -w "$dir" ]; then
     ln -sf "$launcher" "$dir/krakey" && {
-      echo "  linked: $dir/krakey -> $launcher"
+      LINK_TARGET="$dir/krakey"
       case ":$PATH:" in
         *":$dir:"*) ;;
-        *) echo "  note: $dir is not on your PATH - add it, e.g.:"
-           echo "          export PATH=\"$dir:\$PATH\"" ;;
+        *) PATH_HINT="$dir is not on your PATH - add it, e.g.:
+          export PATH=\"$dir:\$PATH\"" ;;
       esac
       return 0
     }
@@ -141,6 +245,10 @@ link_into() {
   return 1
 }
 
+# The linking is quick and must set LINK_TARGET/PATH_HINT in THIS shell (a
+# backgrounded step subshell would lose them), so run it inline and frame the
+# verdict by hand — same look as step()'s output.
+_link_label="Linking krakey"
 if link_into "/usr/local/bin"; then
   :
 elif link_into "$HOME/.local/bin"; then
@@ -148,14 +256,39 @@ elif link_into "$HOME/.local/bin"; then
 else
   mkdir -p "$HOME/.local/bin"
   ln -sf "$launcher" "$HOME/.local/bin/krakey"
-  echo "  linked: $HOME/.local/bin/krakey -> $launcher"
+  LINK_TARGET="$HOME/.local/bin/krakey"
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
-    *) echo "  note: \$HOME/.local/bin is not on your PATH - add it, e.g.:"
-       echo "          export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *) PATH_HINT="\$HOME/.local/bin is not on your PATH - add it, e.g.:
+          export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
   esac
 fi
 
-echo
-echo "Done. Try:  krakey setup"
-echo "      then: krakey start  |  krakey dashboard  |  krakey help"
+if [ -n "$LINK_TARGET" ]; then
+  if [ "$FANCY" = "1" ]; then
+    printf '%s %s\n' "$(paint "$C_MINT" '✔')" "$_link_label"
+  else
+    printf '%s\n' "[ok] $_link_label"
+  fi
+  printf '%s\n' "$(paint "$C_DIM" "linked: $LINK_TARGET -> $launcher")"
+  if [ -n "$PATH_HINT" ]; then
+    printf '%s\n' "$(paint "$C_DIM" "note: $PATH_HINT")"
+  fi
+else
+  if [ "$FANCY" = "1" ]; then
+    printf '%s %s\n' "$(paint "$C_RED" '✖')" "$_link_label" >&2
+  else
+    printf '%s\n' "[fail] $_link_label" >&2
+  fi
+  exit 1
+fi
+
+# --- success panel -----------------------------------------------------------
+printf '\n'
+if [ "$FANCY" = "1" ]; then
+  printf '%s\n' "$(paint "$C_MINT" "$C_BOLD✦ Krakey is ready")"
+else
+  printf '%s\n' "Krakey is ready"
+fi
+printf '%s\n' "  Try:  krakey setup"
+printf '%s\n' "  then: krakey start  |  krakey dashboard  |  krakey help"
