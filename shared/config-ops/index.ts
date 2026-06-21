@@ -168,10 +168,17 @@ export function createCli(deps: CliDeps): Cli {
       defaultPath,
       `Default setting at "${defaultPath}" is not valid JSON`,
     );
-    if (setting === undefined) {
-      throw new CliError(`No default setting found at "${defaultPath}"`);
-    }
-    return setting;
+    if (setting !== undefined) return setting;
+    // No live default yet (fresh install / after a reset) — fall back to the
+    // committed template (`agent.default.example.json`) so the UI shows the
+    // SHIPPED defaults instead of an empty form. Saving writes the live file.
+    const examplePath = defaultPath.replace(/\.json$/, ".example.json");
+    const example = await readJson<DefaultAgentSetting>(
+      examplePath,
+      `Default setting template at "${examplePath}" is not valid JSON`,
+    );
+    if (example !== undefined) return example;
+    throw new CliError(`No default setting found at "${defaultPath}"`);
   };
 
   const readLLMConfig = async (): Promise<LLMConfig> => {
