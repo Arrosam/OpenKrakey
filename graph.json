@@ -17,6 +17,7 @@
         "boot",
         "cli",
         "config-web",
+        "console",
         "llm-gateway"
       ],
       "overview": "overviews/zones/core.md"
@@ -144,6 +145,15 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/config-web.md"
+    },
+    "console": {
+      "zone": "core",
+      "path": "packages/console",
+      "description": "Global unified web console: a standalone static loopback server serving one shell (persistent top nav-bar + a Dashboard landing) that embeds the three web surfaces — config-web, the web chat channel, and the inspector — each in an iframe by URL. Holds no secrets and no API; surface URLs are configurable via env (defaults to the conventional loopback ports). Each embedded surface hides its own brand when framed so only the console's brand shows. Decoupled from the runtime; npm run console.",
+      "depends_on_contracts": [],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/console.md"
     },
     "llm-gateway": {
       "zone": "core",
