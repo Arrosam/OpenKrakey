@@ -16,9 +16,9 @@ The documentation index, organized by what you are trying to do.
 
 ### New users
 
-1. [Quick start](../README.md#3-quick-start) — install, configure a provider, create an Agent.
-2. [Configuration](../README.md#8-configuration) — the `llm.json` and Agent config shapes.
-3. [Bundled plugins](../README.md#7-bundled-plugins) — what each plugin gives an Agent.
+1. [Install and setup](../README.md#install-and-setup) — install, configure a provider, create your first Agent.
+2. [Configuration](../README.md#configuration) — the `llm.json` and Agent config shapes.
+3. [Bundled plugins](../README.md#what-your-agent-can-do) — what each plugin gives an Agent.
 
 ### Plugin authors
 

@@ -21,34 +21,70 @@ model it calls. Run one agent or many; each is isolated and keeps its own data.
 
 [Architecture](ARCHITECTURE.md) · [Build a plugin](docs/PLUGIN_DEV.md) · [Docs index](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
-## Quick start
+## Install and setup
 
-> Requires **Node.js ≥ 22** (the `browser` plugin uses the global `WebSocket`, and the test
-> runner uses native globs). No database; an agent's whole state is files on disk.
+> **Prerequisites:** [Node.js ≥ 22](https://nodejs.org/) and `git`. No database — an agent's whole
+> state is plain files on disk. (The optional `browser` plugin drives your own Chrome; you only need
+> Chrome installed if you enable that plugin.)
+
+**1 — Get the code**
 
 ```bash
-# Install once: checks Node ≥ 22, installs dependencies, and puts `krakey` on your PATH.
-./install.sh                                            # macOS / Linux
-# powershell -ExecutionPolicy Bypass -File install.ps1  # Windows
-
-# Tell it about an AI provider (paste a key, or reference an env var like "${ANTHROPIC_API_KEY}")
-cp config/llm.example.json config/llm.json
-
-# Guided setup: pick a provider, create your first agent
-krakey setup          # …or do it in your browser: krakey dashboard
-
-# Start every agent you've configured
-krakey start
+git clone https://github.com/Arrosam/OpenKrakey.git
+cd OpenKrakey
 ```
 
-The installer never touches your system toolchain — it only checks for Node ≥ 22 and points you at
-[nodejs.org](https://nodejs.org/) if it's missing. Haven't installed? Every command still works as
-an npm script (`npm run cli` · `npm start` · `npm run config:web`) or by running the launcher
-directly: `./bin/krakey <command>`.
+**2 — Install.** The installer checks for Node ≥ 22, runs `npm install`, and puts the `krakey`
+command on your PATH:
 
-`krakey start` prints a startup report and a **Web chat** URL (with a one-time access token), e.g.
-`http://127.0.0.1:7718/?token=…`. Open it and start talking. Each agent has its own chat, and
-every message shows a *sent* → *read* status as the agent picks it up on its next beat.
+```bash
+./install.sh                                           # macOS / Linux
+powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
+```
+
+It never touches your system toolchain — if Node is missing it just points you at
+[nodejs.org](https://nodejs.org/) and exits. **Rather not put it on your PATH?** Skip the script,
+run `npm install`, and use the npm scripts (`npm start` · `npm run config:web` · `npm run console`)
+or the launcher directly (`./bin/krakey <command>`).
+
+**3 — Connect a provider and create your first agent.** The guided wizard does the whole setup —
+pick a provider, paste an API key (or reference an env var like `${ANTHROPIC_API_KEY}`), choose a
+model, and name the agent:
+
+```bash
+krakey setup        # arrow-key wizard in the terminal
+# …or do it in your browser:
+krakey dashboard    # the Config console → http://127.0.0.1:7717/?token=…
+```
+
+Prefer editing files? The wizard just writes JSON you can also hand-edit — copy the templates and
+go (see [Configuration](#configuration) for the shapes):
+
+```bash
+cp config/llm.example.json            config/llm.json             # providers + keys
+cp config/agent.default.example.json  config/agent.default.json   # the new-agent template
+```
+
+**4 — Run it**
+
+```bash
+krakey start        # boots every configured agent (Ctrl+C to stop)
+```
+
+`krakey start` prints a startup report and a **web-chat URL** with a one-time access token, e.g.
+`http://127.0.0.1:7718/?token=…` — open it and start talking. Each message shows a *sent* → *read*
+status as the agent reads it on its next beat.
+
+**Where things live.** Each web surface is loopback-only, access-token gated, and on its own port:
+
+| Surface | Start with | Opens at |
+|---|---|---|
+| **Console** — unified shell (Config · Chat · Inspector in one nav bar) | `npm run console` | `http://127.0.0.1:7716` |
+| **Config** — providers, agents, plugins (+ onboarding wizard) | `krakey dashboard` · `npm run config:web` | `http://127.0.0.1:7717` |
+| **Chat** — talk to your agent (the `web-chat` plugin) | `krakey start` | `http://127.0.0.1:7718` |
+| **Inspector** — live, read-only view of the agent's bus | `krakey start` | `http://127.0.0.1:7719` |
+
+The Console frames the other three — run config-web and at least one agent for its panels to fill in.
 
 ## What your agent can do
 
@@ -72,7 +108,7 @@ beat** (tagged with the plugin name), and the agent wakes immediately to read it
 
 ## How it works
 
-Each agent advances on a **beat** (every `intervalMs`, default 30s):
+Each agent advances on a **beat** (every `intervalMs` — 15 min by default):
 
 1. **Gather** — every plugin refreshes the context it contributes (identity, rules, the
    conversation, recent tool results).
@@ -125,7 +161,8 @@ Two files, both shipped as `.example.json` templates (your live copies are git-i
 ```jsonc
 {
   "communicators": {
-    "claude": { "provider": "anthropic", "model": "claude-opus-4-8", "apiKey": "${ANTHROPIC_API_KEY}", "capabilities": ["chat"] }
+    // optional per-provider tuning: temperature, maxTokens, topP, stop, reasoningEffort, contextLength
+    "claude": { "provider": "anthropic", "model": "claude-sonnet-4-6", "apiKey": "${ANTHROPIC_API_KEY}", "capabilities": ["chat"] }
   },
   "default": "claude"
 }
