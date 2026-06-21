@@ -270,6 +270,12 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 .he-stat .n { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); }
 .he-stat .l { font-size: 12px; color: var(--muted); }
 
+/* Hero call-to-action — the prominent "Quick setup" first-run button + its
+   one-line helper. Sits above the status strip as the obvious first action. */
+.hero .he-cta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 22px; position: relative; }
+.hero .he-cta .btn .ic { width: 16px; height: 16px; }
+.hero .he-cta .he-hint { color: var(--muted); font-size: 13px; max-width: 46ch; }
+
 /* ── Surface cards (the three big openers) ─────────────────────────────────*/
 .surface-card { display: flex; flex-direction: column; }
 .surface-card .ch .open { margin-left: auto; }
@@ -510,6 +516,10 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
         `<div class="he-mark">${icon("stars")}<span>KRAKEY CONSOLE</span></div>` +
         `<h1>One cockpit for your <span class="accent">autonomous agents</span>.</h1>` +
         `<p class="lede">Configure, converse with, and observe every Krakey agent from a single shell. Pick a surface below — or use the nav up top at any time.</p>` +
+        `<div class="he-cta">` +
+          `<button class="btn primary" data-quick-setup>${icon("stars", "btn-ic")} Quick setup</button>` +
+          `<span class="he-hint">First-time setup — connect an AI service and create your first agent.</span>` +
+        `</div>` +
         `<div class="he-strip">` +
           statEl("robot", "3", "agents") +
           statEl("server", "4", "AI services") +
@@ -517,6 +527,10 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
           statEl("activity", "42", "events / min") +
         `</div>`;
       main.appendChild(hero);
+
+      // wire the hero's "Quick setup" → open Config at the wizard deep-link
+      const quickBtn = hero.querySelector("[data-quick-setup]");
+      if (quickBtn) quickBtn.onclick = quickSetup;
 
       // surface cards — each shows a per-surface connected/not-connected dot
       main.appendChild(el("div", "group-label", "Open a surface"));
@@ -705,6 +719,32 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       setActiveNav(key);
     }
 
+    /* ── Quick setup (first-run) ──────────────────────────────────────────
+       The Dashboard hero's primary action: jump straight into config-web's
+       Guided-setup wizard. We open the Config surface and point its iframe at
+       the wizard DEEP-LINK (config src + "#wizard") — config-ui-mock's boot()
+       honours that hash and opens the wizard instead of the overview. The hash
+       must go AFTER any existing query and must not duplicate a hash that's
+       already there. We respect the reachability flow: if Config is down the
+       "Not connected" panel still shows; we only force the wizard src once the
+       surface is reachable (in this mock Config is up from the start). */
+    function withWizardHash(url) {
+      return String(url).replace(/#.*$/, "") + "#wizard";
+    }
+
+    function quickSetup() {
+      openSurface("config");
+      const host = surfaceHosts.config;
+      if (!host) return;
+      const wizardSrc = withWizardHash(SURFACES.config.src);
+      const point = () => {
+        const frame = host.querySelector("iframe");
+        if (frame && frame.src !== wizardSrc) frame.src = wizardSrc; // (re)load into the wizard
+      };
+      if (reachable.config === true) point();
+      else probe("config").then((up) => { if (up) point(); });
+    }
+
     function setActiveNav(key) {
       app.querySelectorAll(".nav button").forEach((b) => b.classList.toggle("active", b.dataset.nav === key));
     }
@@ -717,7 +757,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
     // initial view
     renderDashboard();
     // expose for the preview harness / debugging
-    window.__krakeyConsole = { renderDashboard, openSurface, retrySurface, probe, reachable, SURFACES };
+    window.__krakeyConsole = { renderDashboard, openSurface, quickSetup, retrySurface, probe, reachable, SURFACES };
   })();
   </script>
 </body>
