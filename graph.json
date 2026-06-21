@@ -31,7 +31,8 @@
         "inspector",
         "krakeycode",
         "searxng",
-        "browser"
+        "browser",
+        "memory-note"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -269,6 +270,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/browser.md"
+    },
+    "memory-note": {
+      "zone": "plugins",
+      "path": "public_plugin/memory-note",
+      "description": "Krakey's private long-term notebook: gives a Krakey Agent `memory-note.remember` (save a note with a kind — goal|keep-in-mind|thought|finding — and an importance 1-5) and `memory-note.forget` (drop a note by id), declared as ToolDefs via llm.register_tool. The whole notebook is re-rendered into context EVERY beat as a `memory-note` SYSTEM block (priority 8500, grouped by kind, importance DESC) so the agent keeps it in mind; a config-overridable `memory-note.guidance` SYSTEM block (priority 6700) teaches the tools. Data-carrying, so private-by-default (per-agent notes.json under dataDir, bounded by maxNotes with LEAST-IMPORTANT eviction when full). No results block / no clock.fire_now — writes are synchronous and the notes block is itself the feedback.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/memory-note.md"
     }
   },
   "contracts": {
