@@ -155,6 +155,25 @@ test("assembleSchema: memory-note metadata is present and flagged dataCarrier:tr
   );
 });
 
+// --- REGRESSION: history is data-carrying ----------------------------------
+// history is a per-agent private-data plugin (it persists its log under the
+// agent's dataDir). For the config UI to flag it as private/data-carrying,
+// PLUGIN_META must declare a `history` entry; without it assembleSchema falls
+// back to { id, name } and dataCarrier is missing. The assembled metadata for
+// `history` MUST be present and carry dataCarrier === true. Fails now; passes
+// once PLUGIN_META gains the entry.
+test("assembleSchema: history metadata is present and flagged dataCarrier:true (regression)", async () => {
+  assert.equal(typeof schemaMod.assembleSchema, "function", "assembleSchema not implemented yet");
+  const payload = await schemaMod.assembleSchema({ publicPluginDir: PUBLIC_PLUGIN_DIR });
+  const meta = payload.plugins.find((p: any) => p && p.id === "history");
+  assert.ok(meta, "payload.plugins must include metadata for the 'history' plugin");
+  assert.equal(
+    meta.dataCarrier,
+    true,
+    "history is a per-agent data-carrying plugin and must be flagged dataCarrier:true",
+  );
+});
+
 test("assembleSchema: a bare subdir with no index entry is NOT surfaced as a plugin", async () => {
   assert.equal(typeof schemaMod.assembleSchema, "function", "assembleSchema not implemented yet");
   // A throwaway public_plugin dir: one real plugin (index + schema) and one bare
