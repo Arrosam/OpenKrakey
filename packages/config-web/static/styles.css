@@ -107,6 +107,15 @@ body {
   color: var(--faint); margin-top: 3px; white-space: nowrap;
 }
 
+/* Embedded in the unified Krakey Console (iframe): the Console top nav-bar
+   already carries the global KRAKEY brand, so hide our own to avoid two stacked
+   logos, and tighten the sidebar top spacing so the first nav section starts
+   cleanly without the gap the brand used to occupy. */
+.embedded .sidebar .brand { display: none; }
+.embedded .sidebar { padding-top: 18px; }
+.embedded .nav { margin-top: 0; }
+.embedded .nav .label:first-child { padding-top: 0; }
+
 .nav { margin-top: 30px; display: flex; flex-direction: column; gap: 3px; }
 .nav .label {
   font-family: var(--mono); font-size: 9.5px; letter-spacing: 2px; text-transform: uppercase;

@@ -17,6 +17,13 @@
    ============================================================================ */
 (() => { // IIFE — keep these locals out of the global scope
 
+// Embedded vs standalone: inside the unified Krakey Console iframe the top
+// nav-bar already shows the global KRAKEY brand, so we hide our own brand block
+// to avoid two stacked logos. `window.self !== window.top` is true whenever we
+// run in a frame (works even cross-origin, where it can't read the parent).
+const EMBEDDED = (() => { try { return window.self !== window.top; } catch { return true; } })();
+if (EMBEDDED) document.documentElement.classList.add("embedded");
+
 /* ── API helpers ───────────────────────────────────────────────────────────*/
 // A thrown ApiError carries the HTTP status + the server's message so callers
 // can map 401 → banner, 422 → toastErr.
