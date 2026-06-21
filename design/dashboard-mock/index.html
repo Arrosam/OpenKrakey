@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenKrakey · Krakey Console (design mock)</title>
+  <meta name="description" content="STATIC DESIGN MOCK — the unified Krakey Console: a persistent nav-bar + Dashboard landing that switches between the three surfaces (Config, Chat, Inspector). Cockpit aesthetic, fake data, for visual review only." />
+  <style>
+/* ============================================================================
+   OpenKrakey — Krakey Console (design mock)
+
+   The UNIFIED SHELL: one persistent TOP nav-bar + a Dashboard landing that
+   switches the main area between the three product surfaces — Config, Chat,
+   Inspector. All three load their existing sibling mocks inside an <iframe>
+   (proving "one shell, nav switches pages"): Config via /config-ui-mock/, Chat
+   via /chat-mock/, Inspector via /inspector-mock/.
+
+   The nav is a horizontal TOP bar (brand · tabs · status) so an embedded
+   surface's own left sidebar is the ONLY sidebar on screen — no double-sidebar.
+   The content (Dashboard home OR a surface iframe) fills the full width below it.
+
+   The :root tokens, fonts, dot-grid + mint-glow backdrop, scrollbars, nav-tab
+   styling, and the .btn / .pill / .card vocabulary are ported VERBATIM from
+   packages/config-web/static/styles.css so all four pages read as ONE product.
+   The icon() helper + ICONS map are likewise carried over verbatim.
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* ── Tokens — VERBATIM from config-web ─────────────────────────────────────*/
+:root {
+  --mint:        #2FD69C;
+  --mint-bright: #5cffc4;
+  --mint-deep:   #1c8f68;
+  --mint-glow:   rgba(47, 214, 156, 0.16);
+
+  --ink:    #070b0a;   /* page background  */
+  --panel:  #0d1413;   /* card surface     */
+  --panel2: #111a18;   /* nested surface   */
+  --panel3: #16211e;   /* hover / active   */
+  --line:   #1d2b27;   /* borders          */
+  --line2:  #294039;   /* stronger border  */
+
+  --text:   #dce8e3;   /* primary text     */
+  --muted:  #7e948c;   /* secondary text   */
+  --faint:  #54655f;   /* tertiary / hints */
+
+  --danger: #ff6b6b;
+  --amber:  #ffcb6b;
+
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sans: 'Hanken Grotesk', system-ui, sans-serif;
+
+  --r-sm: 7px;
+  --r:    11px;
+  --r-lg: 16px;
+
+  --shadow: 0 18px 50px -20px rgba(0,0,0,0.8);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--sans);
+  background: var(--ink);
+  color: var(--text);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  /* layered atmosphere: dot grid + two mint glows — VERBATIM */
+  background-image:
+    radial-gradient(circle at 14% 8%, var(--mint-glow), transparent 42%),
+    radial-gradient(circle at 92% 96%, rgba(47,214,156,0.07), transparent 46%),
+    radial-gradient(rgba(255,255,255,0.018) 1px, transparent 1px);
+  background-size: auto, auto, 22px 22px;
+  background-attachment: fixed;
+}
+::selection { background: var(--mint); color: var(--ink); }
+
+/* ── Inline SVG icons — VERBATIM sizing scheme from config-web ──────────────*/
+.ic { width: 1.15em; height: 1.15em; flex: none; display: inline-block; vertical-align: -0.18em; }
+.nav .ico .ic { width: 17px; height: 17px; }
+.card .ch .g .ic { width: 21px; height: 21px; }
+.brand-mark .ic { width: 24px; height: 24px; }
+.arrow { display: inline-flex; align-items: center; }
+.arrow .ic { width: 19px; height: 19px; }
+.btn .btn-ic { width: 15px; height: 15px; }
+.brand-mark { color: var(--mint); display: grid; place-items: center; filter: drop-shadow(0 0 12px rgba(47,214,156,0.5)); }
+
+/* thin custom scrollbars — VERBATIM */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 20px; border: 3px solid var(--ink); }
+::-webkit-scrollbar-thumb:hover { background: var(--mint-deep); }
+
+/* ── App shell — vertical stack: TOP nav-bar row, then full-width content ───*/
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* ── Top nav-bar — horizontal: brand · tabs · status ───────────────────────
+   The bar has NO left padding: the brand occupies a FIXED 264px left column
+   (= the embedded surfaces' `grid-template-columns: 264px 1fr` sidebar width)
+   with its OWN right border, so that border lands exactly at x=264 and forms
+   ONE continuous vertical line with each surface's sidebar right border.
+   The remaining items (tabs · status) get the usual horizontal padding via a
+   right-side gap/padding so they sit clear of the divider. */
+.topnav {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 22px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(13,20,19,0.92), rgba(7,11,10,0.72));
+  backdrop-filter: blur(8px);
+  padding: 12px 22px 12px 0;   /* no LEFT padding — brand column owns x=0..264 */
+}
+
+/* brand block — a FIXED 264px left column that mirrors the surface sidebar:
+   same width, same horizontal padding (18px, from config-web's .sidebar), and
+   a right border in --line that aligns pixel-for-pixel with the surface
+   sidebar's right border at x=264. */
+.brand {
+  display: flex; align-items: center; gap: 11px; flex: none;
+  width: 264px; box-sizing: border-box;
+  padding: 0 18px;            /* matches surface .sidebar horizontal padding */
+  align-self: stretch;        /* fill the bar height so the border is full-height */
+  border-right: 1px solid var(--line);  /* the continuous vertical line at x=264 */
+}
+.brand .mark {
+  font-family: var(--mono); font-weight: 700; font-size: 16px; letter-spacing: 1px;
+  color: var(--mint); white-space: nowrap;
+  text-shadow: 0 0 22px rgba(47,214,156,0.4);
+}
+.brand .mark .b { color: var(--muted); font-weight: 500; }
+/* tagline rendered as a small ROUNDED BORDERED PILL — matches config-ui-mock's
+   .brand .tag exactly (config's general .tag chip styling + the brand overrides):
+   inline-flex pill on var(--panel3) / var(--line2), 20px radius, mono ~8px faint. */
+.brand .tag {
+  display: inline-flex; align-items: center;
+  background: var(--panel3); border: 1px solid var(--line2); border-radius: 20px;
+  padding: 4px 6px 4px 12px;
+  font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--faint); margin-top: 2px; white-space: nowrap;
+}
+
+/* (The brand column's own right border is the divider between brand and tabs —
+   it aligns with each surface sidebar's right border at x=264. No separate
+   .divide span is needed; the nav simply begins to the RIGHT of x=264.) */
+
+/* nav — horizontal tabs (cockpit nav styling, laid out in a row) */
+.nav { display: flex; flex-direction: row; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.nav button {
+  display: inline-flex; align-items: center; gap: 9px;
+  text-align: left; white-space: nowrap;
+  font-family: var(--sans); font-size: 14px; font-weight: 500;
+  color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: 9px 14px; cursor: pointer;
+  transition: all .16s ease;
+}
+.nav button .ico { display: inline-flex; align-items: center; justify-content: center; color: var(--faint); transition: color .16s; }
+.nav button:hover { background: var(--panel2); color: var(--text); }
+.nav button:hover .ico { color: var(--mint); }
+.nav button.active {
+  background: linear-gradient(180deg, var(--mint-glow), transparent);
+  border-color: var(--line2);
+  color: var(--text);
+}
+.nav button.active .ico { color: var(--mint); text-shadow: 0 0 12px var(--mint); }
+.nav button .count {
+  font-family: var(--mono); font-size: 11px;
+  color: var(--faint); background: var(--panel3); border-radius: 20px; padding: 1px 8px;
+}
+
+/* global status — condensed for the top bar's right side */
+.topnav .foot { flex: none; display: flex; align-items: center; gap: 16px; padding-left: 4px; }
+.topnav .foot .status { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.topnav .foot .status .dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--mint); box-shadow: 0 0 10px var(--mint);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+.topnav .foot p { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.3; white-space: nowrap; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* ── Main column — full width, below the top nav-bar ───────────────────────*/
+.main {
+  display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; width: 100%;
+}
+/* DASHBOARD content gets the config-web padding; surface views go full-bleed. */
+.main.is-dashboard { padding: 40px 48px 80px; overflow-y: auto; }
+.main.is-surface   { padding: 0; }
+
+/* topbar — VERBATIM */
+.topbar { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 30px; gap: 24px; }
+.crumb { font-family: var(--mono); font-size: 11px; letter-spacing: 1px; color: var(--faint); text-transform: uppercase; margin-bottom: 9px; }
+.crumb .sep { color: var(--line2); margin: 0 7px; }
+.crumb b { color: var(--mint); font-weight: 500; }
+h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-height: 1.1; }
+.title .accent { color: var(--mint); }
+.subtitle { color: var(--muted); font-size: 14.5px; margin-top: 8px; max-width: 60ch; }
+
+/* ── Buttons — VERBATIM ────────────────────────────────────────────────────*/
+.btn {
+  font-family: var(--sans); font-size: 13.5px; font-weight: 600;
+  border-radius: var(--r-sm); padding: 9px 16px; cursor: pointer;
+  border: 1px solid var(--line2); background: var(--panel2); color: var(--text);
+  transition: all .15s ease; display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+  text-decoration: none;
+}
+.btn:hover { border-color: var(--mint-deep); background: var(--panel3); }
+.btn.primary {
+  background: var(--mint); color: var(--ink); border-color: var(--mint);
+  box-shadow: 0 8px 24px -10px var(--mint);
+}
+.btn.primary:hover { background: var(--mint-bright); box-shadow: 0 10px 30px -8px var(--mint); }
+.btn.ghost { background: none; border-color: transparent; color: var(--muted); }
+.btn.ghost:hover { color: var(--text); background: var(--panel2); }
+
+/* ── Cards / pills — VERBATIM base ─────────────────────────────────────────*/
+.grid { display: grid; gap: 16px; }
+.grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r);
+  padding: 22px; transition: border-color .16s, transform .16s;
+}
+.card.click { cursor: pointer; }
+.card.click:hover { border-color: var(--line2); transform: translateY(-2px); }
+.card .ch { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.card .ch .g { color: var(--mint); display: inline-flex; align-items: center; }
+.card .ch h3 { font-size: 16px; font-weight: 700; }
+.card .ch .arrow { margin-left: auto; color: var(--faint); transition: transform .16s, color .16s; }
+.card.click:hover .ch .arrow { color: var(--mint); transform: translateX(3px); }
+.card p.desc { color: var(--muted); font-size: 13.5px; min-height: 38px; }
+.card .meta { font-family: var(--mono); font-size: 11.5px; color: var(--faint); margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+
+.pill {
+  font-family: var(--mono); font-size: 11px; padding: 2px 9px; border-radius: 20px;
+  background: var(--panel3); color: var(--muted); border: 1px solid var(--line);
+}
+.pill.mint { color: var(--mint); border-color: var(--mint-deep); background: rgba(47,214,156,0.08); }
+.pill.warn { color: var(--amber); border-color: rgba(255,203,107,0.3); background: rgba(255,203,107,0.06); }
+
+/* group label — VERBATIM */
+.group-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--faint); margin: 30px 0 12px; display: flex; align-items: center; gap: 12px; }
+.group-label::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* ── Dashboard hero ────────────────────────────────────────────────────────*/
+.hero {
+  position: relative; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 36px 38px; margin-bottom: 6px; box-shadow: var(--shadow);
+}
+.hero::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(circle at 88% 18%, var(--mint-glow), transparent 55%);
+}
+.hero .he-mark {
+  display: inline-flex; align-items: center; gap: 11px;
+  font-family: var(--mono); color: var(--mint); font-size: 18px; font-weight: 700; letter-spacing: 1px;
+  text-shadow: 0 0 26px rgba(47,214,156,0.4); margin-bottom: 18px;
+}
+.hero .he-mark .ic { width: 24px; height: 24px; filter: drop-shadow(0 0 10px rgba(47,214,156,0.6)); }
+.hero h1 { font-size: 34px; font-weight: 800; letter-spacing: -0.8px; line-height: 1.08; }
+.hero h1 .accent { color: var(--mint); }
+.hero .lede { color: var(--muted); font-size: 15px; margin-top: 12px; max-width: 64ch; }
+.hero .he-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; position: relative; }
+.he-stat { display: flex; align-items: center; gap: 9px; background: var(--panel2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 14px; }
+.he-stat .g { color: var(--mint); display: inline-flex; }
+.he-stat .g .ic { width: 16px; height: 16px; }
+.he-stat .n { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); }
+.he-stat .l { font-size: 12px; color: var(--muted); }
+
+/* ── Surface cards (the three big openers) ─────────────────────────────────*/
+.surface-card { display: flex; flex-direction: column; }
+.surface-card .ch .open { margin-left: auto; }
+.surface-card .open-row { margin-top: 16px; display: flex; align-items: center; gap: 8px; color: var(--mint); font-weight: 600; font-size: 13px; }
+.surface-card .open-row .ic { width: 16px; height: 16px; }
+.surface-card.click:hover .open-row { gap: 12px; }
+.surface-card .open-row { transition: gap .16s ease; }
+
+/* ── Recent activity list ──────────────────────────────────────────────────*/
+.activity { display: grid; gap: 8px; }
+.act-row {
+  display: flex; align-items: center; gap: 13px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 12px 16px;
+}
+.act-row .g { color: var(--mint); width: 22px; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.act-row .g .ic { width: 18px; height: 18px; }
+.act-row .at { flex: 1; min-width: 0; font-size: 13.5px; }
+.act-row .at b { font-weight: 600; }
+.act-row .at .src { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+.act-row .when { font-family: var(--mono); font-size: 11px; color: var(--faint); flex: none; }
+
+/* ── Surface viewport (iframe / config panel host) ─────────────────────────
+   The iframe sits DIRECTLY below the top nav-bar and fills the full remaining
+   height + width — no breadcrumb sub-header. */
+.surface { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.surface.active { display: flex; }
+
+.surf-frame {
+  flex: 1; width: 100%; border: 0; min-height: 0; display: block;
+  background: var(--ink);
+}
+
+@keyframes viewIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+.view-enter { animation: viewIn .34s cubic-bezier(.2,.8,.2,1) both; }
+.stagger > * { opacity: 0; animation: fade .5s ease forwards; }
+.stagger > *:nth-child(1){animation-delay:.04s}
+.stagger > *:nth-child(2){animation-delay:.10s}
+.stagger > *:nth-child(3){animation-delay:.16s}
+.stagger > *:nth-child(4){animation-delay:.22s}
+.stagger > *:nth-child(5){animation-delay:.28s}
+.stagger > *:nth-child(6){animation-delay:.34s}
+@keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── Responsive — the top nav-bar stays a TOP bar (never a left column) ─────
+   On narrow widths the tabs scroll horizontally; the verbose status line and
+   brand tagline drop out so the bar stays single-row and compact. Below 920px
+   the embedded surfaces collapse their 264px sidebar into a horizontal row, so
+   the fixed 264px brand column + its x=264 divider no longer have anything to
+   line up with — the brand relaxes back to a compact, auto-width block. */
+@media (max-width: 920px) {
+  .topnav { gap: 14px; padding: 10px 16px; }
+  .brand {
+    width: auto; padding: 0; border-right: 0; align-self: center;
+  }
+  .brand .tag { display: none; }
+  .topnav .foot p { display: none; }
+  .main.is-dashboard { padding: 28px 22px 70px; }
+  .grid.cols-3 { grid-template-columns: 1fr; }
+}
+@media (max-width: 620px) {
+  .topnav .foot .status { display: none; }
+}
+  </style>
+</head>
+<body>
+  <!-- The whole shell (top nav-bar, dashboard, surface viewports) is built by
+       the inline script below, mirroring the sibling-mock convention (JS owns
+       the shell) and reusing config-web's icon() helper + ICONS map verbatim. -->
+  <script>
+  (() => {
+    /* ── DOM helpers (carried from config-web/app.js) ─────────────────────*/
+    const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+    const $ = (sel, root = document) => root.querySelector(sel);
+
+    /* ── Inline SVG icon set — VERBATIM from config-web/app.js (+ a couple
+          drawn in the same line-icon style for activity rows) ─────────────*/
+    const ICONS = {
+      grid: `<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>`,
+      stars: `<path d="M12 3c.4 3.6 1.4 4.6 5 5-3.6.4-4.6 1.4-5 5-.4-3.6-1.4-4.6-5-5 3.6-.4 4.6-1.4 5-5z"/><path d="M18.5 13.5c.2 1.7.6 2.1 2 2.3-1.4.2-1.8.6-2 2.3-.2-1.7-.6-2.1-2-2.3 1.4-.2 1.8-.6 2-2.3z"/>`,
+      sliders: `<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--panel)"/><circle cx="15" cy="12" r="2.4" fill="var(--panel)"/><circle cx="11" cy="17" r="2.4" fill="var(--panel)"/>`,
+      chat: `<path d="M20.5 12a8 8 0 0 1-11.6 7.1L4 20.5l1.4-4.9A8 8 0 1 1 20.5 12z"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01"/>`,
+      activity: `<path d="M3 12h3.5l2.5-7 4.5 14 2.5-7H21"/>`,
+      server: `<rect x="3" y="4" width="18" height="7" rx="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6"/><path d="M6.5 7.5h2.5M6.5 16.5h2.5"/><path d="M16.8 7.5h.01M16.8 16.5h.01"/>`,
+      robot: `<rect x="4" y="8" width="16" height="12" rx="2.5"/><path d="M12 8V4.6"/><circle cx="12" cy="3.4" r="1.2"/><circle cx="9.2" cy="13.5" r="1.3"/><circle cx="14.8" cy="13.5" r="1.3"/><path d="M9.5 17h5"/><path d="M2 12.5v3M22 12.5v3"/>`,
+      cpu: `<rect x="6.5" y="6.5" width="11" height="11" rx="1.6"/><rect x="9.6" y="9.6" width="4.8" height="4.8" rx="0.6"/><path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3"/>`,
+      arrowRight: `<path d="M4 12h15M13 6l6 6-6 6"/>`,
+      check: `<path d="M5 12.5l4.5 4.5L19 7"/>`,
+      person: `<circle cx="12" cy="8" r="3.6"/><path d="M5.5 19.5c.6-3.4 3.3-5.5 6.5-5.5s5.9 2.1 6.5 5.5"/>`,
+    };
+    function icon(name, cls) {
+      const p = ICONS[name];
+      if (!p) return "";
+      return `<svg class="ic${cls ? " " + cls : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+    }
+
+    /* ── Surface definitions ──────────────────────────────────────────────
+       All three surfaces load their sibling mock bundles via absolute paths,
+       which resolve when this page is served from the design/ root (port 8232).
+       The lazy `src` (assigned on first open) keeps each iframe from loading
+       until the user actually visits that surface. */
+    const SURFACES = {
+      config: {
+        icon: "sliders", label: "Config",
+        desc: "Configure every agent, AI service and plugin — controls generated straight from the live settings schema.",
+        stats: ["4 services", "3 agents", "schema-driven"],
+        kind: "iframe", src: "/config-ui-mock/",
+      },
+      chat: {
+        icon: "chat", label: "Chat",
+        desc: "Talk to your agents from the browser — roster, presence and a live transcript out of the box.",
+        stats: ["4 agents", "2 online", "browser chat"],
+        kind: "iframe", src: "/chat-mock/standalone.html",
+      },
+      inspector: {
+        icon: "activity", label: "Inspector",
+        desc: "Watch every heartbeat as it happens — prompts, the event stream, tool dispatch and gather/compose lanes.",
+        stats: ["live", "42 events", "read-only"],
+        kind: "iframe", src: "/inspector-mock/standalone.html",
+      },
+    };
+
+    /* ── Build the persistent shell ───────────────────────────────────────
+       A horizontal TOP nav-bar (brand · tabs · status) followed by the
+       full-width content area. No left sidebar — so an embedded surface's own
+       sidebar is the only one on screen. */
+    const app = el("div", "app");
+    app.innerHTML = `
+      <nav class="topnav">
+        <div class="brand">
+          <span class="brand-mark">${icon("stars")}</span>
+          <div>
+            <div class="mark">KRAKEY <span class="b">Console</span></div>
+            <div class="tag">ultimate autonomous agent</div>
+          </div>
+        </div>
+        <div class="nav">
+          <button data-nav="dashboard"><span class="ico">${icon("grid")}</span> Dashboard</button>
+          <button data-nav="config"><span class="ico">${icon("sliders")}</span> Config</button>
+          <button data-nav="chat"><span class="ico">${icon("chat")}</span> Chat <span class="count">4</span></button>
+          <button data-nav="inspector"><span class="ico">${icon("activity")}</span> Inspector <span class="count">live</span></button>
+        </div>
+        <div class="foot">
+          <div class="status"><span class="dot"></span> all systems nominal</div>
+          <p>3 agents · 1 beat/30s · schema-driven</p>
+        </div>
+      </nav>
+      <main class="main" id="main"></main>`;
+    document.body.appendChild(app);
+
+    const main = $("#main", app);
+
+    /* ── Dashboard view ───────────────────────────────────────────────────*/
+    function renderDashboard() {
+      main.className = "main is-dashboard view-enter";
+      main.innerHTML = "";
+
+      // hero
+      const hero = el("div", "hero");
+      hero.innerHTML =
+        `<div class="he-mark">${icon("stars")}<span>KRAKEY CONSOLE</span></div>` +
+        `<h1>One cockpit for your <span class="accent">autonomous agents</span>.</h1>` +
+        `<p class="lede">Configure, converse with, and observe every Krakey agent from a single shell. Pick a surface below — or use the nav up top at any time.</p>` +
+        `<div class="he-strip">` +
+          statEl("robot", "3", "agents") +
+          statEl("server", "4", "AI services") +
+          statEl("cpu", "30s", "heartbeat") +
+          statEl("activity", "42", "events / min") +
+        `</div>`;
+      main.appendChild(hero);
+
+      // surface cards
+      main.appendChild(el("div", "group-label", "Open a surface"));
+      const grid = el("div", "grid cols-3 stagger");
+      for (const key of ["config", "chat", "inspector"]) {
+        const s = SURFACES[key];
+        const card = el("div", "card click surface-card");
+        card.innerHTML =
+          `<div class="ch"><span class="g">${icon(s.icon)}</span><h3>${s.label}</h3><span class="arrow open">${icon("arrowRight")}</span></div>` +
+          `<p class="desc">${s.desc}</p>` +
+          `<div class="meta">${s.stats.map((m, i) => `<span class="pill${i === 0 ? " mint" : ""}">${m}</span>`).join("")}</div>` +
+          `<div class="open-row">Open ${s.label} ${icon("arrowRight")}</div>`;
+        card.onclick = () => openSurface(key);
+        grid.appendChild(card);
+      }
+      main.appendChild(grid);
+
+      // recent activity strip
+      main.appendChild(el("div", "group-label", "Recent activity"));
+      const acts = [
+        ["activity", `Beat <b>#1042</b> completed for <b>krakey</b>`, "inspector", "just now"],
+        ["chat", `New message in <b>#krakey</b> from you`, "chat", "2m ago"],
+        ["sliders", `Saved AI service <b>claude</b>`, "config", "14m ago"],
+        ["robot", `Agent <b>scout</b> created from default`, "config", "1h ago"],
+      ];
+      const list = el("div", "activity stagger");
+      for (const [ic, text, src, when] of acts) {
+        const row = el("div", "act-row");
+        row.innerHTML =
+          `<span class="g">${icon(ic)}</span>` +
+          `<span class="at">${text} <span class="src">· ${src}</span></span>` +
+          `<span class="when">${when}</span>`;
+        list.appendChild(row);
+      }
+      main.appendChild(list);
+
+      setActiveNav("dashboard");
+      main.scrollTop = 0;
+    }
+
+    function statEl(ic, n, l) {
+      return `<div class="he-stat"><span class="g">${icon(ic)}</span><span class="n">${n}</span><span class="l">${l}</span></div>`;
+    }
+
+    /* ── Surface view (all three surfaces are kept-alive iframes) ─────────
+       Iframes are kept ALIVE across switches (built once, hidden via .active)
+       so a loaded surface keeps its state when you tab away and back. */
+    const surfaceHosts = {}; // key -> built surface element
+
+    function buildSurface(key) {
+      const s = SURFACES[key];
+      const host = el("div", "surface");
+      host.dataset.surface = key;
+
+      const frame = el("iframe", "surf-frame");
+      frame.title = s.label + " surface";
+      frame.dataset.src = s.src; // lazy — real src set on first open
+      host.appendChild(frame);
+
+      main.appendChild(host);
+      surfaceHosts[key] = host;
+      return host;
+    }
+
+    function openSurface(key) {
+      // Switching away from the dashboard: clear it and mount the surface hosts
+      // once. We rebuild the host set each time we LEAVE the dashboard, since the
+      // dashboard render clears main.innerHTML.
+      if (!main.classList.contains("is-surface")) {
+        main.className = "main is-surface view-enter";
+        main.innerHTML = "";
+        for (const k in surfaceHosts) delete surfaceHosts[k];
+        buildSurface("config");
+        buildSurface("chat");
+        buildSurface("inspector");
+      }
+
+      // activate the chosen surface, hide the rest
+      for (const k in surfaceHosts) surfaceHosts[k].classList.toggle("active", k === key);
+
+      // lazy-load the iframe the first time this surface is opened
+      const host = surfaceHosts[key];
+      const frame = host.querySelector("iframe");
+      if (frame && !frame.src && frame.dataset.src) frame.src = frame.dataset.src;
+
+      setActiveNav(key);
+    }
+
+    function setActiveNav(key) {
+      app.querySelectorAll(".nav button").forEach((b) => b.classList.toggle("active", b.dataset.nav === key));
+    }
+
+    /* ── Wire the persistent nav ──────────────────────────────────────────*/
+    app.querySelectorAll(".nav button").forEach((b) => {
+      b.onclick = () => (b.dataset.nav === "dashboard" ? renderDashboard() : openSurface(b.dataset.nav));
+    });
+
+    // initial view
+    renderDashboard();
+    // expose for the preview harness / debugging
+    window.__krakeyConsole = { renderDashboard, openSurface, SURFACES };
+  })();
+  </script>
+</body>
+</html>

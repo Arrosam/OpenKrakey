@@ -11,6 +11,13 @@
 (() => { // IIFE — keep these locals out of the shared global scope (schema.js owns those names)
 const { PROVIDERS, PLUGINS, PLUGIN_SCHEMAS, AGENT_FIELDS, communicatorFields, SEED } = window.OK;
 
+// Embedded vs standalone: inside the unified Krakey Console iframe the top
+// nav-bar already shows the global KRAKEY brand, so we hide our own brand block
+// to avoid two stacked logos. `window.self !== window.top` is true whenever we
+// run in a frame (works even cross-origin, where it can't read the parent).
+const EMBEDDED = (() => { try { return window.self !== window.top; } catch { return true; } })();
+if (EMBEDDED) document.documentElement.classList.add("embedded");
+
 // deep clone seed so edits in the mock don't mutate the schema module
 const state = JSON.parse(JSON.stringify(SEED));
 let dirty = false;
