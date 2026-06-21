@@ -128,6 +128,21 @@ function communicatorFields(providerId) {
       placeholder: "provider default" },
     { key: "maxTokens", label: "Max tokens (context window)", control: "number", default: undefined, min: 1, step: 1,
       placeholder: "provider default", help: "Number-only. The cap on tokens per request." },
+    { key: "topP", label: "Top-p (nucleus sampling)", control: "number", default: undefined, min: 0, max: 1, step: 0.05,
+      placeholder: "provider default", help: "Cumulative-probability cutoff (0–1). Leave blank to use the provider default." },
+    { key: "reasoningEffort", label: "Reasoning effort", control: "select", default: undefined,
+      options: [
+        { value: "", label: "(provider default)" },
+        { value: "minimal", label: "Minimal" },
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+      ],
+      help: "How hard reasoning-capable models think before answering. Ignored by providers without a reasoning setting." },
+    { key: "stop", label: "Stop sequences", control: "taglist", default: undefined,
+      placeholder: "add a stop sequence…", help: "Generation halts when any of these strings is produced." },
+    { key: "contextLength", label: "Context length", control: "number", default: undefined, min: 1, step: 1, unit: "tokens",
+      placeholder: "provider default", help: "Metadata only — the model's context-window size, so plugins can budget context. Not sent on the wire." },
   ];
 }
 

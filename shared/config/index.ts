@@ -39,6 +39,22 @@ export interface CommunicatorDef {
   /** Optional per-communicator request defaults. */
   temperature?: number;
   maxTokens?: number;
+  /** Nucleus-sampling cutoff (0–1). Wired as `top_p` (anthropic/openai). */
+  topP?: number;
+  /** Stop sequences that end generation. Wired as `stop_sequences` (anthropic) / `stop` (openai chat). */
+  stop?: string[];
+  /**
+   * Reasoning effort for reasoning-capable providers ("minimal"|"low"|"medium"|
+   * "high"). Wired as `reasoning_effort` on the OpenAI chat/Responses APIs; NOT
+   * wired for Anthropic (it uses a thinking budget, not an effort enum).
+   */
+  reasoningEffort?: string;
+  /**
+   * The model's context-window size, in tokens. Metadata only — never a wire
+   * param; surfaced as read-only `contextLength` on the built Communicator so
+   * plugins can budget their context.
+   */
+  contextLength?: number;
 }
 
 /**
@@ -107,6 +123,11 @@ export interface ProviderInfo {
   baseURLExample: string;
   /** A concrete example model id (format guidance, not a recommendation). */
   modelExample: string;
+  /**
+   * True when this provider type honours a `reasoningEffort` setting (wired as
+   * `reasoning_effort`). UIs only offer the reasoning-effort field for these.
+   */
+  supportsReasoningEffort?: boolean;
 }
 
 /** Every provider type the gateway accepts, with UI guidance. */
@@ -134,6 +155,7 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
     baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
     baseURLExample: "http://localhost:11434/v1",
     modelExample: "gpt-4o",
+    supportsReasoningEffort: true,
   },
   {
     id: "openai-responses",
@@ -146,6 +168,7 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
     baseURLHint: "API root INCLUDING /v1 — leave blank for official OpenAI",
     baseURLExample: "https://api.openai.com/v1",
     modelExample: "gpt-4o",
+    supportsReasoningEffort: true,
   },
   {
     id: "cohere",

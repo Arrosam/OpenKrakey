@@ -191,7 +191,12 @@ export async function chat(
   if (temperature !== undefined) body.temperature = temperature;
   const maxTokens = req.maxTokens ?? cfg.maxTokens;
   if (maxTokens !== undefined) body.max_tokens = maxTokens;
-  if (req.stop !== undefined) body.stop = req.stop;
+  const topP = req.topP ?? cfg.topP;
+  if (topP !== undefined) body.top_p = topP;
+  const stop = req.stop ?? cfg.stop;
+  if (stop !== undefined) body.stop = stop;
+  const reasoningEffort = req.reasoningEffort ?? cfg.reasoningEffort;
+  if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort;
 
   const res = await fetch(url, {
     method: "POST",
@@ -403,6 +408,13 @@ export async function responsesChat(
   if (temperature !== undefined) body.temperature = temperature;
   const maxTokens = req.maxTokens ?? cfg.maxTokens;
   if (maxTokens !== undefined) body.max_output_tokens = maxTokens;
+  const topP = req.topP ?? cfg.topP;
+  if (topP !== undefined) body.top_p = topP;
+  const reasoningEffort = req.reasoningEffort ?? cfg.reasoningEffort;
+  // The Responses API nests effort under `reasoning: { effort }` (unlike chat
+  // completions, which takes a flat `reasoning_effort`).
+  if (reasoningEffort !== undefined) body.reasoning = { effort: reasoningEffort };
+  // `stop` is deliberately omitted: the Responses API has no stop-sequence param.
 
   const res = await fetch(url, {
     method: "POST",
