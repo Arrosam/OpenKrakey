@@ -1,11 +1,13 @@
 <#
   OpenKrakey installer (Windows).
 
-    1. checks Node.js >= 22 (instructs and exits if missing - never touches your
-       system toolchain),
+    1. ensures Node.js >= 22 — if missing or too old, installs it via winget
+       (the Windows Package Manager, built into Windows 10/11),
     2. installs dependencies (npm install),
     3. adds <install>\bin to your user PATH so the `krakey` command is available,
        anchored to THIS install.
+
+  Set $env:KRAKEY_YES=1 for a non-interactive run (auto-confirm the Node install).
 
   Usage (from this folder, or anywhere):
     powershell -ExecutionPolicy Bypass -File install.ps1
@@ -19,21 +21,68 @@ Set-Location $Root
 Write-Host "OpenKrakey installer"
 Write-Host "  install dir: $Root"
 
+function Test-NodeOk {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if (-not $cmd) { return $false }
+  try {
+    $major = [int]((& node -v).Trim().TrimStart('v').Split('.')[0])
+    return ($major -ge 22)
+  } catch { return $false }
+}
+
+# Refresh this session's PATH from Machine + User so a freshly-installed node is
+# visible without opening a new terminal.
+function Update-SessionPath {
+  $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+  $user    = [Environment]::GetEnvironmentVariable('Path', 'User')
+  $env:Path = (@($machine, $user) | Where-Object { $_ }) -join ';'
+}
+
+function Install-Node {
+  $winget = Get-Command winget -ErrorAction SilentlyContinue
+  if (-not $winget) {
+    Write-Host "  winget (the Windows Package Manager) is not available, so Node can't be installed automatically." -ForegroundColor Yellow
+    return
+  }
+  Write-Host "  installing Node.js LTS via winget (OpenJS.NodeJS.LTS)..."
+  # winget is a native exe: a non-zero exit won't throw here, so Test-NodeOk
+  # below is the real gate. The try/catch only guards winget itself faulting.
+  try {
+    & winget install --exact --id OpenJS.NodeJS.LTS --silent `
+        --accept-source-agreements --accept-package-agreements
+  } catch {
+    Write-Host "  winget reported: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
+  Update-SessionPath
+}
+
 # --- 1. Node.js >= 22 --------------------------------------------------------
-$node = Get-Command node -ErrorAction SilentlyContinue
-if (-not $node) {
-  Write-Host "error: Node.js is not installed." -ForegroundColor Red
-  Write-Host "       OpenKrakey needs Node.js >= 22 - install it from https://nodejs.org/ and re-run."
-  exit 1
+if (Test-NodeOk) {
+  Write-Host "  node: $((& node -v).Trim()) ok"
+} else {
+  Write-Host "  node: not found (or older than 22)"
+
+  $doInstall = $false
+  if ($env:KRAKEY_YES) {
+    $doInstall = $true
+  } else {
+    # Read-Host throws under -NonInteractive; in that case don't surprise-install.
+    try {
+      $ans = Read-Host "Install Node.js LTS now via winget? [Y/n]"
+      if ($ans -notmatch '^[Nn]') { $doInstall = $true }
+    } catch { $doInstall = $false }
+  }
+  if ($doInstall) { Install-Node }
+
+  if (Test-NodeOk) {
+    Write-Host "  node: $((& node -v).Trim()) ok (installed)"
+  } else {
+    Write-Host "error: Node.js >= 22 is required and could not be installed automatically." -ForegroundColor Red
+    Write-Host "       Install it from https://nodejs.org/ and re-run install.ps1."
+    Write-Host "       Tip: if you just installed Node, open a NEW terminal and re-run."
+    exit 1
+  }
 }
-$nodeVer = (& node -v).Trim()            # e.g. v22.3.0
-$major = [int]($nodeVer.TrimStart('v').Split('.')[0])
-if ($major -lt 22) {
-  Write-Host "error: Node.js >= 22 is required, but found $nodeVer." -ForegroundColor Red
-  Write-Host "       Upgrade from https://nodejs.org/ and re-run."
-  exit 1
-}
-Write-Host "  node: $nodeVer ok"
 
 # --- 2. dependencies ---------------------------------------------------------
 Write-Host "Installing dependencies (npm install)..."

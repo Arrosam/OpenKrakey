@@ -23,9 +23,10 @@ model it calls. Run one agent or many; each is isolated and keeps its own data.
 
 ## Install and setup
 
-> **Prerequisites:** [Node.js ≥ 22](https://nodejs.org/) and `git`. No database — an agent's whole
-> state is plain files on disk. (The optional `browser` plugin drives your own Chrome; you only need
-> Chrome installed if you enable that plugin.)
+> **Prerequisites:** just a way to get the code — `git`, or download the repo ZIP. **The installer
+> auto-installs Node.js ≥ 22** if you don't already have it. No database — an agent's whole state is
+> plain files on disk. (The optional `browser` plugin drives your own Chrome; install Chrome only if
+> you enable that plugin.)
 
 **1 — Get the code**
 
@@ -34,18 +35,19 @@ git clone https://github.com/Arrosam/OpenKrakey.git
 cd OpenKrakey
 ```
 
-**2 — Install.** The installer checks for Node ≥ 22, runs `npm install`, and puts the `krakey`
-command on your PATH:
+**2 — Install.** The installer **installs Node.js ≥ 22 for you if it's missing** — Homebrew or a
+user-local nvm on macOS/Linux, winget on Windows (it asks first, and leaves an existing Node
+untouched) — then runs `npm install` and puts the `krakey` command on your PATH:
 
 ```bash
 ./install.sh                                           # macOS / Linux
 powershell -ExecutionPolicy Bypass -File install.ps1   # Windows
 ```
 
-It never touches your system toolchain — if Node is missing it just points you at
-[nodejs.org](https://nodejs.org/) and exits. **Rather not put it on your PATH?** Skip the script,
-run `npm install`, and use the npm scripts (`npm start` · `npm run config:web` · `npm run console`)
-or the launcher directly (`./bin/krakey <command>`).
+For an unattended run, set `KRAKEY_YES=1` (`$env:KRAKEY_YES=1` in PowerShell) to auto-confirm the
+Node install. **Rather not put `krakey` on your PATH?** Skip the script, run `npm install`, and use
+the npm scripts (`npm start` · `npm run config:web` · `npm run console`) or the launcher directly
+(`./bin/krakey <command>`).
 
 **3 — Connect a provider and create your first agent.** The guided wizard does the whole setup —
 pick a provider, paste an API key (or reference an env var like `${ANTHROPIC_API_KEY}`), choose a
