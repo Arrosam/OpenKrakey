@@ -1,42 +1,574 @@
 /**
- * The web chat page's CSS — the dark Krakey theme. Extracted verbatim from the
- * single static page so the markup, style, and script each live in one file; the
- * assembled PAGE_HTML (see page.ts) is byte-identical to the inlined original.
+ * The web chat page CSS — the Krakey "mission-control cockpit" theme, ported
+ * VERBATIM from the approved design mock (design/chat-mock/styles.css): the
+ * config-console token set, Hanken Grotesk + JetBrains Mono (one Google Fonts
+ * import), the dot-grid + mint-glow backdrop, the sidebar/roster shell, message
+ * bubbles, sent/read ticks, the auto-grow composer, the quote-chip + gutter
+ * affordances, the three-signal connection pill, and the \`.embedded\` rules.
+ * Interpolated into PAGE_HTML (see page.ts).
  */
-export const STYLE = `  :root{ --mint:#2FD69C; --bg:#0d1210; --bg2:#0a0f0d; --surf:#171e1a; --line:rgba(255,255,255,0.08);
-    --tx:#e7ece9; --tx2:#7b847e; --tx3:#5f6863; }
-  *{ box-sizing:border-box; }
-  html,body{ margin:0; height:100%; }
-  body{ background:var(--bg); color:var(--tx); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  #app{ display:flex; height:100vh; }
-  aside{ width:208px; background:var(--bg2); border-right:.5px solid var(--line); display:flex; flex-direction:column; padding:18px 12px; flex-shrink:0; }
-  .brand{ font-size:16px; font-weight:500; letter-spacing:.3px; padding:0 6px 18px; }
-  .lbl{ font-size:11px; color:var(--tx3); letter-spacing:.8px; padding:0 6px 8px; }
-  .agent{ display:flex; align-items:center; gap:9px; padding:9px 10px; border-radius:8px; font-size:13px; color:#aab4ae; cursor:pointer; border:none; background:none; width:100%; text-align:left; }
-  .agent:hover{ background:rgba(255,255,255,0.04); }
-  .agent.sel{ background:rgba(47,214,156,0.12); color:var(--tx); }
-  .dot{ width:7px; height:7px; border-radius:50%; background:var(--mint); flex-shrink:0; }
-  .roster-foot{ margin-top:auto; display:flex; align-items:center; gap:7px; padding:10px 6px 0; border-top:.5px solid var(--line); font-size:12px; color:var(--tx2); }
-  main{ flex:1; display:flex; flex-direction:column; min-width:0; }
-  header{ display:flex; align-items:center; gap:10px; padding:13px 18px; border-bottom:.5px solid var(--line); }
-  .av{ border-radius:50%; background:rgba(47,214,156,0.14); display:flex; align-items:center; justify-content:center; color:var(--mint); font-weight:500; flex-shrink:0; }
-  #title{ font-size:14px; font-weight:500; }
-  #sub{ font-size:11.5px; color:var(--tx2); display:flex; align-items:center; gap:6px; }
-  #bell{ border:none; background:none; color:var(--tx2); font-size:18px; cursor:pointer; padding:6px; border-radius:8px; display:flex; }
-  #bell:hover{ background:rgba(255,255,255,0.05); color:var(--tx); }
-  #bell.on{ color:var(--mint); }
-  #log{ flex:1; overflow-y:auto; padding:18px; display:flex; flex-direction:column; gap:13px; }
-  .row{ display:flex; gap:9px; align-items:flex-start; }
-  .bubble{ border-radius:12px; padding:9px 13px; font-size:13.5px; line-height:1.5; max-width:78%; white-space:pre-wrap; word-break:break-word; }
-  .agent-msg .bubble{ background:var(--surf); border:.5px solid rgba(255,255,255,0.06); color:#dfe6e2; }
-  .me{ display:flex; flex-direction:column; align-items:flex-end; gap:3px; }
-  .me .bubble{ background:rgba(47,214,156,0.13); border:.5px solid rgba(47,214,156,0.22); color:#d6f3e7; }
-  .tick{ font-size:11px; display:flex; align-items:center; gap:4px; padding-right:2px; color:var(--tx2); }
-  .tick .bi{ font-size:13px; }
-  .tick.read{ color:var(--mint); }
-  .empty{ color:var(--tx2); font-size:13px; margin:auto; }
-  form{ display:flex; gap:10px; align-items:center; padding:13px 16px; border-top:.5px solid var(--line); }
-  #box{ flex:1; background:#111714; border:.5px solid rgba(255,255,255,0.10); border-radius:10px; padding:11px 13px; font-size:13px; color:var(--tx); outline:none; }
-  #box::placeholder{ color:var(--tx2); }
-  #send{ width:40px; height:40px; border:none; border-radius:10px; background:var(--mint); color:#06251a; font-size:18px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
-  #send:disabled{ opacity:.4; cursor:default; }`;
+export const STYLE = `/* ============================================================================
+   OpenKrakey — Web Chat (design mock)
+
+   Re-skin of the real web chat page (public_plugin/web) onto the Config
+   console's "mission-control cockpit" design system (packages/config-web).
+   ONE coherent product: tokens, fonts, icon style, scrollbars, sidebar shell,
+   buttons/pills, and the dot-grid + mint-glow backdrop are ported VERBATIM from
+   config-web/static/styles.css. Chat-specific surfaces (bubbles, sent/read
+   ticks, roster rows, transcript header, input bar, typing indicator) are the
+   tasteful extensions the cockpit kit doesn't cover.
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* ── Tokens — VERBATIM from config-web ─────────────────────────────────────*/
+:root {
+  --mint:        #2FD69C;
+  --mint-bright: #5cffc4;
+  --mint-deep:   #1c8f68;
+  --mint-glow:   rgba(47, 214, 156, 0.16);
+
+  --ink:    #070b0a;   /* page background  */
+  --panel:  #0d1413;   /* card surface     */
+  --panel2: #111a18;   /* nested surface   */
+  --panel3: #16211e;   /* hover / active   */
+  --line:   #1d2b27;   /* borders          */
+  --line2:  #294039;   /* stronger border  */
+
+  --text:   #dce8e3;   /* primary text     */
+  --muted:  #7e948c;   /* secondary text   */
+  --faint:  #54655f;   /* tertiary / hints */
+
+  --danger: #ff6b6b;
+  --amber:  #ffcb6b;
+  /* presence signal: OFFLINE — a desaturated cool slate, deliberately distinct
+     from the mint "online" dot and the amber "disconnected" state. NO glow. */
+  --offline: #5a6b74;
+
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --sans: 'Hanken Grotesk', system-ui, sans-serif;
+
+  --r-sm: 7px;
+  --r:    11px;
+  --r-lg: 16px;
+
+  --shadow: 0 18px 50px -20px rgba(0,0,0,0.8);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: var(--sans);
+  background: var(--ink);
+  color: var(--text);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  height: 100vh;
+  /* layered atmosphere: dot grid + two mint glows — VERBATIM from config-web */
+  background-image:
+    radial-gradient(circle at 14% 8%, var(--mint-glow), transparent 42%),
+    radial-gradient(circle at 92% 96%, rgba(47,214,156,0.07), transparent 46%),
+    radial-gradient(rgba(255,255,255,0.018) 1px, transparent 1px);
+  background-size: auto, auto, 22px 22px;
+  background-attachment: fixed;
+}
+
+::selection { background: var(--mint); color: var(--ink); }
+
+/* ── Inline SVG icons — config-web conventions ─────────────────────────────*/
+.ic { width: 1.15em; height: 1.15em; flex: none; display: inline-block; vertical-align: -0.18em; }
+.brand-mark .ic { width: 22px; height: 22px; }
+.brand-mark { color: var(--mint); display: grid; place-items: center; filter: drop-shadow(0 0 12px rgba(47,214,156,0.5)); }
+
+/* thin custom scrollbars — VERBATIM from config-web */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 20px; border: 3px solid var(--ink); }
+::-webkit-scrollbar-thumb:hover { background: var(--mint-deep); }
+
+/* ── App shell — config-web grid, sized for a full-height chat ─────────────*/
+.app { display: grid; grid-template-columns: 264px 1fr; height: 100vh; }
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(13,20,19,0.9), rgba(7,11,10,0.6));
+  backdrop-filter: blur(6px);
+  display: flex; flex-direction: column;
+  padding: 26px 18px;
+  min-height: 0;
+}
+
+/* brand block — mirrors config-web's .brand, mark + muted sub-word + tagline */
+.brand { display: flex; align-items: center; gap: 11px; padding: 0 6px 4px; }
+.brand .mark {
+  font-family: var(--mono); font-weight: 700; font-size: 16.5px; letter-spacing: 1px;
+  color: var(--mint); white-space: nowrap;
+  text-shadow: 0 0 22px rgba(47,214,156,0.4);
+}
+.brand .mark .b { color: var(--muted); font-weight: 500; }
+/* tagline renders as a small rounded bordered pill — identical to config-web's
+   brand tag (where the general \`.tag\` chip rule supplies the pill chrome). Chat
+   has no general \`.tag\` rule, so the pill chrome is declared here directly:
+   panel3 fill + line2 hairline border + 20px radius + the same 4px/6px/4px/12px
+   padding, keeping the mono ~8px uppercase faint label. */
+.brand .tag {
+  display: inline-flex; align-items: center;
+  background: var(--panel3); border: 1px solid var(--line2); border-radius: 20px;
+  padding: 4px 6px 4px 12px;
+  font-family: var(--mono); font-size: 8px; letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--faint); margin-top: 3px; white-space: nowrap;
+}
+
+/* AGENTS nav label — config-web's .nav .label treatment */
+.roster-label {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--faint); padding: 24px 12px 9px;
+}
+
+/* ── Embedded mode (iframed in the Krakey Console) ─────────────────────────
+   The Console's top nav already shows the single global "KRAKEY Console" brand,
+   so the surface must NOT show its own. Hide the sidebar brand block; the
+   .roster-label's 24px top padding was spacing it away from the brand above —
+   without the brand that reads as an awkward gap, so tighten the sidebar's top
+   so "AGENTS" / the roster starts cleanly at the top. */
+.embedded .sidebar .brand { display: none; }
+.embedded .sidebar { padding-top: 18px; }
+.embedded .roster-label { padding-top: 0; }
+
+/* roster — a chat-specific list built on config-web's .nav button rhythm */
+.roster { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; min-height: 0; flex: 1; }
+.agent {
+  display: flex; align-items: center; gap: 11px;
+  width: 100%; text-align: left;
+  font-family: var(--sans); font-size: 14px; font-weight: 500;
+  color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: 9px 11px; cursor: pointer;
+  transition: all .16s ease;
+}
+.agent:hover { background: var(--panel2); color: var(--text); }
+.agent.sel {
+  background: linear-gradient(90deg, var(--mint-glow), transparent);
+  border-color: var(--line2);
+  color: var(--text);
+}
+.agent .av { width: 30px; height: 30px; font-size: 13px; flex: none; }
+/* two-line contact row: name on line 1, subtitle on line 2 (vertical stack).
+   min-width:0 lets each line's own ellipsis truncate independently. */
+.agent .at { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.agent .at .an { display: block; max-width: 100%; font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent.sel .at .an { color: var(--text); }
+.agent .at .as {
+  display: block; max-width: 100%;
+  font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px;
+}
+/* OFFLINE roster row reads "inactive": the whole row desaturates toward muted so
+   the offline signal is legible from the name down, not just the presence dot. */
+.agent.off .at .an { color: var(--muted); }
+.agent.off:not(.sel) .at .as { color: var(--offline); }
+/* presence dot floated on the avatar.
+   THREE separable signals (see header + roster): ONLINE = mint + soft glow,
+   OFFLINE = a desaturated slate (--offline, NO glow), DISCONNECTED = amber
+   (the connection pill, handled separately). The offline color must read as
+   unmistakably "inactive" next to the mint online dot. */
+.av { position: relative; }
+.av .pres {
+  position: absolute; right: -1px; bottom: -1px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--mint); border: 2px solid var(--ink);
+  box-shadow: 0 0 8px var(--mint);
+}
+.av .pres.off { background: var(--offline); box-shadow: none; }
+
+/* roster footer — config-web's .sidebar .foot, with the live mint dot */
+.roster-foot {
+  margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--line);
+  display: flex; align-items: center; gap: 8px;
+}
+.roster-foot .live { width: 7px; height: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 10px var(--mint); flex: none; animation: pulse 2.4s ease-in-out infinite; }
+.roster-foot p { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* small demo affordance: toggle the simulated connection state. Unobtrusive —
+   mono, faint, ghost-button feel; turns amber while the channel is "down". */
+.roster-foot .sim {
+  margin-left: auto; flex: none;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .6px; text-transform: uppercase;
+  color: var(--faint); background: none; border: 1px solid var(--line);
+  border-radius: 20px; padding: 3px 9px; cursor: pointer; transition: all .15s ease;
+}
+.roster-foot .sim:hover { color: var(--text); border-color: var(--line2); background: var(--panel2); }
+.roster-foot .sim.down { color: var(--amber); border-color: rgba(255,203,107,0.4); background: rgba(255,203,107,0.06); }
+
+/* round avatar (header + roster + agent bubbles) — config-web mint-tint */
+.av {
+  border-radius: 50%;
+  background: rgba(47,214,156,0.14);
+  border: 1px solid var(--line2);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--mint); font-family: var(--mono); font-weight: 600;
+  text-transform: uppercase; flex: none;
+}
+
+/* ── Main column ───────────────────────────────────────────────────────────*/
+.main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+
+/* transcript header — round avatar + title + sub-status + bell */
+.chat-head {
+  display: flex; align-items: center; gap: 13px;
+  padding: 18px 26px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(13,20,19,0.55), transparent);
+}
+.chat-head .av { width: 38px; height: 38px; font-size: 16px; }
+.chat-head .ht { flex: 1; min-width: 0; }
+.chat-head .ht .htitle { font-size: 16px; font-weight: 700; letter-spacing: -0.2px; }
+.chat-head .ht .hsub {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  display: flex; align-items: center; gap: 7px; margin-top: 2px;
+}
+.chat-head .ht .hsub .live { width: 6px; height: 6px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 8px var(--mint); flex: none; }
+.chat-head .ht .hsub .sep { color: var(--line2); }
+
+/* ── Connection / presence status pill ───────────────────────────────────────
+   THREE separable signals, in priority order:
+     · disconnected (\`.down\`)  → AMBER dot, no glow, "reconnecting…" — the live
+       SSE channel dropped. Independent of the agent's \`online\` flag, wins over it.
+     · offline     (\`.offline\`) → SLATE dot (--offline), no glow — channel is live
+       but the agent itself is offline (\`online:false\`).
+     · online      (default)    → MINT dot + soft glow — agent live on a live channel.
+   The whole pill is clickable to toggle the demo connection state. */
+.chat-head .ht .conn {
+  display: inline-flex; align-items: center; gap: 6px;
+  cursor: pointer; border-radius: 20px; padding: 1px 8px 1px 6px; margin: -1px -2px;
+  border: 1px solid transparent; transition: all .15s ease; user-select: none;
+}
+.chat-head .ht .conn:hover { border-color: var(--line); background: var(--panel2); }
+.chat-head .ht .conn .cdot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--mint); box-shadow: 0 0 8px var(--mint);
+}
+.chat-head .ht .conn .ctext { color: var(--muted); }
+/* OFFLINE agent (channel still live): slate dot, NO glow, slate status text — a
+   third signal, clearly distinct from mint (online) and amber (disconnected). */
+.chat-head .ht .conn.offline .cdot { background: var(--offline); box-shadow: none; }
+.chat-head .ht .conn.offline .ctext { color: var(--offline); }
+/* disconnected: amber dot, NO glow, amber status text, soft amber pulse.
+   \`.down\` wins over \`.offline\` — a dropped channel is the louder signal. */
+.chat-head .ht .conn.down .cdot { background: var(--amber); box-shadow: none; animation: dpulse 1.5s ease-in-out infinite; }
+.chat-head .ht .conn.down .ctext { color: var(--amber); }
+@keyframes dpulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* notification bell — config-web .btn.ghost feel, mint when armed */
+.bell {
+  width: 38px; height: 38px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: none; color: var(--muted); cursor: pointer;
+  transition: all .16s ease;
+}
+.bell .ic { width: 19px; height: 19px; }
+.bell:hover { background: var(--panel2); color: var(--text); border-color: var(--line); }
+.bell.on { color: var(--mint); border-color: var(--mint-deep); background: rgba(47,214,156,0.08); }
+.bell.on .ic { filter: drop-shadow(0 0 6px rgba(47,214,156,0.5)); }
+
+/* ── Transcript ────────────────────────────────────────────────────────────*/
+.log {
+  flex: 1; overflow-y: auto; min-height: 0;
+  padding: 24px 26px 8px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+
+/* day divider — small cockpit-mono chip */
+.daybreak { display: flex; align-items: center; gap: 12px; margin: 6px 2px; }
+.daybreak::before, .daybreak::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.daybreak span { font-family: var(--mono); font-size: 9.5px; letter-spacing: 1.6px; text-transform: uppercase; color: var(--faint); }
+
+/* A message ROW now spans the FULL transcript width. Inside it:
+     · \`.msg-inner\` — avatar + bubble (+ tick), constrained to the old max width
+       and aligned as before (agent left, user right). This is the SELECTABLE
+       message; clicking it does NOT arm quoting, so bubble text stays freely
+       selectable + copyable.
+     · \`.quote-zone\` — the remaining empty space on the side OPPOSITE the bubble
+       (right of an agent message, left of a user message). THIS is the two-click
+       quote hit-area. Clicking the bubble never reaches it.
+   Splitting the row this way is what lets a user drag-select bubble text while a
+   click in the blank gutter arms the quote flow. */
+.msg { display: flex; align-items: stretch; width: 100%; animation: fade .25s ease both; }
+.msg-inner { display: flex; gap: 10px; align-items: flex-start; max-width: 80%; min-width: 0; }
+.msg .av { width: 26px; height: 26px; font-size: 11px; margin-top: 2px; }
+
+/* the empty gutter beside a bubble — the quote hit-area. cursor:pointer.
+   It hosts ONE affordance, \`.qchip\`, which is invisible until the gutter is
+   hovered (idle ghost) and upgrades IN PLACE to a clear pill once armed — so the
+   ghost label and the armed hint never stack into two lines of clutter. The chip
+   is absolutely positioned and never shifts the bubble. */
+.quote-zone {
+  flex: 1 1 auto; min-width: 0; align-self: stretch;
+  position: relative; cursor: pointer;
+  border-radius: var(--r);
+  transition: background .15s ease;
+}
+/* DIRECT hover on the quote area gets the stronger highlight — the "you can click
+   here" signal (a clearly visible mint wash on the gutter itself). Hovering
+   elsewhere on the row only reveals the chip (below), not this wash. */
+.quote-zone:hover { background: rgba(47,214,156,0.06); }
+
+/* The single quote affordance — a small rounded CHIP on the cockpit \`.pill\`
+   surface (panel + 1px line, pill radius). IDLE: ghosted, mono micro-label,
+   revealed only on gutter hover, hugging the bubble edge. It is the SAME element
+   that becomes the armed pill, so only one affordance is ever on screen. */
+.quote-zone .qchip {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 20px;
+  background: var(--panel2); border: 1px solid var(--line);
+  color: var(--faint); white-space: nowrap;
+  pointer-events: none;             /* clicks fall through to the gutter */
+  opacity: 0; transition: opacity .15s ease, color .15s ease,
+    background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.quote-zone .qchip .ic { width: 14px; height: 14px; }
+/* idle label — mono micro-text, matching config-web's pill vocabulary */
+.quote-zone .qchip .qlabel {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .5px;
+}
+/* reveal the ghost chip when hovering ANYWHERE on the message row — bubble OR
+   gutter (idle only; the armed chip stays up). The chip still LIVES in the gutter
+   and is still armed via the quote area; only the REVEAL trigger is the whole row. */
+.msg:hover .quote-zone .qchip { opacity: .85; }
+/* DIRECT hover on the quote area itself lifts the chip to a clearer, brighter
+   pill (the stronger "clickable target" highlight) — distinct from the lighter
+   reveal you get hovering the bubble. */
+.quote-zone:hover .qchip {
+  opacity: 1;
+  color: var(--muted);
+  background: var(--panel3);
+  border-color: var(--line2);
+  box-shadow: 0 2px 8px -4px rgba(0,0,0,0.6);
+}
+
+/* ARMED: the same chip upgrades to a clear, polished mint pill — \`--panel\`
+   surface, mint-deep border + soft mint glow, mint icon, and a concise sentence-
+   case label in the SANS prose font so it reads as the active confirm state.
+   One line, one element, no layout shift. */
+.quote-zone.armed { background: rgba(47,214,156,0.06); }
+.quote-zone .qchip.armed {
+  opacity: 1;
+  background: var(--panel);
+  border-color: var(--mint-deep);
+  color: var(--mint);
+  box-shadow: 0 0 0 3px var(--mint-glow);
+  /* NB: no \`fade\` keyframe here — its translateY would fight the -50% centering
+     transform above. The opacity/color/border transition (declared on \`.qchip\`)
+     already gives the upgrade a smooth, in-place feel. */
+}
+.quote-zone .qchip.armed .ic { filter: drop-shadow(0 0 5px rgba(47,214,156,0.5)); }
+.quote-zone .qchip.armed .qlabel {
+  font-family: var(--sans); font-size: 11.5px; font-weight: 600; letter-spacing: 0;
+}
+
+/* agent bubble sits LEFT → gutter + chip hug the bubble's right edge */
+.msg.agent .quote-zone .qchip { left: 14px; }
+/* user bubble sits RIGHT → gutter + chip hug the bubble's left edge */
+.msg.me .quote-zone .qchip { right: 14px; flex-direction: row-reverse; padding: 4px 8px 4px 10px; }
+
+.bubble {
+  position: relative;
+  border-radius: var(--r); padding: 10px 14px;
+  font-size: 14px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  border: 1px solid var(--line);
+  cursor: text;                   /* body is for reading/selecting — NOT quoting */
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.bubble .bmeta { font-family: var(--mono); font-size: 9.5px; color: var(--faint); margin-bottom: 5px; letter-spacing: .4px; }
+
+/* hover highlight is now JUSTIFIED — it signals the copy affordance */
+.msg:hover .bubble { border-color: var(--line2); box-shadow: 0 0 0 1px var(--line); }
+/* armed: the bubble whose gutter is armed gets a mint outline so the pairing of
+   gutter ↔ message is obvious */
+.msg.arming .bubble { border-color: var(--mint-deep); box-shadow: 0 0 0 1px var(--mint-deep); }
+
+/* copy button — revealed on bubble hover, top-trailing corner, line-icon style.
+   Click copies the message text; it must NOT trigger the quote flow. */
+.bubble .copy {
+  position: absolute; top: 4px; right: 4px;
+  width: 26px; height: 26px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line2); border-radius: var(--r-sm);
+  background: var(--panel2); color: var(--muted); cursor: pointer;
+  opacity: 0; transform: scale(.92); pointer-events: none;
+  transition: opacity .14s ease, transform .14s ease, color .14s ease, border-color .14s ease;
+}
+.bubble .copy .ic { width: 14px; height: 14px; }
+.msg:hover .bubble .copy { opacity: 1; transform: none; pointer-events: auto; }
+.bubble .copy:hover { color: var(--mint); border-color: var(--mint-deep); background: rgba(47,214,156,0.08); }
+.bubble .copy.copied { color: var(--mint); border-color: var(--mint-deep); background: rgba(47,214,156,0.12); opacity: 1; pointer-events: auto; }
+.bubble .copy.copied .ic { filter: drop-shadow(0 0 5px rgba(47,214,156,0.5)); }
+/* user bubbles are tight on the right edge — nudge the copy button so the avatar-less
+   right alignment doesn't clip it under the scrollbar */
+.msg.me .bubble .copy { right: 4px; }
+
+/* agent (left) — panel surface. \`.msg-inner\` aligns left, gutter takes the rest. */
+.msg.agent { justify-content: flex-start; }
+.msg.agent .bubble { background: var(--panel); color: var(--text); border-color: var(--line); border-top-left-radius: var(--r-sm); }
+
+/* user (right) — mint-tinted, no avatar. Row order is gutter THEN inner so the
+   bubble hugs the right edge and the empty quote area sits on the left. */
+.msg.me { justify-content: flex-end; }
+.msg.me .msg-inner { flex-direction: column; align-items: flex-end; gap: 4px; }
+.msg.me .bubble {
+  background: rgba(47,214,156,0.10); color: #d9f4ea;
+  border-color: var(--mint-deep); border-top-right-radius: var(--r-sm);
+}
+
+/* sent → read tick row under a user bubble */
+.tick {
+  display: flex; align-items: center; gap: 5px; padding-right: 3px;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .5px;
+  color: var(--faint); transition: color .2s ease;
+}
+.tick .ic { width: 13px; height: 13px; }
+.tick .ts { font-family: var(--mono); font-size: 9px; color: var(--line2); }
+.tick.read { color: var(--mint); }
+.tick.read .tk-ic { filter: drop-shadow(0 0 5px rgba(47,214,156,0.5)); }
+
+/* typing indicator — three pulsing dots in an agent bubble shell */
+.typing { display: flex; gap: 10px; align-items: flex-start; align-self: flex-start; animation: fade .25s ease both; }
+.typing .av { width: 26px; height: 26px; font-size: 11px; margin-top: 2px; }
+.typing .dots {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--r); border-top-left-radius: var(--r-sm); padding: 13px 15px;
+}
+.typing .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); display: inline-block; animation: blink 1.3s infinite ease-in-out; }
+.typing .dots i:nth-child(2) { animation-delay: .18s; }
+.typing .dots i:nth-child(3) { animation-delay: .36s; }
+@keyframes blink { 0%,80%,100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+
+/* empty state — centered hint, config-web muted tone */
+.empty {
+  margin: auto; text-align: center; color: var(--muted);
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+.empty .eic { color: var(--mint-deep); opacity: .7; }
+.empty .eic .ic { width: 46px; height: 46px; }
+.empty .et { font-size: 15px; font-weight: 600; color: var(--text); }
+.empty .es { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+
+/* ── Input bar ─────────────────────────────────────────────────────────────*/
+/* the composer is now a vertical region: an optional "replying to" quote chip
+   sits ABOVE the input row. The input row keeps the original flex layout. */
+.composer {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 22px 20px; border-top: 1px solid var(--line);
+  background: linear-gradient(180deg, transparent, rgba(7,11,10,0.7));
+}
+/* the input row: textarea flexes to fill the width, send button beside it.
+   align-items:flex-end so the button bottom-aligns when the textarea grows tall
+   (rather than floating in the vertical centre of a multi-line field). */
+.composer .row-in { display: flex; gap: 11px; align-items: flex-end; }
+
+/* "replying to" quote chip — who said it + a truncated snippet, with a × */
+.quote-chip {
+  display: flex; align-items: stretch; gap: 10px;
+  background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  border-left: 2px solid var(--mint); padding: 8px 10px 8px 12px;
+  animation: fade .18s ease both;
+}
+.quote-chip .qbody { flex: 1; min-width: 0; }
+.quote-chip .qwho {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .5px; text-transform: uppercase;
+  color: var(--mint); display: flex; align-items: center; gap: 6px;
+}
+.quote-chip .qwho .ic { width: 12px; height: 12px; }
+.quote-chip .qsnip {
+  font-size: 12px; color: var(--muted); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.quote-chip .qx {
+  flex: none; align-self: center;
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: none; color: var(--faint); cursor: pointer; transition: all .15s ease;
+}
+.quote-chip .qx .ic { width: 14px; height: 14px; }
+.quote-chip .qx:hover { color: var(--danger); border-color: rgba(255,107,107,0.4); background: rgba(255,107,107,0.08); }
+/* auto-growing message input — a <textarea> modelled on config-web's
+   textarea.inp.auto. flex:1 + min-width:0 lets it fill the full row width
+   (edge-to-edge minus the send button + gap) at every viewport. It starts at one
+   line (rows="1") and JS grows its height with content up to ~6 lines, after which
+   overflow flips to scroll. resize:none kills the native handle. */
+.composer .box {
+  flex: 1; min-width: 0; font-family: var(--sans); font-size: 14px; color: var(--text);
+  background: var(--ink); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 11px 15px; outline: none; transition: border-color .15s, box-shadow .15s, background .15s;
+  line-height: 1.5; resize: none; overflow-y: hidden;
+  display: block; max-height: 160px;       /* cap matches COMPOSER_MAX_H in app.js */
+}
+.composer .box::placeholder { color: var(--faint); }
+.composer .box:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-glow); background: #060a09; }
+.composer .box:disabled { opacity: .5; cursor: not-allowed; }
+
+/* send button — minimalist, on-brand. A compact rounded-square (config-web --r-sm)
+   with a soft mint tint and a mint line-icon; NO heavy filled circle, NO big glow.
+   Reads as a quiet ghost button that warms on hover, matching the .bell/.copy
+   line-icon language. Sized 40px so it bottom-aligns flush with a one-line input. */
+.send {
+  width: 40px; height: 40px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--r-sm); border: 1px solid var(--mint-deep);
+  background: rgba(47,214,156,0.08); color: var(--mint); cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.send .ic { width: 19px; height: 19px; stroke-width: 1.9; }
+.send:hover { background: rgba(47,214,156,0.16); border-color: var(--mint); }
+.send:hover .ic { filter: drop-shadow(0 0 5px rgba(47,214,156,0.5)); }
+.send:disabled { opacity: .35; cursor: default; background: none; border-color: var(--line2); color: var(--muted); }
+.send:disabled .ic { filter: none; }
+
+/* config-web animations */
+@keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* agent-switch transition — VERBATIM feel from config-web's viewIn: a short
+   slide-up + fade. Applied to the chat header and the transcript when a new agent
+   is selected, re-triggered each select (see animateView() in app.js). */
+@keyframes viewIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+.chat-head.view-enter { animation: viewIn .3s cubic-bezier(.2,.8,.2,1) both; }
+.log.view-enter { animation: viewIn .34s cubic-bezier(.2,.8,.2,1) both; }
+.stagger > * { opacity: 0; animation: fade .5s ease forwards; }
+.stagger > *:nth-child(1){animation-delay:.04s}
+.stagger > *:nth-child(2){animation-delay:.10s}
+.stagger > *:nth-child(3){animation-delay:.16s}
+.stagger > *:nth-child(4){animation-delay:.22s}
+.stagger > *:nth-child(5){animation-delay:.28s}
+
+/* ── Responsive — mirrors config-web's 920px collapse ──────────────────────
+   The side nav stays a VERTICAL list at every width — it must NEVER turn into a
+   horizontal \`overflow-x\` strip (that swallowed the two-line rows + truncation).
+   On narrow screens the sidebar simply stacks above the chat as a short,
+   vertically-scrolling list. */
+@media (max-width: 920px) {
+  body { height: auto; min-height: 100vh; }
+  .app { grid-template-columns: 1fr; height: auto; min-height: 100vh; }
+  .sidebar {
+    flex-direction: column; padding: 16px 16px 12px; border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  /* keep it vertical; cap the height so a long roster scrolls instead of pushing
+     the chat off-screen — but NEVER scroll sideways. */
+  .roster { flex-direction: column; overflow-x: hidden; overflow-y: auto; gap: 3px; max-height: 38vh; }
+  .roster-label { padding: 14px 6px 8px; }
+  .agent { width: 100%; flex: none; }
+  .roster-foot { margin-top: 12px; }
+  .main { height: auto; min-height: 60vh; }
+  .log { min-height: 50vh; }
+  /* narrow screens: give the bubble group more of the row; the quote gutter
+     stays but shrinks. The typing shell keeps its own cap. */
+  .msg-inner { max-width: 88%; }
+  .typing { max-width: 92%; }
+}
+`;

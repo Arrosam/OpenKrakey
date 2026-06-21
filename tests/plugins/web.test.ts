@@ -478,15 +478,19 @@ test("web: GET / serves an HTML chat page", async () => {
   }
 });
 
-test("web: the chat page uses Bootstrap Icons (not unicode glyphs) and wires browser notifications", async () => {
+test("web: the chat page uses inline SVG icons (not a CDN or unicode glyphs) and wires browser notifications", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
     const html = await fetch(base(c) + "/").then((r) => r.text());
-    assert.match(html, /bootstrap-icons/, "the Bootstrap Icons stylesheet must be loaded");
-    assert.match(html, /\bbi-send/, "the send control must use a Bootstrap icon (bi-send*)");
-    assert.match(html, /\bbi-check-all\b/, "the read tick must use the bi-check-all icon");
-    assert.match(html, /\bbi-check\b/, "the sent tick must use the bi-check icon");
+    // The cockpit re-skin drops the Bootstrap Icons CDN in favor of inline SVG
+    // line-icons (currentColor, no external stylesheet).
+    assert.ok(
+      !/bootstrap-icons|\bbi-send|\bbi-check\b/.test(html),
+      "the Bootstrap Icons CDN must NOT be used — icons are inline SVG",
+    );
+    assert.match(html, /<svg/, "icons must be inline SVG");
+    assert.match(html, /viewBox="0 0 24 24"/, "inline SVG icons use the 24x24 line-icon convention");
     assert.ok(
       !/&#8593;|&#10003;/.test(html),
       "no raw unicode arrow/check glyphs should remain in the page",
