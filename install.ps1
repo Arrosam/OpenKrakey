@@ -47,22 +47,36 @@ if ($script:Fancy) {
 # Paint TEXT with COLOR (ANSI when fancy, plain otherwise).
 function Paint([string]$color, [string]$text) { "$color$text$($script:cReset)" }
 
-# Banner: a mint KRAKEY wordmark + dim tagline (fancy), or a plain title.
+# Banner: the KRAKEY wordmark, inherited verbatim from the CLI landing page
+# (packages/cli/src/logo.ts) — a vertical gradient (light -> #2FD69C -> deep)
+# when fancy, the plain wordmark otherwise.
 function Write-Banner {
   Write-Host ""
+  $artText = @'
+    d8b                           d8b
+    ?88                           ?88
+     88b                           88b
+     888  d88'  88bd88b d888b8b    888  d88' d8888b?88   d8P
+     888bd8P'   88P'  `d8P' ?88    888bd8P' d8b_,dPd88   88
+    d88888b    d88     88b  ,88b  d88888b   88b    ?8(  d88
+    d88' `?88b,d88'     `?88P'`88bd88' `?88b,`?888P'`?88P'?8b
+                                                          )88
+                                                          ,d8P
+                                                      `?888P'
+'@
+  $art = @($artText -split "`r?`n" | Where-Object { $_ -ne '' })
+  $tag = "        u l t i m a t e   a u t o n o m o u s   a g e n t"
   if ($script:Fancy) {
-    $art = @(
-      " _  __  ____    _    _  __ _____  __   __",
-      "| |/ / |  _ \  / \  | |/ /| ____| \ \ / /",
-      "| ' /  | |_) |/ _ \ | ' / |  _|    \ V / ",
-      "| . \  |  _ </ ___ \| . \ | |___    | |  ",
-      "|_|\_\ |_| \_\_/   \_\_|\_\|_____|   |_|  "
-    )
-    foreach ($line in $art) { Write-Host "$($script:cMint)$($script:cBold)$line$($script:cReset)" }
-    Write-Host "$($script:cDim)$($script:gStar) the ultimate autonomous agent$($script:cReset)"
+    $grad = @("151;235;206","128;230;195","105;225;184","82;221;173","59;216;162","44;202;147","39;178;130","34;155;113","29;131;95","24;107;78")
+    $e = [char]27
+    for ($i = 0; $i -lt $art.Count; $i++) {
+      $code = if ($i -lt $grad.Count) { $grad[$i] } else { $grad[$grad.Count - 1] }
+      Write-Host "$e[38;2;$($code)m$($art[$i])$($script:cReset)"
+    }
+    Write-Host (Paint $script:cMint $tag)
   } else {
-    Write-Host "KRAKEY"
-    Write-Host "the ultimate autonomous agent"
+    foreach ($l in $art) { Write-Host $l }
+    Write-Host $tag
   }
   Write-Host ""
 }

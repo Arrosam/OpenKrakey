@@ -44,23 +44,57 @@ fi
 # paint COLOR TEXT -> TEXT (with ANSI when FANCY, plain otherwise).
 paint() { printf '%s%s%s' "$1" "$2" "$C_RESET"; }
 
-# banner: a mint KRAKEY wordmark + dim tagline (fancy), or a plain title.
+# banner: the KRAKEY wordmark, inherited verbatim from the CLI landing page
+# (packages/cli/src/logo.ts) — rendered as a vertical gradient (light → #2FD69C
+# → deep) when fancy, or the plain wordmark otherwise.
 banner() {
+  printf '\n'
   if [ "$FANCY" = "1" ]; then
-    printf '\n'
-    printf '%s' "$C_MINT$C_BOLD"
-    printf '%s\n' " _  __  ____    _    _  __ _____  __   __"
-    printf '%s\n' "| |/ / |  _ \  / \  | |/ /| ____| \ \ / /"
-    printf '%s\n' "| ' /  | |_) |/ _ \ | ' / |  _|    \ V / "
-    printf '%s\n' "| . \  |  _ </ ___ \| . \ | |___    | |  "
-    printf '%s\n' "|_|\_\ |_| \_\_/   \_\_|\_\|_____|   |_|  "
-    printf '%s' "$C_RESET"
-    printf '%s\n\n' "$C_DIM✦ the ultimate autonomous agent$C_RESET"
+    _i=0
+    while IFS= read -r _ln; do
+      case "$_i" in
+        0) _c='\033[38;2;151;235;206m' ;;
+        1) _c='\033[38;2;128;230;195m' ;;
+        2) _c='\033[38;2;105;225;184m' ;;
+        3) _c='\033[38;2;82;221;173m' ;;
+        4) _c='\033[38;2;59;216;162m' ;;
+        5) _c='\033[38;2;44;202;147m' ;;
+        6) _c='\033[38;2;39;178;130m' ;;
+        7) _c='\033[38;2;34;155;113m' ;;
+        8) _c='\033[38;2;29;131;95m' ;;
+        *) _c='\033[38;2;24;107;78m' ;;
+      esac
+      printf "$_c%s$C_RESET\n" "$_ln"
+      _i=$((_i + 1))
+    done <<'WM'
+    d8b                           d8b
+    ?88                           ?88
+     88b                           88b
+     888  d88'  88bd88b d888b8b    888  d88' d8888b?88   d8P
+     888bd8P'   88P'  `d8P' ?88    888bd8P' d8b_,dPd88   88
+    d88888b    d88     88b  ,88b  d88888b   88b    ?8(  d88
+    d88' `?88b,d88'     `?88P'`88bd88' `?88b,`?888P'`?88P'?8b
+                                                          )88
+                                                          ,d8P
+                                                      `?888P'
+WM
+    printf '%s\n' "$(paint "$C_MINT" '        u l t i m a t e   a u t o n o m o u s   a g e n t')"
   else
-    printf '\n'
-    printf '%s\n' "KRAKEY"
-    printf '%s\n\n' "the ultimate autonomous agent"
+    cat <<'WM'
+    d8b                           d8b
+    ?88                           ?88
+     88b                           88b
+     888  d88'  88bd88b d888b8b    888  d88' d8888b?88   d8P
+     888bd8P'   88P'  `d8P' ?88    888bd8P' d8b_,dPd88   88
+    d88888b    d88     88b  ,88b  d88888b   88b    ?8(  d88
+    d88' `?88b,d88'     `?88P'`88bd88' `?88b,`?888P'`?88P'?8b
+                                                          )88
+                                                          ,d8P
+                                                      `?888P'
+        u l t i m a t e   a u t o n o m o u s   a g e n t
+WM
   fi
+  printf '\n'
 }
 
 # step LABEL CMD...  -> run CMD with a spinner (fancy) or plain markers.
