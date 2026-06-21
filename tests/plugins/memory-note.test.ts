@@ -670,3 +670,184 @@ test("teardown: is idempotent (double teardown does not throw)", async () => {
     await p.teardown();
   }, "second teardown must not throw");
 });
+
+// ===========================================================================
+// 13. REGRESSION — corrected behavior for bugs found in code review.
+//
+// Each test below encodes the FIXED contract: it must FAIL against the current
+// (buggy) implementation and PASS once the fix lands. Nothing here contradicts
+// the existing passing cases above — they extend the same spec.
+//
+// Defaults restated from the file header (used as the fall-back targets):
+//   maxNotes 100; maxNoteChars 600; maxNotesTotalChars 6000.
+//
+// The only observable note surface (as in every test above) is the rendered
+// notebook string; there is no separate note-store object on the fake ctx. So
+// "how many notes are retained" is read by counting rendered note lines, where a
+// real note line carries the `[<id> ★<n>] ...` shape.
+// ===========================================================================
+
+/** A real rendered note line matches `[<id> ★<n>] ...`; ids look like g1/t12/f3. */
+const NOTE_LINE_RE = /\[[a-z]?\d+\s+★\s*\d+\]/g;
+
+/** Count the actual note lines in a rendered notebook string. */
+function countNoteLines(text: string): number {
+  return (text.match(NOTE_LINE_RE) ?? []).length;
+}
+
+// ---------------------------------------------------------------------------
+// 13.1 Config "unset" sentinels (null / "" / false / []) fall back to the
+//      DEFAULT for a numeric key — they must behave EXACTLY like absence, NOT
+//      coerce to 0/1. (Bug: a falsy config value collapsed the limit.)
+// ---------------------------------------------------------------------------
+
+test("regression cfg-sentinel: maxNotes=null falls back to the default cap (100), not 1", async () => {
+  // With a buggy `cfg.maxNotes || 0`-style read, null collapses to a cap of ~1
+  // and two of three notes get evicted. The default cap of 100 keeps all three.
+  const { store, sys } = await setup({ maxNotes: null });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-A", kind: "thought", importance: 1 });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-B", kind: "thought", importance: 3 });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-C", kind: "thought", importance: 5 });
+  const text = await notesText(store);
+  assert.match(text, /SENT-A/, "maxNotes=null must not evict: the least-important note survives");
+  assert.match(text, /SENT-B/, "maxNotes=null must not evict: the mid note survives");
+  assert.match(text, /SENT-C/, "maxNotes=null must not evict: the most-important note survives");
+  assert.equal(countNoteLines(text), 3, "maxNotes=null behaves like the default cap (100): all 3 retained");
+});
+
+test("regression cfg-sentinel: maxNotes=\"\" (empty string) falls back to the default cap (100)", async () => {
+  const { store, sys } = await setup({ maxNotes: "" });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-D", kind: "thought", importance: 1 });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-E", kind: "thought", importance: 3 });
+  await sys.actions.invoke(REMEMBER, { note: "SENT-F", kind: "thought", importance: 5 });
+  const text = await notesText(store);
+  assert.match(text, /SENT-D/, "maxNotes='' must not evict: the least-important note survives");
+  assert.match(text, /SENT-E/, "maxNotes='' must not evict: the mid note survives");
+  assert.match(text, /SENT-F/, "maxNotes='' must not evict: the most-important note survives");
+  assert.equal(countNoteLines(text), 3, "maxNotes='' behaves like the default cap (100): all 3 retained");
+});
+
+test("regression cfg-sentinel: maxNoteChars=null stores a 50-char note INTACT (not truncated to just '…')", async () => {
+  // 50 chars is well under the default 600. A buggy `cfg.maxNoteChars || 0` read
+  // would truncate to 0 chars, leaving only the ellipsis. The default keeps it whole.
+  const content = "z".repeat(50);
+  const { store, sys } = await setup({ maxNoteChars: null });
+  await sys.actions.invoke(REMEMBER, { note: content, kind: "thought" });
+  const text = await notesText(store);
+  assert.match(text, new RegExp(content), "the full 50-char note is rendered under the default char cap");
+  assert.ok(!text.includes("…"), "a 50-char note under the default cap carries no ellipsis (not truncated)");
+});
+
+test("regression cfg-sentinel: maxNotesTotalChars=null renders notes under the default budget (6000)", async () => {
+  // A buggy falsy read collapses the total budget to ~0 and renders zero notes.
+  // The default budget of 6000 easily fits a few short notes.
+  const { store, sys } = await setup({ maxNotesTotalChars: null });
+  await sys.actions.invoke(REMEMBER, { note: "BUDGET-A", kind: "thought", importance: 3 });
+  await sys.actions.invoke(REMEMBER, { note: "BUDGET-B", kind: "finding", importance: 2 });
+  const text = await notesText(store);
+  // At least one real note line (the [<id> ★<n>] ... shape) must render.
+  assert.match(
+    text,
+    /\[[a-z]?\d+\s+★\s*\d+\]/,
+    "with the default total budget, at least one note line must render",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 13.2 The per-note char limit is floored to its schema minimum (1), never 0
+//      or negative. maxNoteChars=0 must resolve to 1, so a note keeps at least
+//      its first character (e.g. "abcdefghij" -> "a…"), never just "…".
+// ---------------------------------------------------------------------------
+
+test("regression char-floor: maxNoteChars=0 floors to 1 — a 10-char note keeps a non-empty prefix", async () => {
+  const { store, sys } = await setup({ maxNoteChars: 0 });
+  await sys.actions.invoke(REMEMBER, { note: "abcdefghij", kind: "thought" });
+  const text = await notesText(store);
+  assert.match(text, /…/, "a truncated note carries an ellipsis");
+  // The stored body must NOT be the empty string followed by an ellipsis.
+  assert.ok(!text.includes("] …"), "the note must keep at least one character, not collapse to just '…'");
+  // After the floor-to-1 fix, the surviving prefix is the first char: "a…".
+  assert.match(text, /a…/, "maxNoteChars floored to 1 keeps the first character ('a…')");
+});
+
+// ---------------------------------------------------------------------------
+// 13.3 importance given as a NON-number — including the falsy "", false, [] —
+//      defaults to 3 (NOT 1). Consistent with the existing "high"/NaN -> 3 cases.
+// ---------------------------------------------------------------------------
+
+test("regression importance: empty-string importance defaults to 3 (not 1)", async () => {
+  const { sys } = await setup({});
+  const res: any = await sys.actions.invoke(REMEMBER, { note: "x", importance: "" as any });
+  assert.equal(res.importance, 3, "importance '' is a non-number — defaults to 3");
+});
+
+test("regression importance: false importance defaults to 3 (not 1)", async () => {
+  const { sys } = await setup({});
+  const res: any = await sys.actions.invoke(REMEMBER, { note: "x", importance: false as any });
+  assert.equal(res.importance, 3, "importance false is a non-number — defaults to 3");
+});
+
+test("regression importance: empty-array importance defaults to 3 (not 1)", async () => {
+  const { sys } = await setup({});
+  const res: any = await sys.actions.invoke(REMEMBER, { note: "x", importance: [] as any });
+  assert.equal(res.importance, 3, "importance [] is a non-number — defaults to 3");
+});
+
+// ---------------------------------------------------------------------------
+// 13.4 load() enforces capacity on the persisted notebook — capacity is applied
+//      WHEN THE STORE LOADS, not only on the next remember. Seed 5 valid notes
+//      via a first instance (which persists a valid notes.json), then reload
+//      under maxNotes=3: at most 3 survive, and they are the most-important.
+// ---------------------------------------------------------------------------
+
+test("regression load-cap: a notebook of 5 reloaded under maxNotes=3 is trimmed to 3 on load (least-important dropped)", async () => {
+  const dataDir = tmpDir();
+
+  // First instance: write 5 valid note records to notes.json (via teardown's persist).
+  const seed = await setup({}, { dataDir });
+  const i1: any = await seed.sys.actions.invoke(REMEMBER, { note: "CAP-1", kind: "thought", importance: 1 });
+  const i2: any = await seed.sys.actions.invoke(REMEMBER, { note: "CAP-2", kind: "thought", importance: 2 });
+  const i3: any = await seed.sys.actions.invoke(REMEMBER, { note: "CAP-3", kind: "thought", importance: 3 });
+  const i4: any = await seed.sys.actions.invoke(REMEMBER, { note: "CAP-4", kind: "thought", importance: 4 });
+  const i5: any = await seed.sys.actions.invoke(REMEMBER, { note: "CAP-5", kind: "thought", importance: 5 });
+  const seedText = await notesText(seed.store);
+  assert.equal(countNoteLines(seedText), 5, "five notes seeded before reload");
+  // notes.json on disk must actually carry the 5 records (proves a valid seed file).
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, "notes.json"), "utf8"));
+  void [i1, i2, i3, i4, i5, onDisk];
+  await seed.p.teardown();
+
+  // Second instance over the SAME dataDir, capped at 3: load must enforce capacity
+  // immediately — BEFORE any remember is invoked. The notebook is read straight
+  // after setup (no remember), so a render of only 3 lines proves load-time capping.
+  const reloaded = await setup({ maxNotes: 3 }, { dataDir });
+  const text = await notesText(reloaded.store);
+  assert.ok(countNoteLines(text) <= 3, "capacity is enforced on load: at most 3 notes survive");
+  assert.equal(countNoteLines(text), 3, "exactly the 3 capacity slots are filled on load");
+  // The 2 least-important (importance 1 and 2) are dropped; the 3 most-important survive.
+  assert.ok(!text.includes("CAP-1"), "the least-important note (importance 1) is dropped on load");
+  assert.ok(!text.includes("CAP-2"), "the second-least-important note (importance 2) is dropped on load");
+  assert.match(text, /CAP-3/, "an importance-3 note survives");
+  assert.match(text, /CAP-4/, "an importance-4 note survives");
+  assert.match(text, /CAP-5/, "an importance-5 note survives");
+});
+
+// ---------------------------------------------------------------------------
+// 13.5 render always shows at least one note — an absurdly small total budget
+//      must still surface one real note line, never collapse to header + "(…
+//      N more notes hidden)" with ZERO notes shown.
+// ---------------------------------------------------------------------------
+
+test("regression render-min: maxNotesTotalChars=1 still renders at least one real note line", async () => {
+  const { store, sys } = await setup({ maxNotesTotalChars: 1 });
+  await sys.actions.invoke(REMEMBER, { note: "MIN-A", kind: "thought", importance: 5 });
+  await sys.actions.invoke(REMEMBER, { note: "MIN-B", kind: "thought", importance: 3 });
+  await sys.actions.invoke(REMEMBER, { note: "MIN-C", kind: "thought", importance: 1 });
+  const text = await notesText(store);
+  // A real note line carries the [<id> ★<n>] ... shape; the header/"hidden" summary does not.
+  assert.match(
+    text,
+    /\[[a-z]?\d+\s+★\s*\d+\]/,
+    "even at a 1-char total budget, at least one actual note line must render (not just header + hidden count)",
+  );
+});

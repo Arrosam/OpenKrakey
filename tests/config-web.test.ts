@@ -136,6 +136,25 @@ test("assembleSchema: plugins is metadata listing AT LEAST the 8 required ids (w
   }
 });
 
+// --- REGRESSION (review finding #3): memory-note is data-carrying ----------
+// memory-note is a per-agent private-data plugin (it persists notes.json under
+// the agent's dataDir and is listed in privatePlugins). PLUGIN_META has no
+// memory-note entry (only a stale `notes` key), so assembleSchema falls back to
+// { id, name } and the config UI cannot flag it as a private/data-carrying
+// plugin. The assembled metadata for `memory-note` MUST be present and carry
+// dataCarrier === true. Fails now; passes once PLUGIN_META gains the entry.
+test("assembleSchema: memory-note metadata is present and flagged dataCarrier:true (regression #3)", async () => {
+  assert.equal(typeof schemaMod.assembleSchema, "function", "assembleSchema not implemented yet");
+  const payload = await schemaMod.assembleSchema({ publicPluginDir: PUBLIC_PLUGIN_DIR });
+  const meta = payload.plugins.find((p: any) => p && p.id === "memory-note");
+  assert.ok(meta, "payload.plugins must include metadata for the 'memory-note' plugin");
+  assert.equal(
+    meta.dataCarrier,
+    true,
+    "memory-note is a per-agent data-carrying plugin and must be flagged dataCarrier:true",
+  );
+});
+
 test("assembleSchema: a bare subdir with no index entry is NOT surfaced as a plugin", async () => {
   assert.equal(typeof schemaMod.assembleSchema, "function", "assembleSchema not implemented yet");
   // A throwaway public_plugin dir: one real plugin (index + schema) and one bare
