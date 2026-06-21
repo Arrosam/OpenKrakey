@@ -8,11 +8,13 @@
     "krakeycode",
     "searxng",
     "browser",
-    "memory-note"
+    "memory-note",
+    "history"
   ],
   "privatePlugins": [
     "web",
-    "memory-note"
+    "memory-note",
+    "history"
   ],
   "config": {
     "persona": {
@@ -32,6 +34,7 @@
       "headless": true,
       "chromePath": null
     },
-    "memory-note": {}
+    "memory-note": {},
+    "history": {}
   }
 }

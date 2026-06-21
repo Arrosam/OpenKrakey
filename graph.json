@@ -32,7 +32,8 @@
         "krakeycode",
         "searxng",
         "browser",
-        "memory-note"
+        "memory-note",
+        "history"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -284,6 +285,19 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/memory-note.md"
+    },
+    "history": {
+      "zone": "plugins",
+      "path": "public_plugin/history",
+      "description": "Per-agent, persisted, compacting tool-use log. AUTO-CAPTURES the bus tool.result event (every tool, all plugins) AND exposes a history.record action other plugins may push richer entries to (it authors nothing on its own). Renders a compacted trail as a `history.log` SYSTEM block (priority 4500) so the agent sees what it has done; persists to history.json under its private dataDir, bounded by maxNotes-style compaction (keep `keepRecent`, drop the rest when over `maxEntries`). On each compaction it DISTILLS a checkpoint note into memory-note — declared dependency: manifest.requires=[\"memory-note.remember\"], so the loader guarantees memory-note loads first. Volatile working buffer that hands durable milestones to [[memory-note]].",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/history.md"
     }
   },
   "contracts": {
