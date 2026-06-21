@@ -1,0 +1,37 @@
+#!/bin/sh
+# krakey - launcher for an OpenKrakey install (macOS / Linux).
+#
+# Resolves the install directory from THIS script's own location (following a
+# symlink, if `krakey` was linked onto your PATH), switches into it so an Agent's
+# `agents/` and `config/` always resolve to this install no matter where you run
+# `krakey` from, then runs the CLI under tsx (the same `node --import tsx` the
+# project uses everywhere).
+#
+# Installed onto your PATH by ./install.sh. You can also run it directly:
+#   ./bin/krakey start
+set -eu
+
+# Follow symlinks to find the script's real path (portable - macOS `readlink`
+# has no -f).
+self=$0
+while [ -h "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *)  self=$(dirname "$self")/$link ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "krakey: Node.js was not found on your PATH (OpenKrakey needs Node.js >= 22)." >&2
+  exit 1
+fi
+if [ ! -d "$root/node_modules/tsx" ]; then
+  echo "krakey: dependencies are not installed in $root" >&2
+  echo "        run:  cd \"$root\" && ./install.sh      (or: npm install)" >&2
+  exit 1
+fi
+
+cd "$root"
+exec node --import tsx "packages/cli/src/bin.ts" "$@"

@@ -1,2 +1,11 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Windows launchers/installers must keep CRLF (cmd.exe mis-parses LF-only files)
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# POSIX shell scripts and the krakey launcher must keep LF
+*.sh text eol=lf
+bin/krakey text eol=lf
