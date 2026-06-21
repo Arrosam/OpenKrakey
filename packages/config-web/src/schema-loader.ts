@@ -53,6 +53,7 @@ const PLUGIN_META: Record<string, PluginMeta> = {
     tagline: "the agent's private long-term notebook",
     dataCarrier: true,
   },
+  history: { id: "history", icon: "clock", name: "History", tagline: "a compacted log of the agent's tool use", dataCarrier: true },
 };
 
 export interface SchemaPayload {
