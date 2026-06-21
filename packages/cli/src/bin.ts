@@ -43,7 +43,10 @@ const consoleBin = fileURLToPath(new URL("../../console/src/bin.ts", import.meta
 
 // The OpenKrakey install root (three levels up from packages/cli/src/bin.ts).
 // Lifecycle state and the install scripts live relative to this, never cwd.
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+// `resolve` strips the URL's trailing separator — critical for the uninstall
+// cleaner, where a trailing `\` would escape the closing quote in the Windows
+// `rmdir /s /q "<root>\"` command and silently break the deletion.
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 
 // Per-install runtime state (PID list + log). Git-ignored; created on demand.
 const STATE_DIR = join(REPO_ROOT, ".krakey");
@@ -291,9 +294,17 @@ switch (parsed.kind) {
     //    Windows). The cleaner's cwd is OUTSIDE REPO_ROOT.
     console.log(`Krakey is removing itself from ${REPO_ROOT}…`);
     if (process.platform === "win32") {
+      // PowerShell, not `cmd /c "… & rmdir …"`: node's cmd arg-quoting mangles
+      // the nested quotes around the path. -LiteralPath with a single-quoted
+      // path keeps backslashes literal and deletes the whole tree reliably.
+      const psPath = REPO_ROOT.replace(/'/g, "''");
       spawn(
-        "cmd",
-        ["/c", `ping 127.0.0.1 -n 3 >nul & rmdir /s /q "${REPO_ROOT}"`],
+        "powershell",
+        [
+          "-NoProfile",
+          "-Command",
+          `Start-Sleep -Seconds 2; Remove-Item -LiteralPath '${psPath}' -Recurse -Force -ErrorAction SilentlyContinue`,
+        ],
         { detached: true, stdio: "ignore", cwd: tmpdir(), windowsHide: true },
       ).unref();
     } else {
