@@ -56,7 +56,7 @@ model, and name the agent:
 ```bash
 krakey setup        # arrow-key wizard in the terminal
 # …or do it in your browser:
-krakey dashboard    # the Config console → http://127.0.0.1:7717/?token=…
+krakey dashboard    # the unified Console → http://127.0.0.1:7716
 ```
 
 Prefer editing files? The wizard just writes JSON you can also hand-edit — copy the templates and
@@ -70,10 +70,13 @@ cp config/agent.default.example.json  config/agent.default.json   # the new-agen
 **4 — Run it**
 
 ```bash
-krakey start        # boots every configured agent (Ctrl+C to stop)
+krakey run          # boots every configured agent in the foreground (Ctrl+C to stop)
+# …or in the background, then stop it later:
+krakey start        # detaches; logs to .krakey/krakey.log
+krakey stop         # stops the background instance(s)
 ```
 
-`krakey start` prints a startup report and a **web-chat URL** with a one-time access token, e.g.
+`krakey run` prints a startup report and a **web-chat URL** with a one-time access token, e.g.
 `http://127.0.0.1:7718/?token=…` — open it and start talking. Each message shows a *sent* → *read*
 status as the agent reads it on its next beat.
 
@@ -81,10 +84,10 @@ status as the agent reads it on its next beat.
 
 | Surface | Start with | Opens at |
 |---|---|---|
-| **Console** — unified shell (Config · Chat · Inspector in one nav bar) | `npm run console` | `http://127.0.0.1:7716` |
-| **Config** — providers, agents, plugins (+ onboarding wizard) | `krakey dashboard` · `npm run config:web` | `http://127.0.0.1:7717` |
-| **Chat** — talk to your agent (the `web-chat` plugin) | `krakey start` | `http://127.0.0.1:7718` |
-| **Inspector** — live, read-only view of the agent's bus | `krakey start` | `http://127.0.0.1:7719` |
+| **Console** — unified shell (Config · Chat · Inspector in one nav bar) | `krakey dashboard` · `npm run console` | `http://127.0.0.1:7716` |
+| **Config** — providers, agents, plugins (+ onboarding wizard) | `npm run config:web` | `http://127.0.0.1:7717` |
+| **Chat** — talk to your agent (the `web-chat` plugin) | `krakey run` · `krakey start` | `http://127.0.0.1:7718` |
+| **Inspector** — live, read-only view of the agent's bus | `krakey run` · `krakey start` | `http://127.0.0.1:7719` |
 
 The Console frames the other three — run config-web and at least one agent for its panels to fill in.
 
@@ -131,27 +134,42 @@ design.
 
 ## The CLI
 
-`krakey` is the single entry point for everything. With no arguments (or `krakey setup`) it opens an
-arrow-key configuration tool — just an editor for the JSON files, which you can also edit by hand.
+`krakey` is the single entry point for everything. With no arguments (or `krakey help`) it prints
+the usage. `krakey setup` opens an arrow-key configuration tool — just an editor for the JSON files,
+which you can also edit by hand.
 
 | Command | Does |
 |---|---|
-| `krakey` · `krakey setup` | Landing menu — Guided setup, Agents, Default settings, AI services |
+| `krakey` · `krakey help` | Show the usage block (every command below) |
+| `krakey setup` | Landing menu — Guided setup, Agents, Default settings, AI services |
 | `krakey agent` | Agents — create and edit agents |
 | `krakey default` | Default settings — the template new agents copy |
 | `krakey providers` | AI services — providers, endpoints, API keys |
-| `krakey start` | Launch the runtime — every configured agent (Ctrl+C to stop) |
-| `krakey dashboard` | Open the Config console web UI (optional port: `krakey dashboard 7717`) |
-| `krakey help` · `krakey version` | Usage · version |
+| `krakey run` | Launch the runtime in the foreground — every configured agent (Ctrl+C to stop) |
+| `krakey start` | Launch the runtime in the background (daemon); logs to `.krakey/krakey.log` |
+| `krakey stop` | Stop the background runtime instance(s) |
+| `krakey dashboard` | Open the unified Console in your browser (optional port: `krakey dashboard 7716`) |
+| `krakey uninstall` | Remove Krakey entirely from this machine (`--yes` to skip the prompt) |
+| `krakey update` | Pull the latest version and re-run the installer |
+| `krakey version` | Print the version |
 
-`start` and `dashboard` simply launch the runtime and the web console as child processes; the same
-work is available as `npm start` and `npm run config:web` if you'd rather not install.
+`run`, `start`, and `dashboard` launch the runtime and the web console as child processes; the same
+work is available as `npm start` and `npm run console` if you'd rather not install.
 
-**Prefer a browser?** `krakey dashboard` serves the same configuration as a local web app — the
-**Config console**. It prints a token-gated URL (`http://127.0.0.1:7717/?token=…`), edits the exact
-same JSON files, and **auto-renders every plugin's settings from the plugin's own schema** (a new
-plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and access-token
-gated, like everything else.
+**Prefer a browser?** `krakey dashboard` opens the **unified Console** at `http://127.0.0.1:7716` —
+one nav bar that frames Config, Chat, and Inspector. The Config surface edits the exact same JSON
+files as `krakey setup` and **auto-renders every plugin's settings from the plugin's own schema** (a
+new plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and
+access-token gated, like everything else.
+
+**Background runtime.** `krakey start` detaches `boot`, records each pid in `.krakey/run.pid`, and
+streams output to `.krakey/krakey.log`; `krakey stop` kills the recorded process tree(s). Prefer to
+watch it live? Use `krakey run` instead and stop it with Ctrl+C.
+
+**Lifecycle.** `krakey update` fast-forwards the checkout (`git pull --ff-only`) and re-runs the
+installer. `krakey uninstall` permanently removes the **entire** install — agents, config, keys,
+`node_modules`, and the source itself — after a typed confirmation (skip it with `--yes`); it cannot
+be undone.
 
 ## Configuration
 
