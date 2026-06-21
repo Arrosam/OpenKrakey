@@ -1,9 +1,9 @@
 /**
- * Plugin: web — the browser chat channel.
+ * Plugin: web-chat — the browser chat channel.
  *
  * A sibling of any other channel behind the same INPUT event seam: a typed browser
  * message becomes `input.message` (and wakes the beat via `clock.fire_now`). OUTPUT is
- * explicit — the agent speaks to this channel ONLY by calling the `web.send_message`
+ * explicit — the agent speaks to this channel ONLY by calling the `web-chat.send_message`
  * tool; the orchestrator dispatches that tool call to this plugin's action, which
  * persists the text and streams it to the browser over SSE. The LLM's raw return
  * (`output.message`) is a private monologue this channel does NOT render. Per message
@@ -17,17 +17,17 @@
  * holds only an opaque per-agent registry { agentId, deliver, sse-clients, store,
  * pending, inFlight } so no Agent can observe another's input or output.
  *
- * Security: the server binds LOOPBACK by default (config.web.host, default
+ * Security: the server binds LOOPBACK by default (config.web-chat.host, default
  * 127.0.0.1 — not all interfaces, so it is not LAN-reachable) and every /api/*
- * route requires a per-process SESSION TOKEN (random, or config.web.token). The
+ * route requires a per-process SESSION TOKEN (random, or config.web-chat.token). The
  * token is printed once with the URL — only the console that ran the program sees
  * it, so a random local process never learns it. GET / serves the page (no
  * secrets) and, when opened with the valid ?token=, sets an HttpOnly cookie so the
  * page's same-origin fetch/SSE authenticate automatically (no token in API URLs).
  *
- * Context: web contributes a `web.guidance` system block (what this channel is and
- * that the agent reaches its user only via web.send_message) plus the `web.conversation`
- * message block (web's own chat history rendered as clean turns).
+ * Context: web-chat contributes a `web-chat.guidance` system block (what this channel is and
+ * that the agent reaches its user only via web-chat.send_message) plus the `web-chat.conversation`
+ * message block (web-chat's own chat history rendered as clean turns).
  *
  * The default export is a PluginFactory — the loader calls it once per Agent; only
  * the hub (a process resource) is module-level. Persistence + the transcript live
@@ -52,33 +52,33 @@ import { TranscriptStore } from "./transcript-store";
 import { windowTranscript } from "./windowing";
 import { WEB_SCHEMA } from "./config-schema";
 
-const DEFAULT_PORT = 7717;
+const DEFAULT_PORT = 7718;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_MAX_TURNS = 60;
 const DEFAULT_MAX_CHARS = 24000;
 
 /** The chat-tool action the orchestrator dispatches when the LLM decides to speak. */
-const SEND_MESSAGE_ACTION = "web.send_message";
+const SEND_MESSAGE_ACTION = "web-chat.send_message";
 
 /**
- * web's CONVERSATION context block — web maintains its OWN chat history (the per-agent
+ * web-chat's CONVERSATION context block — web-chat maintains its OWN chat history (the per-agent
  * transcript it already persists for the browser) and contributes it to the prompt as
  * the conversation. Each stored turn renders as a CLEAN wire message: a user message →
- * {role:"user", name:"web"}, an agent send (web.send_message) → {role:"assistant"}. The
- * LLM's plain monologue is never stored (web records only what the user said and what the
+ * {role:"user", name:"web-chat"}, an agent send (web-chat.send_message) → {role:"assistant"}. The
+ * LLM's plain monologue is never stored (web-chat records only what the user said and what the
  * agent explicitly sent), so the prompt's conversation stays clean — no monologue, no
  * tool-call mechanics.
  *
  * Priority 5000 (median): below the stable system blocks (persona 10000, system-prompt
  * 9000), leaving room for other message-blocks to inject before (>5000) or after (<5000).
  */
-const CONVERSATION_BLOCK_ID = "web.conversation";
+const CONVERSATION_BLOCK_ID = "web-chat.conversation";
 const CONVERSATION_PRIORITY = 5000;
 
 /**
- * web's GUIDANCE context block — a SYSTEM-target block teaching the LLM what THIS
+ * web-chat's GUIDANCE context block — a SYSTEM-target block teaching the LLM what THIS
  * channel is and how to use it: Web Chat is a message channel, and the agent reaches
- * its user ONLY by calling the web.send_message tool. Channel-SPECIFIC by design — the
+ * its user ONLY by calling the web-chat.send_message tool. Channel-SPECIFIC by design — the
  * GENERAL operating model (the private-monologue rule, "act only via tools") lives in
  * the separate `system-prompt` plugin; this block does not restate it.
  *
@@ -86,13 +86,13 @@ const CONVERSATION_PRIORITY = 5000;
  * system-prompt (9000, general model), so the system prompt reads identity → general
  * model → this channel's specifics. Text + priority overridable via config.
  */
-const GUIDANCE_BLOCK_ID = "web.guidance";
+const GUIDANCE_BLOCK_ID = "web-chat.guidance";
 const GUIDANCE_PRIORITY = 8000;
 const DEFAULT_GUIDANCE =
   "You are connected to a human through Web Chat, a message channel. In the " +
-  "conversation, messages tagged `web` are what this user typed to you. To say " +
+  "conversation, messages tagged `web-chat` are what this user typed to you. To say " +
   "anything back to them — an answer, a question, an acknowledgement — you must call " +
-  "the `web.send_message` tool; this channel delivers ONLY what you send through that " +
+  "the `web-chat.send_message` tool; this channel delivers ONLY what you send through that " +
   "tool. Merely thinking a reply does not send it.";
 
 /**
@@ -110,14 +110,14 @@ const createWeb: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "web", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SCHEMA },
+    manifest: { id: "web-chat", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       // Destructure the only ctx members the long-lived closures need, so the rest
       // of ctx (config, dataDir, print, …) can be GC'd once setup() returns instead
       // of being pinned for the agent's lifetime by the closures stored in `regs`.
       // removeBlock is one such member — the teardown thunks in `unsubs` call it to
-      // drop web's context blocks (the guidance + conversation blocks), so we capture
+      // drop web-chat's context blocks (the guidance + conversation blocks), so we capture
       // just it rather than retaining ctx.
       const { events, actions, removeBlock } = ctx;
 
@@ -196,25 +196,25 @@ const createWeb: PluginFactory = (): Plugin => {
         broadcast(r, { type: "output", text });
       };
 
-      // The agent speaks to THIS channel only by explicitly calling web.send_message;
+      // The agent speaks to THIS channel only by explicitly calling web-chat.send_message;
       // the orchestrator dispatches that tool call to this action. (The LLM's plain
-      // return — output.message — is a private monologue web no longer renders.)
+      // return — output.message — is a private monologue web-chat no longer renders.)
       const offSend = actions.register(SEND_MESSAGE_ACTION, async (params: unknown) => {
         const text =
           params && typeof params === "object"
             ? (params as { text?: unknown }).text
             : undefined;
         if (typeof text !== "string" || text.length === 0) {
-          throw new Error("web.send_message: params must be { text: non-empty string }");
+          throw new Error("web-chat.send_message: params must be { text: non-empty string }");
         }
         streamAgentMessage(text);
         return { delivered: true };
       });
 
-      // Declare the chat tool so the LLM can call it. Since web.send_message is now web's
+      // Declare the chat tool so the LLM can call it. Since web-chat.send_message is now web-chat's
       // ONLY path to the browser, the manifest `requires: ["llm.register_tool"]` makes the
       // loader fail the agent LOUDLY if the tool registry (llm-core) isn't loaded/ordered
-      // before web — instead of a misordered config silently muting the agent. The
+      // before web-chat — instead of a misordered config silently muting the agent. The
       // try/catch below is then just defensive (e.g. a malformed-ToolDef rejection).
       const sendTool: ToolDef = {
         name: SEND_MESSAGE_ACTION,
@@ -230,23 +230,23 @@ const createWeb: PluginFactory = (): Plugin => {
       try {
         await actions.invoke("llm.register_tool", sendTool);
       } catch (err) {
-        ctx.log.warn(`web: failed to register the web.send_message tool: ${String(err)}`);
+        ctx.log.warn(`web-chat: failed to register the web-chat.send_message tool: ${String(err)}`);
       }
 
-      // Contribute web's OWN channel guidance as a stable SYSTEM block: what this channel is
-      // and that the agent reaches its user ONLY via the web.send_message tool. Channel-specific;
+      // Contribute web-chat's OWN channel guidance as a stable SYSTEM block: what this channel is
+      // and that the agent reaches its user ONLY via the web-chat.send_message tool. Channel-specific;
       // the general monologue/operating-model rule is the system-prompt plugin's job. Text and
       // priority are config-overridable (cfg.guidance / cfg.guidancePriority).
       ctx.setBlock({
         id: GUIDANCE_BLOCK_ID,
-        // Label = id so the orchestrator wraps it as <web.guidance>…</web.guidance>.
+        // Label = id so the orchestrator wraps it as <web-chat.guidance>…</web-chat.guidance>.
         label: GUIDANCE_BLOCK_ID,
         target: "system",
         priority: cfg.guidancePriority ?? GUIDANCE_PRIORITY,
         render: (): string => cfg.guidance ?? DEFAULT_GUIDANCE,
       });
 
-      // Contribute web's OWN chat history as the prompt's conversation (message-target
+      // Contribute web-chat's OWN chat history as the prompt's conversation (message-target
       // block). render() maps the live transcript to clean wire turns — a user message →
       // {role:"user"} tagged with the channel via `name`, an agent send → {role:"assistant"}
       // — so the model sees the dialogue without the monologue or tool mechanics. Reads
@@ -259,7 +259,7 @@ const createWeb: PluginFactory = (): Plugin => {
           windowTranscript(r.store.list(), maxTurns, maxChars).map((e) =>
             e.role === "agent"
               ? { role: "assistant", content: e.text }
-              : { role: "user", content: e.text, name: "web" },
+              : { role: "user", content: e.text, name: "web-chat" },
           ),
       });
 
@@ -290,7 +290,7 @@ const createWeb: PluginFactory = (): Plugin => {
         }
       });
 
-      // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web's
+      // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web-chat's
       // two context blocks (the guidance + conversation blocks, registered above) via
       // the captured removeBlock.
       unsubs = [
@@ -308,7 +308,7 @@ const createWeb: PluginFactory = (): Plugin => {
     teardown(): void {
       for (const off of unsubs) off();
       unsubs = [];
-      // Note: offSend unregisters the web.send_message ACTION, but the ToolDef stays in
+      // Note: offSend unregisters the web-chat.send_message ACTION, but the ToolDef stays in
       // llm-core's per-Agent registry — there is no llm.unregister_tool, and llm-core
       // clears its whole tool map on its own teardown. The asymmetry is intentional.
       if (reg) {

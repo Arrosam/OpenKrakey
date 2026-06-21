@@ -104,7 +104,7 @@ const PLUGINS = [
   { id: "llm-core",      icon: "cpu",      name: "LLM core",      tagline: "talks to the AI service — required for replies", required: true },
   { id: "persona",       icon: "person",   name: "Persona",       tagline: "the agent's identity / system prompt" },
   { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
-  { id: "web",           icon: "chat",     name: "Web chat",      tagline: "chat with the agent from your browser", dataCarrier: true },
+  { id: "web-chat",      icon: "chat",     name: "Web chat",      tagline: "chat with the agent from your browser", dataCarrier: true },
   { id: "krakeycode",    icon: "code",     name: "Coding tools",  tagline: "read / write files, run shell, list dirs" },
   { id: "searxng",       icon: "search",   name: "Web search",    tagline: "search the web via a SearXNG instance" },
   { id: "browser",       icon: "globe",    name: "Browser",       tagline: "read-only Chrome control — navigate + screenshot" },
@@ -137,8 +137,8 @@ const PLUGIN_SCHEMAS = {
     f({ key: "maxTokens", label: "Max output tokens", control: "number", default: undefined, min: 1, step: 1,
         placeholder: "provider default", help: "Upper bound on the reply length." }),
   ],
-  web: [
-    f({ key: "port", label: "Port", control: "number", default: 7717, min: 1, max: 65535, step: 1,
+  "web-chat": [
+    f({ key: "port", label: "Port", control: "number", default: 7718, min: 1, max: 65535, step: 1,
         help: "The browser chat server binds here." }),
     f({ key: "host", label: "Bind host", control: "text", default: "127.0.0.1", placeholder: "127.0.0.1",
         example: "127.0.0.1 (loopback) · 0.0.0.0 (all interfaces)",
@@ -146,7 +146,7 @@ const PLUGIN_SCHEMAS = {
     f({ key: "token", label: "Session token", control: "secret", default: "",
         help: "Pin a token (≥16 url-safe chars) or leave blank for a fresh random one each run." }),
     f({ key: "guidance", label: "Channel guidance", control: "textarea", default: "",
-        placeholder: "(uses built-in guidance)", help: "Overrides the web.guidance system block text." }),
+        placeholder: "(uses built-in guidance)", help: "Overrides the web-chat.guidance system block text." }),
     f({ key: "guidancePriority", label: "Guidance priority", control: "number", default: 8000, min: 0, step: 100 }),
     f({ key: "conversationMaxTurns", label: "Conversation window — turns", control: "number", default: 60, min: 1, step: 1,
         help: "How many recent turns are fed back to the LLM." }),
@@ -290,35 +290,35 @@ const SEED = {
   default: { name: "AI service" }, // chosen default communicator
   defaultSetting: {
     intervalMs: 30000,
-    plugins: ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
-    privatePlugins: ["web"],
+    plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
+    privatePlugins: ["web-chat"],
     config: {
       persona: { text: "You are Krakey, an autonomous agent. Be concise and helpful." },
-      web: { port: 7717 },
+      "web-chat": { port: 7718 },
     },
   },
   agents: {
     krakey: {
       id: "krakey",
       intervalMs: 30000,
-      plugins: ["llm-core", "persona", "system-prompt", "web", "inspector", "krakeycode"],
-      privatePlugins: ["web"],
+      plugins: ["llm-core", "persona", "system-prompt", "web-chat", "inspector", "krakeycode"],
+      privatePlugins: ["web-chat"],
       config: {
         persona: { text: "You are Krakey, an autonomous agent. Be concise and helpful." },
         "llm-core": { communicator: "oneAPI" },
-        web: { port: 8979 },
+        "web-chat": { port: 8979 },
         inspector: { port: 7788 },
       },
     },
     krakey2: {
       id: "krakey2",
       intervalMs: 30000,
-      plugins: ["llm-core", "persona", "system-prompt", "web", "inspector", "krakeycode"],
-      privatePlugins: ["web"],
+      plugins: ["llm-core", "persona", "system-prompt", "web-chat", "inspector", "krakeycode"],
+      privatePlugins: ["web-chat"],
       config: {
         persona: { text: "You are Krakey, an autonomous agent. Be concise and helpful." },
         "llm-core": { communicator: "oneAPI" },
-        web: { port: 7717 },
+        "web-chat": { port: 7718 },
         inspector: { port: 7788 },
       },
     },

@@ -10,7 +10,7 @@
 export const STYLE = `/* ============================================================================
    OpenKrakey — Web Chat (design mock)
 
-   Re-skin of the real web chat page (public_plugin/web) onto the Config
+   Re-skin of the real web chat page (public_plugin/web-chat) onto the Config
    console's "mission-control cockpit" design system (packages/config-web).
    ONE coherent product: tokens, fonts, icon style, scrollbars, sidebar shell,
    buttons/pills, and the dot-grid + mint-glow backdrop are ported VERBATIM from

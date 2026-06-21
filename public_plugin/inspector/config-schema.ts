@@ -1,7 +1,7 @@
 import type { ConfigSchema } from "../../contracts/plugin";
 
 export const INSPECTOR_SCHEMA: ConfigSchema = [
-  { key: "port", label: "Port", type: "number", default: 7788, min: 1, max: 65535, step: 1, help: "The inspector dashboard server binds here. Default differs from web (7717) to avoid collisions." },
+  { key: "port", label: "Port", type: "number", default: 7788, min: 1, max: 65535, step: 1, help: "The inspector dashboard server binds here. Default differs from web-chat (7718) to avoid collisions." },
   { key: "host", label: "Bind host", type: "string", default: "127.0.0.1", placeholder: "127.0.0.1", help: "Loopback by default." },
   { key: "token", label: "Session token", type: "secret", placeholder: "(random per run)", help: "Pin a fixed token (≥ 16 url-safe chars) or leave blank for a fresh random one each run." },
   { key: "bufferSize", label: "Event buffer size", type: "number", default: 1000, min: 1, step: 1, help: "Ring-buffer length for captured beat records." },

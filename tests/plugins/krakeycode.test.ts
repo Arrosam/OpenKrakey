@@ -672,7 +672,7 @@ test("results fold: an own tool.result (ok:true) yields one user message naming 
 
 test("results fold: a FOREIGN tool.result name is ignored (ring stays empty)", async () => {
   const { store, sys } = await setup({});
-  emitToolResult(sys, { name: "web.send_message", ok: true, data: { delivered: true } });
+  emitToolResult(sys, { name: "web-chat.send_message", ok: true, data: { delivered: true } });
   const msgs = await renderMsgs(resultsBlock(store));
   assert.deepEqual(msgs, [], "foreign tool result does not enter the ring");
 });

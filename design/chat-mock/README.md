@@ -4,7 +4,7 @@ A **static design mock** of the web chat page, re-skinned to match the **Config
 console** (`packages/config-web`) — the "mission-control cockpit" aesthetic.
 **Fake data only.** No backend, no build step, no framework. This exists so a
 human can review the look & feel before any real node work on
-`public_plugin/web`.
+`public_plugin/web-chat`.
 
 ## Run it
 
@@ -135,7 +135,7 @@ in the **same** visual language:
   `cubic-bezier(.2,.8,.2,1)` slide-up/fade, re-triggered each select via a reflow
   restart, mirroring config-web's `animateIn()`). Quick and non-janky.
 
-## Map to the real page (`public_plugin/web`)
+## Map to the real page (`public_plugin/web-chat`)
 
 So the eventual implementation can port faithfully:
 
@@ -180,9 +180,9 @@ Surfaced while studying `page.script.ts` so the re-skin doesn't regress it:
    the old `EventSource` and opens a new one. The mock has no streams, but the
    layout/behavior it depicts must map onto that model.
 
-## Bugs in the real `web` plugin this mock's design must FIX
+## Bugs in the real `web-chat` plugin this mock's design must FIX
 
-Found while reading `public_plugin/web/page.script.ts`. The current page ships
+Found while reading `public_plugin/web-chat/page.script.ts`. The current page ships
 two states that lie to the user; the re-skin's design corrects both.
 
 1. **Connection status always reads "online" — even when the channel is down.**

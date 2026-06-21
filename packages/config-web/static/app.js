@@ -748,7 +748,7 @@ const WZ_STEPS = ["Welcome", "AI service", "Capabilities", "Agent", "Review"];
 const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
-  plugins: ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
+  plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
   agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. Be concise and helpful.", intervalMs: 30000 },
 };
 
@@ -895,7 +895,7 @@ function wzReview(panel) {
 
   const run = el("div", "run-card");
   run.innerHTML = `<div><span class="prompt">$</span> <span class="cmd">npm start</span></div>` +
-    `<span class="cm">→ ✦ Web chat: http://localhost:7717 — open it and talk to "${esc(wz.agent.id)}"</span>`;
+    `<span class="cm">→ ✦ Web chat: http://localhost:7718 — open it and talk to "${esc(wz.agent.id)}"</span>`;
   body.appendChild(run);
   panel.appendChild(body);
 

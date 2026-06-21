@@ -85,7 +85,7 @@ test("default text teaches the monologue/operating model, CHANNEL-AGNOSTIC (no c
   const text = (await renderOf(block)).toLowerCase();
   assert.match(text, /monologue/, "must state the reply-is-a-monologue rule");
   assert.match(text, /\btool/, "must tell the model to call a tool to act");
-  assert.ok(!text.includes("web.send_message"), "must NOT name a specific channel tool (channel-agnostic)");
+  assert.ok(!text.includes("web-chat.send_message"), "must NOT name a specific channel tool (channel-agnostic)");
   assert.ok(!text.includes("web chat"), "must NOT reference a specific channel");
 });
 

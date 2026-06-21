@@ -574,7 +574,7 @@ test("messages: a single message-target block's Message[] becomes llm.request.da
 
   setMessageBlock(orc, "conv", 5000, [
     { role: "system", content: "you are helpful" },
-    { role: "user", content: "weather?", name: "web" },
+    { role: "user", content: "weather?", name: "web-chat" },
     {
       role: "assistant",
       content: "",
@@ -592,7 +592,7 @@ test("messages: a single message-target block's Message[] becomes llm.request.da
     reqs[0].messages,
     [
       { role: "system", content: "you are helpful" },
-      { role: "user", content: "weather?", name: "web" },
+      { role: "user", content: "weather?", name: "web-chat" },
       {
         role: "assistant",
         content: "",
@@ -697,7 +697,7 @@ test("messages: system + message blocks split cleanly (system->context.text, mes
   const reqs = captureRequests(events);
 
   orc.setBlock(block("persona", 100, "I am X"));
-  setMessageBlock(orc, "conv", 5000, [{ role: "user", content: "hi", name: "web" }]);
+  setMessageBlock(orc, "conv", 5000, [{ role: "user", content: "hi", name: "web-chat" }]);
 
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
@@ -708,7 +708,7 @@ test("messages: system + message blocks split cleanly (system->context.text, mes
   assert.ok(!text.includes("hi"), "a message-block's content must NOT leak into context.text");
   assert.deepEqual(
     reqs[0].messages,
-    [{ role: "user", content: "hi", name: "web" }],
+    [{ role: "user", content: "hi", name: "web-chat" }],
     "the message-block's group lands in data.messages, verbatim",
   );
 });

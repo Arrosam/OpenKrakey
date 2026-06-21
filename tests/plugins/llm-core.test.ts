@@ -696,7 +696,7 @@ test("messages: a non-empty event array becomes the chat messages, context.text 
   const com = chatCommunicator({ response: { content: "ok" } });
   const { events } = await setupPlugin(t, { llm: library([com]) });
   const convo: Message[] = [
-    { role: "user", content: "hi", name: "web" },
+    { role: "user", content: "hi", name: "web-chat" },
     { role: "assistant", content: "yo" },
   ];
   events.emit(Events.LLM_REQUEST, llmRequest("1", "SYSTEM-CTX", convo));
@@ -710,7 +710,7 @@ test("messages: a non-empty event array becomes the chat messages, context.text 
   assert.deepEqual(
     com.calls[0].messages,
     [
-      { role: "user", content: "hi", name: "web" },
+      { role: "user", content: "hi", name: "web-chat" },
       { role: "assistant", content: "yo" },
     ],
     "the event's messages are transported verbatim onto the chat request",
@@ -825,7 +825,7 @@ test("messages: event messages + registered tools + temperature + maxTokens all 
   });
   await actions.invoke("llm.register_tool", { name: "t1", description: "d", parameters: { type: "object" } });
   const convo: Message[] = [
-    { role: "user", content: "q", name: "web" },
+    { role: "user", content: "q", name: "web-chat" },
     { role: "assistant", content: "a" },
   ];
   events.emit(Events.LLM_REQUEST, llmRequest("1", "SYS", convo));
@@ -836,7 +836,7 @@ test("messages: event messages + registered tools + temperature + maxTokens all 
   assert.deepEqual(
     req.messages,
     [
-      { role: "user", content: "q", name: "web" },
+      { role: "user", content: "q", name: "web-chat" },
       { role: "assistant", content: "a" },
     ],
     "the event's messages are carried through alongside tools/temp/maxTokens",
@@ -854,7 +854,7 @@ test("messages: success with event messages still emits output.message from the 
   const com = chatCommunicator({ response: { content: "assistant says" } });
   const { events } = await setupPlugin(t, { llm: library([com]) });
   const outs = collect(events, Events.OUTPUT_MESSAGE) as any[];
-  const convo: Message[] = [{ role: "user", content: "hi", name: "web" }];
+  const convo: Message[] = [{ role: "user", content: "hi", name: "web-chat" }];
   events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX", convo));
   await settle();
   assert.equal(outs.length, 1);
@@ -912,7 +912,7 @@ test("request.sent: data.request deep-equals the chat() arg; id matches; carries
     parameters: { type: "object" },
   });
   const convo: Message[] = [
-    { role: "user", content: "q", name: "web" },
+    { role: "user", content: "q", name: "web-chat" },
     { role: "assistant", content: "a" },
   ];
   events.emit(Events.LLM_REQUEST, llmRequest("req-42", "SYS", convo));
@@ -938,7 +938,7 @@ test("request.sent: data.request deep-equals the chat() arg; id matches; carries
   assert.deepEqual(
     req.messages,
     [
-      { role: "user", content: "q", name: "web" },
+      { role: "user", content: "q", name: "web-chat" },
       { role: "assistant", content: "a" },
     ],
     "event messages are mirrored verbatim",

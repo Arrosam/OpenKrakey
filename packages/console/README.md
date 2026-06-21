@@ -41,7 +41,7 @@ iframe — that's expected. The console's own shell still loads.
 | `CONSOLE_PORT`   | `7710`                  | Port to bind (also `argv[2]`; `0` = ephemeral port)      |
 | `CONSOLE_HOST`   | `127.0.0.1`             | Bind host (loopback by default)                          |
 | `CONFIG_WEB_URL` | `http://127.0.0.1:7700` | URL of the **Config** surface (config-web)              |
-| `WEB_CHAT_URL`   | `http://127.0.0.1:7717` | URL of the **Chat** surface (the web chat channel)      |
+| `WEB_CHAT_URL`   | `http://127.0.0.1:7718` | URL of the **Chat** surface (the web chat channel)      |
 | `INSPECTOR_URL`  | `http://127.0.0.1:7788` | URL of the **Inspector** surface                         |
 
 The server injects the three surface URLs into the served `index.html` as

@@ -7,7 +7,7 @@
 > new channels — and so expand what you are able to do. Read this before you build anything.
 >
 > Everything here is exact for this codebase. When in doubt, read the real source with
-> `krakeycode.read_file`: the canonical examples are `public_plugin/web/index.ts` (a tool +
+> `krakeycode.read_file`: the canonical examples are `public_plugin/web-chat/index.ts` (a tool +
 > channel plugin), `public_plugin/krakeycode/index.ts` (the toolkit you are using right now),
 > and `public_plugin/system-prompt/index.ts` (the simplest possible plugin). The single source
 > of truth for the interfaces is the `contracts/` directory.
@@ -106,7 +106,7 @@ export default createMyPlugin;
 Rules:
 - The factory itself must be **side-effect free** — construction is not setup. Do all work in `setup`.
 - Keep **all** mutable state in the factory closure, never at module top level (the one legitimate
-  exception is a true *process* resource like an HTTP server — see `public_plugin/web/hub.ts` — which is
+  exception is a true *process* resource like an HTTP server — see `public_plugin/web-chat/hub.ts` — which is
   module-level and reference-counted; you almost never need this).
 
 ### 2.2 The manifest
@@ -227,7 +227,7 @@ interface ContextBlock {
   joins all system blocks **priority DESC** into the system prompt.
 - `target: "messages"` → `render()` returns a **`Message[]`** group; all message blocks are ordered
   priority DESC and concatenated into the messages array (order *within* a group preserved). **The
-  conversation is just a message block** (the `web` plugin owns one).
+  conversation is just a message block** (the `web-chat` plugin owns one).
 - Every block renders in **isolation**: if your `render` throws or returns the wrong shape, your block
   contributes nothing — it never breaks other blocks or the beat. Still, keep `render` fast and pure; it
   runs every beat.
@@ -235,8 +235,8 @@ interface ContextBlock {
 
 **Priority convention (cache-friendly).** Stable, rarely-changing system blocks go on top so the prompt
 prefix stays constant and the provider's prompt cache hits: `persona` 10000 (identity), `system-prompt`
-9000 (operating model), `web.guidance` 8000, `krakeycode.guidance` 7000. Volatile/message content sits
-lower: `web.conversation` 5000, `krakeycode.results` 4000. Pick a priority that places your block sensibly
+9000 (operating model), `web-chat.guidance` 8000, `krakeycode.guidance` 7000. Volatile/message content sits
+lower: `web-chat.conversation` 5000, `krakeycode.results` 4000. Pick a priority that places your block sensibly
 in that ladder, and make it config-overridable.
 
 ### 3.2 Actions — callable operations (and the seam for tools)
@@ -382,7 +382,7 @@ ctx.setBlock({
 Key choices, and why:
 - **Filter to your own tool names** (`OWN_TOOLS`) — `tool.result` fires for every tool in the Agent.
 - **Render as plain `role:"user"` messages tagged with `name`**, *not* as `role:"tool"` messages. This
-  Agent keeps a *clean* conversation (the `web` plugin records only real user turns + your explicit
+  Agent keeps a *clean* conversation (the `web-chat` plugin records only real user turns + your explicit
   sends — no `tool_use`/`tool_result` pairing). A `role:"tool"` message references a `toolCallId` whose
   matching assistant `tool_use` turn isn't replayed, and providers reject an orphaned tool result. Plain
   tagged user messages always work.
@@ -392,8 +392,8 @@ Key choices, and why:
 ### 4.2 Channels (output to a human) are tools too
 
 If you want to *say something* to a user, that is also a tool. A channel plugin registers a send action
-(e.g. `web.send_message`), declares it as a tool, and its description states it is the only way to reach
-that user. Your monologue is never delivered. See `public_plugin/web/index.ts`.
+(e.g. `web-chat.send_message`), declares it as a tool, and its description states it is the only way to reach
+that user. Your monologue is never delivered. See `public_plugin/web-chat/index.ts`.
 
 ---
 
@@ -456,8 +456,8 @@ Agent config (`agents/<id>/config.json`, or the template `config/agent.default.e
 ```jsonc
 {
   "intervalMs": 30000,
-  "plugins": ["llm-core", "persona", "system-prompt", "web", "krakeycode", "my-plugin"],
-  "privatePlugins": ["web"],               // ids to make independent (copied + isolated data)
+  "plugins": ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode", "my-plugin"],
+  "privatePlugins": ["web-chat"],          // ids to make independent (copied + isolated data)
   "config": {
     "my-plugin": { /* your config slice → arrives as ctx.config */ }
   }

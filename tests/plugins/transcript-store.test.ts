@@ -1,13 +1,13 @@
 /**
- * UNIT edge tests for the `web` plugin's TranscriptStore — the bounded per-agent
- * chat transcript + serialized `chat.jsonl` persistence extracted in web's SRP
- * split (see overviews/nodes/web.md change log 2026-06-15).
+ * UNIT edge tests for the `web-chat` plugin's TranscriptStore — the bounded per-agent
+ * chat transcript + serialized `chat.jsonl` persistence extracted in web-chat's SRP
+ * split (see overviews/nodes/web-chat.md change log 2026-06-15).
  *
- * Contract surface under test (derived ONLY from the web node overview/spec — the
- * documented `TranscriptStore` API and the persistence behavior; NO web
+ * Contract surface under test (derived ONLY from the web-chat node overview/spec — the
+ * documented `TranscriptStore` API and the persistence behavior; NO web-chat
  * implementation internals were read):
  *
- *   import { TranscriptStore, MAX_TRANSCRIPT } from ".../web/transcript-store";
+ *   import { TranscriptStore, MAX_TRANSCRIPT } from ".../web-chat/transcript-store";
  *   - TranscriptStore.load(chatPath): Promise<TranscriptStore>
  *       Loads any prior transcript at `chatPath` from disk (empty if none).
  *   - store.append(entry): void|Promise   // { role, text, id?, status?, at }
@@ -33,7 +33,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { TranscriptStore, MAX_TRANSCRIPT } from "../../public_plugin/web/transcript-store";
+import { TranscriptStore, MAX_TRANSCRIPT } from "../../public_plugin/web-chat/transcript-store";
 
 /** A unique temp `chat.jsonl` path under the OS temp dir (its parent exists). */
 function tempChatPath(): string {

@@ -1,7 +1,7 @@
 /* ============================================================================
    app.js — OpenKrakey web chat, DESIGN MOCK (vanilla JS, fake data).
 
-   This is the real web chat page (public_plugin/web) re-skinned onto the Config
+   This is the real web chat page (public_plugin/web-chat) re-skinned onto the Config
    console's cockpit aesthetic. NO backend: the roster, transcripts, sent/read
    ticks and "heartbeat" replies are all simulated locally so the look & feel can
    be reviewed before any real node work.

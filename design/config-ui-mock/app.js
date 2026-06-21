@@ -593,7 +593,7 @@ const WZ_STEPS = ["Welcome", "AI service", "Capabilities", "Agent", "Review"];
 const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
-  plugins: ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
+  plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
   agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. Be concise and helpful.", intervalMs: 30000 },
 };
 
@@ -770,7 +770,7 @@ function wzReview(panel) {
     const cfg = { persona: { text: wz.agent.persona }, "llm-core": { communicator: svcName } };
     state.agents[wz.agent.id] = {
       id: wz.agent.id, intervalMs: wz.agent.intervalMs,
-      plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((x) => x === "web"), config: cfg,
+      plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((x) => x === "web-chat"), config: cfg,
     };
     toast(`Created agent "${wz.agent.id}"`);
     setView("agents");

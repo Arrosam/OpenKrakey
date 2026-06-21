@@ -47,17 +47,18 @@ an npm script (`npm run cli` · `npm start` · `npm run config:web`) or by runni
 directly: `./bin/krakey <command>`.
 
 `krakey start` prints a startup report and a **Web chat** URL (with a one-time access token), e.g.
-`http://127.0.0.1:7717/?token=…`. Open it and start talking. Each agent has its own chat, and
+`http://127.0.0.1:7718/?token=…`. Open it and start talking. Each agent has its own chat, and
 every message shows a *sent* → *read* status as the agent picks it up on its next beat.
 
 ## What your agent can do
 
-Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads every
-plugin below except `inspector`; add or remove them per agent in its config.
+Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set
+below; `web-chat` and `browser` are loaded as **private** (per-agent) plugins. Add or remove them
+per agent in its config.
 
 | Plugin | Gives the agent | Notes |
 |---|---|---|
-| **web** | A chat window to talk with you — the agent replies by calling `web.send_message`. | Binds to loopback only and is access-token gated. Keeps its own transcript with sent/read status. |
+| **web-chat** | A chat window to talk with you — the agent replies by calling `web-chat.send_message`. | Binds to loopback only and is access-token gated. Keeps its own transcript with sent/read status. |
 | **krakeycode** | Files and shell: `read_file`, `write_file`, `edit_file`, `bash`, `list_dir`. | `local` mode (real paths) or `sandbox` mode (confined to a root + command allowlist). |
 | **searxng** | Web search: `searxng.search`. | Uses your SearXNG instance if set, else a local one, else built-in **public** instances — see [SECURITY.md](SECURITY.md). |
 | **browser** | Read-only Chrome: `navigate`, `read_page`, `list_tabs`, `activate_tab`, `screenshot`. | Drives Chrome over the DevTools Protocol with **zero dependencies**. Never clicks, types, or runs scripts. |
@@ -134,12 +135,12 @@ Two files, both shipped as `.example.json` templates (your live copies are git-i
 
 ```jsonc
 {
-  "intervalMs": 30000,                  // beat period
-  "plugins": ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
-  "privatePlugins": ["web"],            // ids whose data is isolated to this agent
+  "intervalMs": 900000,                 // beat period (15 min)
+  "plugins": ["llm-core", "persona", "system-prompt", "krakeycode"],
+  "privatePlugins": ["web-chat"],       // ids whose data is isolated to this agent
   "config": {
     "persona": { "text": "You are Krakey, an autonomous agent. Be concise and helpful." },
-    "web": { "port": 7717 }
+    "web-chat": { "port": 7718 }
   }
 }
 ```

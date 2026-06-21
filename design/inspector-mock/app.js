@@ -151,7 +151,7 @@ function assembledRequest(persona, userMsg, assistantTurns) {
   const systemBlocks = [
     "[persona · prio 10000]\nYou are Krakey, an autonomous agent running on a heartbeat. Be concise, candid, and act with intent. " + persona,
     "[system-prompt · prio 9000]\nThe current time is " + new Date().toISOString() + ". You wake every 30s; if there is nothing to do, return a short monologue and stop.",
-    "[web.guidance · prio 500]\nWeb search is available via the `web_search` tool. Prefer primary sources. Cite URLs inline. Never fabricate a result you did not fetch.",
+    "[web-chat.guidance · prio 500]\nWeb search is available via the `web_search` tool. Prefer primary sources. Cite URLs inline. Never fabricate a result you did not fetch.",
   ].join("\n\n");
   const messages = [{ role: "user", content: userMsg }];
   for (const t of (assistantTurns || [])) messages.push(t);

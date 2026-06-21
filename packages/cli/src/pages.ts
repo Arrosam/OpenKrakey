@@ -939,9 +939,9 @@ export async function runInteractiveLoop(
       if (err instanceof CliError) {
         const available = await guard(() => cli.listAvailablePlugins(), []);
         // Data-carrying plugins default to independent copies so each agent gets
-        // its own chat history (shared code, private data — R6). web persists the
+        // its own chat history (shared code, private data — R6). web-chat persists the
         // per-agent transcript (the conversation), so it is private-by-default.
-        const privateByDefault = available.filter((p) => p === "web");
+        const privateByDefault = available.filter((p) => p === "web-chat");
         await guard(async () => {
           await cli.writeDefault({
             intervalMs: 30000,
