@@ -148,7 +148,7 @@ which you can also edit by hand.
 | `krakey run` | Launch the runtime in the foreground — every configured agent (Ctrl+C to stop) |
 | `krakey start` | Launch the runtime in the background (daemon); logs to `.krakey/krakey.log` |
 | `krakey stop` | Stop the background runtime instance(s) |
-| `krakey dashboard` | Open the unified Console in your browser (optional port: `krakey dashboard 7716`) |
+| `krakey dashboard` | Open the unified Console in your browser; also launches Config so you can set up Krakey before the runtime is running (optional port: `krakey dashboard 7716`) |
 | `krakey uninstall` | Remove Krakey entirely from this machine (`--yes` to skip the prompt) |
 | `krakey update` | Pull the latest version and re-run the installer |
 | `krakey version` | Print the version |
@@ -157,10 +157,13 @@ which you can also edit by hand.
 work is available as `npm start` and `npm run console` if you'd rather not install.
 
 **Prefer a browser?** `krakey dashboard` opens the **unified Console** at `http://127.0.0.1:7716` —
-one nav bar that frames Config, Chat, and Inspector. The Config surface edits the exact same JSON
-files as `krakey setup` and **auto-renders every plugin's settings from the plugin's own schema** (a
-new plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and
-access-token gated, like everything else.
+one nav bar that frames Config, Chat, and Inspector. It also launches **Config** (port 7717) so the
+Config panel is **usable before the runtime is running** — you can set up Krakey from scratch here.
+The Config surface edits the exact same JSON files as `krakey setup` and **auto-renders every
+plugin's settings from the plugin's own schema** (a new plugin shows up with zero UI work), plus a
+guided onboarding wizard. If no agent is running, `dashboard` prints a warning and the Chat and
+Inspector panels show **"Not connected"** until you `krakey start` (or `krakey run`); Config is
+available either way. Loopback-only and access-token gated, like everything else.
 
 **Background runtime.** `krakey start` detaches `boot`, records each pid in `.krakey/run.pid`, and
 streams output to `.krakey/krakey.log`; `krakey stop` kills the recorded process tree(s). Prefer to

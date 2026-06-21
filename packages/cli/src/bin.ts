@@ -8,6 +8,7 @@
  * only place process.argv / process.cwd() / process.env / fs / spawn are touched.
  */
 import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
   existsSync,
@@ -40,6 +41,7 @@ const pkg = JSON.parse(
 // passed as strings to the child; this worktree need not contain them.
 const bootBin = fileURLToPath(new URL("../../boot/src/index.ts", import.meta.url));
 const consoleBin = fileURLToPath(new URL("../../console/src/bin.ts", import.meta.url));
+const configWebBin = fileURLToPath(new URL("../../config-web/src/bin.ts", import.meta.url));
 
 // The OpenKrakey install root (three levels up from packages/cli/src/bin.ts).
 // Lifecycle state and the install scripts live relative to this, never cwd.
@@ -214,13 +216,90 @@ switch (parsed.kind) {
   }
 
   case "dashboard": {
-    // Start the unified Console (foreground) and open it in the browser. The
-    // console reads its port from CONSOLE_PORT; we mirror it for the URL.
+    // Open the unified Console in the browser. The Console frames three surfaces
+    // (Config 7717 · Chat 7718 · Inspector 7719). We always launch config-web so
+    // the Config panel is usable for first-run setup BEFORE any agent is running;
+    // Chat + Inspector belong to the runtime and only fill in once you `krakey
+    // start`. The Console runs in the foreground (Ctrl+C reaches it); config-web
+    // runs in the background and is torn down when the Console exits.
     const port = parsed.port !== undefined ? parsed.port : DEFAULT_DASHBOARD_PORT;
     const url = `http://127.0.0.1:${port}`;
-    // Give the server ~1.2s to bind before pointing the browser at it.
-    setTimeout(() => openBrowser(url), 1200);
-    spawnChild(consoleBin, [], { ...process.env, CONSOLE_PORT: port });
+
+    // config-web is token-gated; reuse an explicit token if set, else mint one.
+    // The same token is handed to the Console via the Config URL so the embedded
+    // Config panel authenticates against the config-web API.
+    const token = process.env.CONFIG_WEB_TOKEN || randomBytes(24).toString("base64url");
+
+    // Probe whether a runtime is up — Chat (7718) and Inspector (7719) are served
+    // by it. "Running" = the port answers with ANY HTTP response; a refused
+    // connection or timeout rejects. A short timeout keeps `dashboard` snappy.
+    const probe = async (probeUrl: string): Promise<boolean> => {
+      try {
+        await fetch(probeUrl, { signal: AbortSignal.timeout(700) });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const chatUp = await probe("http://127.0.0.1:7718");
+    const inspectorUp = await probe("http://127.0.0.1:7719");
+
+    if (!chatUp && !inspectorUp) {
+      console.log(`krakey: no agent is running — Chat and Inspector will show "Not connected".`);
+      console.log(
+        "        Start one with: krakey start    (you can still set up Krakey from the Config panel below)",
+      );
+    }
+
+    // Launch config-web (7717) in the background so Config is reachable for
+    // pre-run setup. Keep the handle so we can tear it down on exit.
+    const cfg = spawn(process.execPath, ["--import", "tsx", configWebBin], {
+      env: {
+        ...process.env,
+        CONFIG_WEB_PORT: "7717",
+        CONFIG_WEB_HOST: "127.0.0.1",
+        CONFIG_WEB_TOKEN: token,
+      },
+      stdio: "ignore",
+      windowsHide: true,
+    });
+
+    // Tear down config-web when the dashboard goes away — it must not linger.
+    // On Windows a child does NOT die with its parent, so this is required.
+    const stopCfg = (): void => {
+      if (cfg.pid !== undefined) killTree(cfg.pid);
+      else cfg.kill();
+    };
+
+    // Launch the Console (foreground) wired to all three surfaces. The Config URL
+    // carries the token so the embedded Config panel authenticates.
+    const consoleChild = spawn(
+      process.execPath,
+      ["--import", "tsx", consoleBin],
+      {
+        stdio: "inherit",
+        env: {
+          ...process.env,
+          CONSOLE_PORT: port,
+          CONFIG_WEB_URL: "http://127.0.0.1:7717/?token=" + encodeURIComponent(token),
+          WEB_CHAT_URL: "http://127.0.0.1:7718",
+          INSPECTOR_URL: "http://127.0.0.1:7719",
+        },
+      },
+    );
+    process.on("SIGINT", stopCfg);
+    consoleChild.on("error", (err) => {
+      console.error(`krakey: failed to launch ${consoleBin}: ${err.message}`);
+      stopCfg();
+      process.exitCode = 1;
+    });
+    consoleChild.on("close", (code) => {
+      stopCfg();
+      process.exitCode = code ?? 1;
+    });
+
+    // Give the Console ~1.5s to bind before pointing the browser at it.
+    setTimeout(() => openBrowser(url), 1500);
     break;
   }
 
