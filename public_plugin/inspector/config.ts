@@ -14,7 +14,7 @@ import type { PluginContext } from "../../contracts/plugin";
  * inspector never collides with it on a stock config. Single source of truth —
  * the port default belongs to config resolution, not the hub.
  */
-const DEFAULT_PORT = 7788;
+const DEFAULT_PORT = 7719;
 
 /** The fully-resolved, validated inspector configuration. */
 interface InspectorConfig {

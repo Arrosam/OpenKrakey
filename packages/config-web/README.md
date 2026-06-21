@@ -16,7 +16,7 @@ npm run config:web
 Then open the URL printed on startup:
 
 ```
-✦ Config console: http://127.0.0.1:7700/?token=<token>
+✦ Config console: http://127.0.0.1:7717/?token=<token>
 ```
 
 The page plants an HttpOnly session cookie from that token, so once it is open
@@ -26,7 +26,7 @@ its API calls authenticate without a token in the URL.
 
 | Variable           | Default       | Meaning                                        |
 | ------------------ | ------------- | ---------------------------------------------- |
-| `CONFIG_WEB_PORT`  | `7700`        | Port to bind (also `argv[2]`; `0` = ephemeral) |
+| `CONFIG_WEB_PORT`  | `7717`        | Port to bind (also `argv[2]`; `0` = ephemeral) |
 | `CONFIG_WEB_HOST`  | `127.0.0.1`   | Bind host (loopback by default)                |
 | `CONFIG_WEB_TOKEN` | random        | Session token; a fresh random one each run if unset |
 

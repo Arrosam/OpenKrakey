@@ -78,7 +78,7 @@ backend — it renders on its own), so the Config surface embeds it inline as an
 `<iframe src="/config-ui-mock/">`, exactly like Chat and Inspector.
 
 In the **real product** the live Config console runs as **its own app** on a
-loopback origin (`http://127.0.0.1:7700`) with an HTTP API that reads and writes
+loopback origin (`http://127.0.0.1:7717`) with an HTTP API that reads and writes
 your real config files. It would be embedded / cross-linked into this shell the
 same way — opening inline alongside Chat and Inspector behind one unified
 console — which is exactly the layout this mock stands in for.

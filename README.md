@@ -103,14 +103,14 @@ arrow-key configuration tool — just an editor for the JSON files, which you ca
 | `krakey default` | Default settings — the template new agents copy |
 | `krakey providers` | AI services — providers, endpoints, API keys |
 | `krakey start` | Launch the runtime — every configured agent (Ctrl+C to stop) |
-| `krakey dashboard` | Open the Config console web UI (optional port: `krakey dashboard 7700`) |
+| `krakey dashboard` | Open the Config console web UI (optional port: `krakey dashboard 7717`) |
 | `krakey help` · `krakey version` | Usage · version |
 
 `start` and `dashboard` simply launch the runtime and the web console as child processes; the same
 work is available as `npm start` and `npm run config:web` if you'd rather not install.
 
 **Prefer a browser?** `krakey dashboard` serves the same configuration as a local web app — the
-**Config console**. It prints a token-gated URL (`http://127.0.0.1:7700/?token=…`), edits the exact
+**Config console**. It prints a token-gated URL (`http://127.0.0.1:7717/?token=…`), edits the exact
 same JSON files, and **auto-renders every plugin's settings from the plugin's own schema** (a new
 plugin shows up with zero UI work), plus a guided onboarding wizard. Loopback-only and access-token
 gated, like everything else.
