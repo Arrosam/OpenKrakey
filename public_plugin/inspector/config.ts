@@ -10,11 +10,11 @@ import * as crypto from "node:crypto";
 import type { PluginContext } from "../../contracts/plugin";
 
 /**
- * Default loopback port. Deliberately distinct from web's default (7717) so the
+ * Default loopback port. Deliberately distinct from web-chat's default (7718) so the
  * inspector never collides with it on a stock config. Single source of truth —
  * the port default belongs to config resolution, not the hub.
  */
-const DEFAULT_PORT = 7788;
+const DEFAULT_PORT = 7719;
 
 /** The fully-resolved, validated inspector configuration. */
 interface InspectorConfig {

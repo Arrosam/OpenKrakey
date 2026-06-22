@@ -1,18 +1,16 @@
 {
-  "intervalMs": 30000,
+  "intervalMs": 900000,
   "plugins": [
     "llm-core",
     "persona",
     "system-prompt",
-    "web",
     "krakeycode",
     "searxng",
-    "browser",
-    "memory-note",
-    "history"
+    "inspector"
   ],
   "privatePlugins": [
-    "web",
+    "web-chat",
+    "browser",
     "memory-note",
     "history"
   ],
@@ -21,8 +19,8 @@
       "text": "You are Krakey, an autonomous agent. Be concise and helpful."
     },
     "llm-core": {},
-    "web": {
-      "port": 7717
+    "web-chat": {
+      "port": 7718
     },
     "krakeycode": {},
     "searxng": {
@@ -30,8 +28,9 @@
       "localUrl": "http://localhost:8080",
       "usePublicFallback": true
     },
+    "inspector": {},
     "browser": {
-      "headless": true,
+      "headless": false,
       "chromePath": null
     },
     "memory-note": {},

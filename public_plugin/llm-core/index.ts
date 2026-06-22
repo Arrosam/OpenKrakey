@@ -9,7 +9,7 @@
  * assembled request, so observers (the inspector) can show what was actually sent. On
  * success it surfaces the assistant's text as an `output.message` — the monologue HOOK
  * observers (the inspector) watch. Channels do NOT render it; the agent reaches a channel
- * only by explicitly calling that channel's send tool (e.g. web's `web.send_message`).
+ * only by explicitly calling that channel's send tool (e.g. web-chat's `web-chat.send_message`).
  *
  * It doubles as the tool-registration hub via the `llm.register_tool` action: tool
  * plugins declare the L1 `ToolDef`s that ride along on every chat request. The core

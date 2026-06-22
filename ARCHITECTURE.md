@@ -200,11 +200,11 @@ the code location**.
   (default) concatenates into the system prompt; `messages` renders a `Message[]` group into the
   messages array — both ordered by `priority` (larger → earlier; within a `messages` group, order
   preserved). **The conversation is not a separate mechanism — it is simply a `messages` block:**
-  the `web` channel renders its own chat log as a conversation fed to the LLM. **Convention:**
+  the `web-chat` channel renders its own chat log as a conversation fed to the LLM. **Convention:**
   give *stable* system blocks (the `persona` identity, the `system-prompt` operating model, the
-  `web.guidance` channel usage) **high priority on top**, so a stable prefix improves prompt-cache
+  `web-chat.guidance` channel usage) **high priority on top**, so a stable prefix improves prompt-cache
   hit rates; give volatile content like the conversation a lower priority (persona 10000,
-  system-prompt 9000, web.guidance 8000, web.conversation 5000).
+  system-prompt 9000, web-chat.guidance 8000, web-chat.conversation 5000).
 
 In configuration: `plugins: string[]` (public plugins to load); `privatePlugins?: string[]` (those
 to make independent, copied in at build time). Plugins already present in the private folder are
@@ -240,7 +240,7 @@ OpenKrakey/
 ├─ packages/           # module implementations
 │   agent_instance · boot · cli · clock · event-system · llm-gateway · loader · orchestrator
 ├─ public_plugin/<id>/ # shared plugins
-│   llm-core · persona · system-prompt · web · krakeycode · searxng · browser · inspector
+│   llm-core · persona · system-prompt · web-chat · krakeycode · searxng · browser · inspector
 ├─ shared/             # cross-cutting helpers (actions, config, errors, http-auth, logging, theme)
 ├─ config/             # *.example.json templates (llm, agent.default)
 ├─ tests/              # contract-derived edge tests (run via tsx)
@@ -302,8 +302,8 @@ envelopes.
   plugins.
 - **Phase 1** — Example plugins (`persona`, the identity block; `system-prompt`, the operating
   model block (the monologue rule + basic usage, channel-agnostic); `llm-core`, the LLM
-  round-trip + `llm.register_tool`; `web`, the browser channel — the `web.send_message` tool +
-  `web.guidance` usage block + `web.conversation` block, maintaining its own chat log;
+  round-trip + `llm.register_tool`; `web-chat`, the browser channel — the `web-chat.send_message` tool +
+  `web-chat.guidance` usage block + `web-chat.conversation` block, maintaining its own chat log;
   `inspector`, the debugging panel) → conversation, with memory.
 - **Phase 2** — The cli configuration tool (logo + `agent` / `default` / `providers` management).
 - **Phase 3** — Dependency-graph visualization (rebuilt from KrakeyBot) and self-extension via

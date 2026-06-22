@@ -24,7 +24,7 @@ import type { ConfigField, ConfigSchema } from "../../contracts/plugin";
 import { PERSONA_SCHEMA } from "../../public_plugin/persona/config-schema";
 import { SYSTEM_PROMPT_SCHEMA } from "../../public_plugin/system-prompt/config-schema";
 import { LLM_CORE_SCHEMA } from "../../public_plugin/llm-core/config-schema";
-import { WEB_SCHEMA } from "../../public_plugin/web/config-schema";
+import { WEB_SCHEMA } from "../../public_plugin/web-chat/config-schema";
 import { INSPECTOR_SCHEMA } from "../../public_plugin/inspector/config-schema";
 import { KRAKEYCODE_SCHEMA } from "../../public_plugin/krakeycode/config-schema";
 import { SEARXNG_SCHEMA } from "../../public_plugin/searxng/config-schema";
@@ -195,10 +195,10 @@ test("llm-core: schema is contract-valid and covers exactly its three keys", () 
 });
 
 // ===========================================================================
-// 4. web — keys: port, host, token, guidance, guidancePriority,
+// 4. web-chat — keys: port, host, token, guidance, guidancePriority,
 //                conversationMaxTurns, conversationMaxChars
 // ===========================================================================
-test("web: schema is contract-valid and covers exactly its seven keys", () => {
+test("web-chat: schema is contract-valid and covers exactly its seven keys", () => {
   assertValidConfigSchema(WEB_SCHEMA, "WEB_SCHEMA");
   assertKeysExactly(
     WEB_SCHEMA as ConfigSchema,
@@ -215,9 +215,9 @@ test("web: schema is contract-valid and covers exactly its seven keys", () => {
   );
 });
 
-test("web: token is a secret field (masked in UIs)", () => {
+test("web-chat: token is a secret field (masked in UIs)", () => {
   const f = field(WEB_SCHEMA as ConfigSchema, "token", "WEB_SCHEMA");
-  assert.equal(f.type, "secret", "web.token must be type 'secret'");
+  assert.equal(f.type, "secret", "web-chat.token must be type 'secret'");
 });
 
 // ===========================================================================

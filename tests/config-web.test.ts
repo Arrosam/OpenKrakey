@@ -45,7 +45,7 @@ const REQUIRED_PLUGIN_IDS = [
   "persona",
   "system-prompt",
   "llm-core",
-  "web",
+  "web-chat",
   "inspector",
   "krakeycode",
   "searxng",
@@ -368,7 +368,7 @@ test("server: GET /api/agents/missing?token -> 404", async () => {
 // --- B6: PUT an agent persists; a follow-up GET reflects the change ---------
 test("server: PUT /api/agents/krakey?token persists; a subsequent GET reflects it (state transition)", async () => {
   await withServer(async (h, tc) => {
-    const updated = { id: "krakey", intervalMs: 5000, plugins: ["persona", "web"] };
+    const updated = { id: "krakey", intervalMs: 5000, plugins: ["persona", "web-chat"] };
     const put = await fetch(api(h, "/api/agents/krakey"), {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -381,7 +381,7 @@ test("server: PUT /api/agents/krakey?token persists; a subsequent GET reflects i
     assert.equal(get.status, 200);
     const def = (await get.json()) as { intervalMs: number; plugins: string[] };
     assert.equal(def.intervalMs, 5000, "the new intervalMs is read back");
-    assert.deepEqual(def.plugins, ["persona", "web"], "the new plugin list is read back");
+    assert.deepEqual(def.plugins, ["persona", "web-chat"], "the new plugin list is read back");
 
     // ...and PERSISTED to disk (the file the cli would also read).
     const onDisk = JSON.parse(

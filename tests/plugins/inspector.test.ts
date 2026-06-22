@@ -199,7 +199,7 @@ rl.on("line", async (line) => {
         data: {
           request: {
             system: "SYS",
-            messages: [{ role: "user", content: "hi", name: "web" }],
+            messages: [{ role: "user", content: "hi", name: "web-chat" }],
             tools: [{ name: "time.now" }],
             temperature: 0.7,
           },

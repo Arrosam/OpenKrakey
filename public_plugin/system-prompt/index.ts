@@ -8,7 +8,7 @@
  * description says what it does + where its output goes); an idle beat is just thinking.
  *
  * It is CHANNEL-AGNOSTIC by design — it never names a specific channel's send tool
- * (e.g. web.send_message). A channel teaches its OWN send path via that tool's
+ * (e.g. web-chat.send_message). A channel teaches its OWN send path via that tool's
  * description; this block teaches only the general model. Identity lives in `persona`;
  * this is operation. Like persona it owns no events/actions — just the block.
  *

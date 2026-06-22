@@ -29,7 +29,7 @@ secrets into the file. Your live `config/llm.json` is git-ignored.
 
 ### Treat inbound channel input as untrusted
 
-A channel plugin (e.g. `web`) relays messages from outside the process. Treat that text as
+A channel plugin (e.g. `web-chat`) relays messages from outside the process. Treat that text as
 **untrusted input**: it may attempt prompt injection to make the Agent misuse a tool. Tool
 plugins should validate their parameters and fail safely; the `system-prompt` plugin's
 monologue rule keeps the model's plain output from acting on its own — only an explicit tool call

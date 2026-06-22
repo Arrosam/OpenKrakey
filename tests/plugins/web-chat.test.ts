@@ -1,8 +1,8 @@
 /**
- * Black-box EDGE tests for the `web` plugin (public plugin) — the browser chat channel.
+ * Black-box EDGE tests for the `web-chat` plugin (public plugin) — the browser chat channel.
  *
  * Contract surface under test (derived ONLY from contracts/plugin + shared/actions
- * + overviews/nodes/web.md — NO implementation read; the module may not exist yet,
+ * + overviews/nodes/web-chat.md — NO implementation read; the module may not exist yet,
  * in which case every scenario fails on a clean assertion):
  *
  *   A `Plugin` = { manifest:{id,version}, setup(ctx): void|Promise, teardown?() }.
@@ -15,7 +15,7 @@
  *         (channel "web", meta.msgId=id) + clock.fire_now on THAT agent's bus.
  *         empty text -> 400; unknown id -> 404.
  *     - GET  /api/agents/:id/stream    -> SSE; first event { type:"output", text:<greeting> }
- *         then { type:"output", text } per web.send_message tool call dispatched to that
+ *         then { type:"output", text } per web-chat.send_message tool call dispatched to that
  *         agent, and { type:"status", id, status:"sent"|"read" } per message lifecycle. unknown id -> 404.
  *   sent = appended to the queue (POST). read = processed: flipped when llm.return
  *   fires on that agent's bus. R6: an agent's stream carries ONLY its own events.
@@ -24,7 +24,7 @@
  * Driven END-TO-END in a CHILD process: the child builds N per-Agent instances
  * sharing the hub on an EPHEMERAL port (first agent config.port=0), reports the
  * bound port, observes each agent's bus (GOT_INPUT/FIRED), and runs a stdin command
- * loop (out/raw/return/down/quit) so the parent can invoke web.send_message / emit llm.return on
+ * loop (out/raw/return/down/quit) so the parent can invoke web-chat.send_message / emit llm.return on
  * a chosen agent's bus while driving the REAL server over HTTP (fetch + SSE).
  */
 import { test } from "node:test";
@@ -41,11 +41,11 @@ const EVENT_SYSTEM_URL = pathToFileURL(
   path.resolve(REPO, "packages", "event-system", "src", "index.ts"),
 ).href;
 const PLUGIN_URL = pathToFileURL(
-  path.resolve(REPO, "public_plugin", "web", "index.ts"),
+  path.resolve(REPO, "public_plugin", "web-chat", "index.ts"),
 ).href;
 
 /** The chat-tool action the agent invokes to speak to the web channel. */
-const SEND_ACTION = "web.send_message";
+const SEND_ACTION = "web-chat.send_message";
 
 let TMP: string;
 test.before(() => {
@@ -63,7 +63,7 @@ test.after(() => {
 // Child harness: builds N web-plugin instances sharing the module hub, reports
 // the bound port (PORT:<n>), echoes each agent's input.message (GOT_INPUT:<id>:<json>)
 // and fire_now (FIRED:<id>), and runs a stdin command loop:
-//   out <id> <text>   -> invoke web.send_message{text} (the agent's explicit send) on <id>'s bus
+//   out <id> <text>   -> invoke web-chat.send_message{text} (the agent's explicit send) on <id>'s bus
 //   raw <id> <text>   -> emit a bare output.message{text} (the monologue hook; web ignores it)
 //   req <id> <reqId>  -> emit llm.request{id:reqId} on <id>'s bus (a beat's request)
 //   ret <id> <reqId>  -> emit llm.return{id:reqId} on <id>'s bus (that request's return)
@@ -159,7 +159,7 @@ rl.on("line", async (line) => {
     const text = sp2 === -1 ? "" : rest.slice(sp2 + 1);
     if (op === "out") {
       // The agent speaks ONLY by invoking its explicit chat tool — the orchestrator
-      // dispatches a web.send_message tool call to this action on the agent's bus.
+      // dispatches a web-chat.send_message tool call to this action on the agent's bus.
       // Surface (don't swallow) a send error so a real failure isn't an opaque timeout.
       instances[id] &&
         instances[id].sys.actions
@@ -231,11 +231,11 @@ async function startChild(
       WEB_AGENTS: agents.join(","),
       WEB_DATADIR: dataDir,
       // Forward a CONFIGURED token only when the caller asked for one (so the
-      // child sets config.web.token). Unset by default → child omits it → the
+      // child sets config.web-chat.token). Unset by default → child omits it → the
       // server mints a random token, exactly as every existing test expects.
       ...(opts.token !== undefined ? { WEB_TOKEN: opts.token } : {}),
       // Forward a CONFIGURED guidance text/priority only when asked (so the child
-      // sets config.web.guidance / config.web.guidancePriority). Unset by default
+      // sets config.web-chat.guidance / config.web-chat.guidancePriority). Unset by default
       // → child omits them → web uses its default guidance text + priority,
       // exactly as every existing caller expects.
       ...(opts.guidance !== undefined ? { WEB_GUIDANCE: opts.guidance } : {}),
@@ -341,7 +341,7 @@ async function startChild(
 }
 
 function assertUp(c: Child): void {
-  assert.ok(!c.notImplemented, "web plugin not implemented yet: public_plugin/web/index.ts missing or no setup()");
+  assert.ok(!c.notImplemented, "web plugin not implemented yet: public_plugin/web-chat/index.ts missing or no setup()");
   assert.ok(c.port > 0, "the hub must bind a port and print its URL (got port " + c.port + ")");
 }
 
@@ -430,7 +430,7 @@ async function probe(
 // Scenario 1 — GET /api/agents lists the online agents
 // ===========================================================================
 
-test("web: GET /api/agents lists every registered agent", async () => {
+test("web-chat: GET /api/agents lists every registered agent", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -443,7 +443,7 @@ test("web: GET /api/agents lists every registered agent", async () => {
   }
 });
 
-test("web: the server URL is announced DURING setup (in the agent's startup block), not asynchronously after", async () => {
+test("web-chat: the server URL is announced DURING setup (in the agent's startup block), not asynchronously after", async () => {
   // Regression: the URL must print while setup() runs (so the startup report
   // shows it indented under the agent), NOT from an async listen callback that
   // fires after setup returns and after the run summary.
@@ -464,7 +464,7 @@ test("web: the server URL is announced DURING setup (in the agent's startup bloc
   }
 });
 
-test("web: GET / serves an HTML chat page", async () => {
+test("web-chat: GET / serves an HTML chat page", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -478,15 +478,19 @@ test("web: GET / serves an HTML chat page", async () => {
   }
 });
 
-test("web: the chat page uses Bootstrap Icons (not unicode glyphs) and wires browser notifications", async () => {
+test("web-chat: the chat page uses inline SVG icons (not a CDN or unicode glyphs) and wires browser notifications", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
     const html = await fetch(base(c) + "/").then((r) => r.text());
-    assert.match(html, /bootstrap-icons/, "the Bootstrap Icons stylesheet must be loaded");
-    assert.match(html, /\bbi-send/, "the send control must use a Bootstrap icon (bi-send*)");
-    assert.match(html, /\bbi-check-all\b/, "the read tick must use the bi-check-all icon");
-    assert.match(html, /\bbi-check\b/, "the sent tick must use the bi-check icon");
+    // The cockpit re-skin drops the Bootstrap Icons CDN in favor of inline SVG
+    // line-icons (currentColor, no external stylesheet).
+    assert.ok(
+      !/bootstrap-icons|\bbi-send|\bbi-check\b/.test(html),
+      "the Bootstrap Icons CDN must NOT be used — icons are inline SVG",
+    );
+    assert.match(html, /<svg/, "icons must be inline SVG");
+    assert.match(html, /viewBox="0 0 24 24"/, "inline SVG icons use the 24x24 line-icon convention");
     assert.ok(
       !/&#8593;|&#10003;/.test(html),
       "no raw unicode arrow/check glyphs should remain in the page",
@@ -502,7 +506,7 @@ test("web: the chat page uses Bootstrap Icons (not unicode glyphs) and wires bro
 // agent's bus (not another's), and returns { id, status:"sent" }
 // ===========================================================================
 
-test("web: POST /api/agents/:id/message emits input.message + fire_now on THAT agent only", async () => {
+test("web-chat: POST /api/agents/:id/message emits input.message + fire_now on THAT agent only", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -531,7 +535,7 @@ test("web: POST /api/agents/:id/message emits input.message + fire_now on THAT a
   }
 });
 
-test("web: POST to an unknown agent id -> 404", async () => {
+test("web-chat: POST to an unknown agent id -> 404", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -546,7 +550,7 @@ test("web: POST to an unknown agent id -> 404", async () => {
   }
 });
 
-test("web: POST with empty text -> 400 (nothing enqueued)", async () => {
+test("web-chat: POST with empty text -> 400 (nothing enqueued)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -568,7 +572,7 @@ test("web: POST with empty text -> 400 (nothing enqueued)", async () => {
 // agent's stream carries ONLY its own output (R6 isolation)
 // ===========================================================================
 
-test("web: GET /api/agents/:id/stream greets on connect then streams that agent's output", async () => {
+test("web-chat: GET /api/agents/:id/stream greets on connect then streams that agent's output", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -586,7 +590,7 @@ test("web: GET /api/agents/:id/stream greets on connect then streams that agent'
   }
 });
 
-test("web: an agent's stream does NOT receive another agent's output (R6)", async () => {
+test("web-chat: an agent's stream does NOT receive another agent's output (R6)", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -606,7 +610,7 @@ test("web: an agent's stream does NOT receive another agent's output (R6)", asyn
   }
 });
 
-test("web: SSE to an unknown agent id -> 404", async () => {
+test("web-chat: SSE to an unknown agent id -> 404", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -619,11 +623,11 @@ test("web: SSE to an unknown agent id -> 404", async () => {
 
 // ===========================================================================
 // Scenario 3b — monologue decoupling + chat-tool registration
-//   web renders to the browser ONLY via the explicit web.send_message tool; a bare
+//   web renders to the browser ONLY via the explicit web-chat.send_message tool; a bare
 //   output.message (the LLM monologue hook llm-core still emits) must be IGNORED.
 // ===========================================================================
 
-test("web: a bare output.message (the LLM monologue) is NOT streamed to the browser", async () => {
+test("web-chat: a bare output.message (the LLM monologue) is NOT streamed to the browser", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -638,11 +642,11 @@ test("web: a bare output.message (the LLM monologue) is NOT streamed to the brow
       "a bare output.message must NOT reach the browser stream (web no longer renders it)",
     );
 
-    // ...but an explicit web.send_message DOES reach the stream.
+    // ...but an explicit web-chat.send_message DOES reach the stream.
     c.send("out alice REAL-SEND");
     assert.ok(
       await waitEvents(a.events, (e) => e.some((x) => x.type === "output" && x.text === "REAL-SEND")),
-      "an explicit web.send_message must reach the browser stream",
+      "an explicit web-chat.send_message must reach the browser stream",
     );
     a.close();
   } finally {
@@ -650,7 +654,7 @@ test("web: a bare output.message (the LLM monologue) is NOT streamed to the brow
   }
 });
 
-test("web: registers a 'web.send_message' chat tool (ToolDef with a string text param)", async () => {
+test("web-chat: registers a 'web-chat.send_message' chat tool (ToolDef with a string text param)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -660,7 +664,7 @@ test("web: registers a 'web.send_message' chat tool (ToolDef with a string text 
     );
     const line = c.lines.find((l) => l.startsWith("TOOL_REGISTERED:alice:"))!;
     const def = JSON.parse(line.slice("TOOL_REGISTERED:alice:".length));
-    assert.equal(def.name, "web.send_message", "the tool is named web.send_message");
+    assert.equal(def.name, "web-chat.send_message", "the tool is named web-chat.send_message");
     assert.ok(
       typeof def.description === "string" && def.description.length > 0,
       "the tool carries a description for the LLM",
@@ -675,7 +679,7 @@ test("web: registers a 'web.send_message' chat tool (ToolDef with a string text 
   }
 });
 
-test("web: contributes a 'web.conversation' messages-block rendering its transcript as clean turns", async () => {
+test("web-chat: contributes a 'web-chat.conversation' messages-block rendering its transcript as clean turns", async () => {
   // Web owns its chat history: it persists the dialogue (user messages + agent sends)
   // and contributes it to the prompt as a message-target block. render() maps the
   // transcript to CLEAN wire turns — user -> {role:user,name:web}, agent send ->
@@ -684,13 +688,13 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
   try {
     assertUp(c);
     const prefix = "BLOCK_SET:alice:";
-    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.conversation"');
-    assert.ok(await c.waitFor((ls) => ls.some(isConvo)), "web must register a web.conversation block");
+    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web-chat.conversation"');
+    assert.ok(await c.waitFor((ls) => ls.some(isConvo)), "web must register a web-chat.conversation block");
     const blk = JSON.parse(c.lines.find(isConvo)!.slice(prefix.length));
     assert.equal(blk.target, "messages", "the conversation block targets the messages array");
     assert.equal(blk.priority, 5000, "median priority 5000 (other message-blocks can sit before or after)");
 
-    // Populate the transcript: a user message (POST) and an agent send (web.send_message).
+    // Populate the transcript: a user message (POST) and an agent send (web-chat.send_message).
     const res = await fetch(api(c, "/api/agents/alice/message"), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -701,17 +705,17 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
     await new Promise((r) => setTimeout(r, 250)); // let the agent send append to the transcript
 
     // Render the block — it must yield exactly the two clean turns, in order.
-    c.send("render alice web.conversation");
+    c.send("render alice web-chat.conversation");
     assert.ok(
-      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web.conversation:"))),
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web-chat.conversation:"))),
       "the conversation block must render its messages",
     );
-    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web.conversation:"))!;
-    const msgs = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web.conversation:".length));
+    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web-chat.conversation:"))!;
+    const msgs = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web-chat.conversation:".length));
     assert.deepEqual(
       msgs,
       [
-        { role: "user", content: "hi there", name: "web" },
+        { role: "user", content: "hi there", name: "web-chat" },
         { role: "assistant", content: "hello back" },
       ],
       "user -> {role:user,name:web}; agent send -> {role:assistant}; nothing else",
@@ -721,7 +725,7 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
     c.send("down alice");
     assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
     assert.ok(
-      c.lines.includes("BLOCK_REMOVED:alice:web.conversation"),
+      c.lines.includes("BLOCK_REMOVED:alice:web-chat.conversation"),
       "teardown must remove the conversation block",
     );
   } finally {
@@ -730,23 +734,23 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
 });
 
 // ===========================================================================
-// Scenario 3c — SYSTEM-target 'web.guidance' block (RED until `web` adds it)
+// Scenario 3c — SYSTEM-target 'web-chat.guidance' block (RED until `web` adds it)
 // ---------------------------------------------------------------------------
 // Surface under test is derived ONLY from the pinned contract for this feature
 // — NO implementation was read; the block does not exist yet, so every scenario
 // here fails on a CLEAN assertion (assertUp still passes: the plugin binds and
-// registers its existing surface — only the new web.guidance block is missing).
+// registers its existing surface — only the new web-chat.guidance block is missing).
 //
-//   IN ADDITION to its existing web.conversation messages-block, web contributes
+//   IN ADDITION to its existing web-chat.conversation messages-block, web contributes
 //   a SECOND context block — a SYSTEM-target block teaching the LLM that Web Chat
-//   is a message channel reached only via the web.send_message tool:
-//     - id    === "web.guidance"
-//     - label === "web.guidance"  (orchestrator wraps it <web.guidance>…</web.guidance>)
+//   is a message channel reached only via the web-chat.send_message tool:
+//     - id    === "web-chat.guidance"
+//     - label === "web-chat.guidance"  (orchestrator wraps it <web-chat.guidance>…</web-chat.guidance>)
 //     - priority === 8000 (default)
 //     - SYSTEM block: target is "system" (or undefined, the default) — never "messages"
-//     - render() -> a non-empty STRING naming the send tool (/web\.send_message/)
+//     - render() -> a non-empty STRING naming the send tool (/web-chat\.send_message/)
 //       and framing Web Chat as a channel (/channel/i)
-//   Teardown removes it (BLOCK_REMOVED:<agent>:web.guidance). It is DISTINCT from
+//   Teardown removes it (BLOCK_REMOVED:<agent>:web-chat.guidance). It is DISTINCT from
 //   the conversation block (different id + different target). An operator may
 //   override the text + priority via config keys `guidance` / `guidancePriority`.
 //
@@ -760,19 +764,19 @@ test("web: contributes a 'web.conversation' messages-block rendering its transcr
 // ===========================================================================
 
 /** A regex pinning the guidance text: it names the send tool. */
-const GUIDANCE_NAMES_SEND_TOOL = /web\.send_message/;
+const GUIDANCE_NAMES_SEND_TOOL = /web-chat\.send_message/;
 /** A regex pinning the guidance text: it frames Web Chat as a channel. */
 const GUIDANCE_FRAMES_CHANNEL = /channel/i;
 
-/** The web.guidance BLOCK_SET payload for an agent (parsed), or undefined. */
+/** The web-chat.guidance BLOCK_SET payload for an agent (parsed), or undefined. */
 function guidanceBlockSet(lines: string[], agentId: string): any | undefined {
   const prefix = "BLOCK_SET:" + agentId + ":";
-  const line = lines.find((l) => l.startsWith(prefix) && l.includes('"id":"web.guidance"'));
+  const line = lines.find((l) => l.startsWith(prefix) && l.includes('"id":"web-chat.guidance"'));
   return line ? JSON.parse(line.slice(prefix.length)) : undefined;
 }
 
 // --- Test G1: registration defaults — id/label/priority/target + render text ---
-test("web: contributes a SYSTEM 'web.guidance' block (default id/label/priority + channel/send-tool text)", async () => {
+test("web-chat: contributes a SYSTEM 'web-chat.guidance' block (default id/label/priority + channel/send-tool text)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -780,16 +784,16 @@ test("web: contributes a SYSTEM 'web.guidance' block (default id/label/priority 
     // The block is registered during setup — surfaced via BLOCK_SET.
     assert.ok(
       await c.waitFor((ls) => guidanceBlockSet(ls, "alice") !== undefined),
-      "web must register a 'web.guidance' block during setup",
+      "web must register a 'web-chat.guidance' block during setup",
     );
     const blk = guidanceBlockSet(c.lines, "alice")!;
 
     // Identity + wrapping + placement.
-    assert.equal(blk.id, "web.guidance", "the block id is 'web.guidance'");
+    assert.equal(blk.id, "web-chat.guidance", "the block id is 'web-chat.guidance'");
     assert.equal(
       blk.label,
-      "web.guidance",
-      "the label is 'web.guidance' so the orchestrator wraps it <web.guidance>…</web.guidance>",
+      "web-chat.guidance",
+      "the label is 'web-chat.guidance' so the orchestrator wraps it <web-chat.guidance>…</web-chat.guidance>",
     );
     assert.equal(blk.priority, 8000, "the default guidance priority is 8000");
 
@@ -806,20 +810,20 @@ test("web: contributes a SYSTEM 'web.guidance' block (default id/label/priority 
     // names the send tool AND frames Web Chat as a channel.
     assert.equal(typeof blk.text, "string", "the guidance block renders a string (system block)");
     assert.ok(blk.text.length > 0, "the guidance text is non-empty");
-    assert.match(blk.text, GUIDANCE_NAMES_SEND_TOOL, "the guidance text names the web.send_message tool");
+    assert.match(blk.text, GUIDANCE_NAMES_SEND_TOOL, "the guidance text names the web-chat.send_message tool");
     assert.match(blk.text, GUIDANCE_FRAMES_CHANNEL, "the guidance text frames Web Chat as a channel");
 
     // Belt-and-suspenders: drive render() directly via the verb and re-assert the
     // rendered output is a string matching the same two regexes.
-    c.send("render alice web.guidance");
+    c.send("render alice web-chat.guidance");
     assert.ok(
-      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web.guidance:"))),
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("BLOCK_RENDER:alice:web-chat.guidance:"))),
       "the guidance block must render on demand",
     );
-    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web.guidance:"))!;
-    const rendered = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web.guidance:".length));
+    const rLine = c.lines.find((l) => l.startsWith("BLOCK_RENDER:alice:web-chat.guidance:"))!;
+    const rendered = JSON.parse(rLine.slice("BLOCK_RENDER:alice:web-chat.guidance:".length));
     assert.equal(typeof rendered, "string", "render() returns a string");
-    assert.match(rendered, GUIDANCE_NAMES_SEND_TOOL, "the rendered guidance names the web.send_message tool");
+    assert.match(rendered, GUIDANCE_NAMES_SEND_TOOL, "the rendered guidance names the web-chat.send_message tool");
     assert.match(rendered, GUIDANCE_FRAMES_CHANNEL, "the rendered guidance frames Web Chat as a channel");
   } finally {
     await c.close();
@@ -827,19 +831,19 @@ test("web: contributes a SYSTEM 'web.guidance' block (default id/label/priority 
 });
 
 // --- Test G2: distinct from the conversation block — BOTH registered, diff targets ---
-test("web: the guidance (system) and conversation (messages) blocks are BOTH registered and distinct", async () => {
+test("web-chat: the guidance (system) and conversation (messages) blocks are BOTH registered and distinct", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
 
     const prefix = "BLOCK_SET:alice:";
-    const isGuidance = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.guidance"');
-    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web.conversation"');
+    const isGuidance = (l: string) => l.startsWith(prefix) && l.includes('"id":"web-chat.guidance"');
+    const isConvo = (l: string) => l.startsWith(prefix) && l.includes('"id":"web-chat.conversation"');
 
     // Both blocks must be registered during setup.
     assert.ok(
       await c.waitFor((ls) => ls.some(isGuidance) && ls.some(isConvo)),
-      "web must register BOTH the web.guidance and web.conversation blocks",
+      "web must register BOTH the web-chat.guidance and web-chat.conversation blocks",
     );
 
     const guidance = JSON.parse(c.lines.find(isGuidance)!.slice(prefix.length));
@@ -859,7 +863,7 @@ test("web: the guidance (system) and conversation (messages) blocks are BOTH reg
 });
 
 // --- Test G3: teardown removes the guidance block (alongside the conversation one) ---
-test("web: teardown removes the 'web.guidance' block", async () => {
+test("web-chat: teardown removes the 'web-chat.guidance' block", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -871,8 +875,8 @@ test("web: teardown removes the 'web.guidance' block", async () => {
     c.send("down alice");
     assert.ok(await c.waitFor((ls) => ls.includes("TORE_DOWN:alice")), "alice tears down");
     assert.ok(
-      c.lines.includes("BLOCK_REMOVED:alice:web.guidance"),
-      "teardown must remove the web.guidance block",
+      c.lines.includes("BLOCK_REMOVED:alice:web-chat.guidance"),
+      "teardown must remove the web-chat.guidance block",
     );
   } finally {
     await c.close();
@@ -880,7 +884,7 @@ test("web: teardown removes the 'web.guidance' block", async () => {
 });
 
 // --- Test G4: config override — `guidance` + `guidancePriority` win over defaults ---
-test("web: config `guidance` + `guidancePriority` override the default guidance text and priority", async () => {
+test("web-chat: config `guidance` + `guidancePriority` override the default guidance text and priority", async () => {
   const c = await startChild(["alice"], { guidance: "CUSTOM-GUIDE-TEXT", guidancePriority: 1234 });
   try {
     assertUp(c);
@@ -895,7 +899,7 @@ test("web: config `guidance` + `guidancePriority` override the default guidance 
     assert.equal(blk.text, "CUSTOM-GUIDE-TEXT", "the configured guidance text overrides the default");
 
     // Identity is unchanged by the override (still the same addressable block).
-    assert.equal(blk.id, "web.guidance", "the configured block keeps id 'web.guidance'");
+    assert.equal(blk.id, "web-chat.guidance", "the configured block keeps id 'web-chat.guidance'");
     assert.notEqual(blk.target, "messages", "the configured guidance block is still a system block");
   } finally {
     await c.close();
@@ -906,7 +910,7 @@ test("web: config `guidance` + `guidancePriority` override the default guidance 
 // Scenario 4 — sent/read lifecycle: POST -> "sent"; llm.return -> "read"
 // ===========================================================================
 
-test("web: a message is 'sent' on POST then flips to 'read' when the beat completes (llm.return)", async () => {
+test("web-chat: a message is 'sent' on POST then flips to 'read' when the beat completes (llm.return)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -939,7 +943,7 @@ test("web: a message is 'sent' on POST then flips to 'read' when the beat comple
   }
 });
 
-test("web: read is tied to the request that carried the message — a stale earlier return does NOT mark it read", async () => {
+test("web-chat: read is tied to the request that carried the message — a stale earlier return does NOT mark it read", async () => {
   // The race: a timer-driven request is already outstanding when the browser posts
   // a message (orchestrator beats end at llm.request, so returns can overlap and
   // arrive out of order). The EARLIER request's return — composed before the
@@ -987,7 +991,7 @@ test("web: read is tied to the request that carried the message — a stale earl
 // released only after the LAST agent tears down.
 // ===========================================================================
 
-test("web: the port stays open while >=1 agent is registered and closes after the last teardown", async () => {
+test("web-chat: the port stays open while >=1 agent is registered and closes after the last teardown", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -1022,7 +1026,7 @@ test("web: the port stays open while >=1 agent is registered and closes after th
 // that only the console (which ran the program) sees; the server binds loopback.
 // ===========================================================================
 
-test("web: the startup URL carries a session token and binds loopback (127.0.0.1)", async () => {
+test("web-chat: the startup URL carries a session token and binds loopback (127.0.0.1)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1035,7 +1039,7 @@ test("web: the startup URL carries a session token and binds loopback (127.0.0.1
   }
 });
 
-test("web: API requests WITHOUT the token are rejected with 401", async () => {
+test("web-chat: API requests WITHOUT the token are rejected with 401", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1057,7 +1061,7 @@ test("web: API requests WITHOUT the token are rejected with 401", async () => {
   }
 });
 
-test("web: a WRONG token is rejected with 401", async () => {
+test("web-chat: a WRONG token is rejected with 401", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1068,7 +1072,7 @@ test("web: a WRONG token is rejected with 401", async () => {
   }
 });
 
-test("web: GET / serves the page WITHOUT a token (the page holds no secrets)", async () => {
+test("web-chat: GET / serves the page WITHOUT a token (the page holds no secrets)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1139,7 +1143,7 @@ const historyMatches = (events: any[], want: Array<[string, string]>): boolean =
 };
 
 // --- Test H1: history event SHAPE on a fresh agent (sent BEFORE the greeting) ---
-test("web: a fresh agent's stream sends { type:'history', messages:[] } FIRST, before the greeting", async () => {
+test("web-chat: a fresh agent's stream sends { type:'history', messages:[] } FIRST, before the greeting", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1172,7 +1176,7 @@ test("web: a fresh agent's stream sends { type:'history', messages:[] } FIRST, b
 });
 
 // --- Test H2: replay WITHIN a session (a user msg + an agent msg, in order) ---
-test("web: a new stream replays this session's user + agent messages in order via the history event", async () => {
+test("web-chat: a new stream replays this session's user + agent messages in order via the history event", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1212,7 +1216,7 @@ test("web: a new stream replays this session's user + agent messages in order vi
 });
 
 // --- Test H3: survives RESTART — child #2 loads child #1's transcript from disk ---
-test("web: history survives a RESTART (a new process loads the prior transcript from ctx.dataDir)", async () => {
+test("web-chat: history survives a RESTART (a new process loads the prior transcript from ctx.dataDir)", async () => {
   // One FIXED root shared by both child processes; per-agent subdirs live under it.
   const fixed = fs.mkdtempSync(path.join(TMP, "persist-"));
 
@@ -1259,7 +1263,7 @@ test("web: history survives a RESTART (a new process loads the prior transcript 
 });
 
 // --- Test H4: R6 isolation — agent B's history excludes agent A's messages ---
-test("web: an agent's history contains ONLY its own messages (R6 isolation)", async () => {
+test("web-chat: an agent's history contains ONLY its own messages (R6 isolation)", async () => {
   const c = await startChild(["alice", "bob"]);
   try {
     assertUp(c);
@@ -1297,7 +1301,7 @@ test("web: an agent's history contains ONLY its own messages (R6 isolation)", as
 });
 
 // --- Test H5: ordering — interleaved messages replay in strict chronological order ---
-test("web: multiple messages replay in strict chronological order [user m1, agent r1, user m2, agent r2]", async () => {
+test("web-chat: multiple messages replay in strict chronological order [user m1, agent r1, user m2, agent r2]", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1402,7 +1406,7 @@ function maxHistoryId(events: any[]): number {
 }
 
 // --- Test M-9: a READ message replays as "read" (not "sent") after a clean restart ---
-test("web: read status survives a clean restart (a read message replays as 'read', not 'sent')", async () => {
+test("web-chat: read status survives a clean restart (a read message replays as 'read', not 'sent')", async () => {
   // One FIXED root shared by both child processes (per-agent subdirs live under it).
   const fixed = fs.mkdtempSync(path.join(TMP, "read-persist-"));
 
@@ -1470,7 +1474,7 @@ test("web: read status survives a clean restart (a read message replays as 'read
 });
 
 // --- Test M-8: a NEW message's id does not collide with replayed ids after restart ---
-test("web: a new message's id does not collide with replayed ids after a restart (msgSeq seeded from history)", async () => {
+test("web-chat: a new message's id does not collide with replayed ids after a restart (msgSeq seeded from history)", async () => {
   // One FIXED root shared by both child processes.
   const fixed = fs.mkdtempSync(path.join(TMP, "seq-persist-"));
 
@@ -1551,13 +1555,13 @@ test("web: a new message's id does not collide with replayed ids after a restart
 //     takes down the whole process — every Agent sharing it. The route should
 //     instead fail closed as a normal unknown-id 404, and the server must stay up.
 //
-//   FIX 2 — the config.web.token adopt policy must mirror inspector's: a
+//   FIX 2 — the config.web-chat.token adopt policy must mirror inspector's: a
 //     configured token is adopted only if it is a string of length >= 16 matching
 //     ^[A-Za-z0-9._~+/=-]+$; anything else is DISCARDED and a fresh random token
 //     is used. Two halves, asserted independently:
 //       (a) an INVALID configured value must NOT authenticate (401);
 //       (b) a VALID configured value MUST be adopted (200).
-//     (b) is RED today — the current code does not adopt config.web.token at all
+//     (b) is RED today — the current code does not adopt config.web-chat.token at all
 //     (it always mints a random token), so the configured valid token is ignored.
 //     (a) is a guard that holds both before and after the fix (an unadopted bogus
 //     value, and a discarded one, are both rejected) — it pins the rejection side
@@ -1575,7 +1579,7 @@ const MALFORMED_IDS = ["%", "%E0%A4%A"];
 
 for (const badId of MALFORMED_IDS) {
   test(
-    "web(security): GET /api/agents/<malformed id '" + badId + "'>/stream is a 4xx and does NOT crash the server",
+    "web-chat(security): GET /api/agents/<malformed id '" + badId + "'>/stream is a 4xx and does NOT crash the server",
     async () => {
       const c = await startChild(["alice"]);
       try {
@@ -1617,7 +1621,7 @@ for (const badId of MALFORMED_IDS) {
   );
 
   test(
-    "web(security): POST /api/agents/<malformed id '" + badId + "'>/message is a 4xx and does NOT crash the server",
+    "web-chat(security): POST /api/agents/<malformed id '" + badId + "'>/message is a 4xx and does NOT crash the server",
     async () => {
       const c = await startChild(["alice"]);
       try {
@@ -1688,7 +1692,7 @@ const INVALID_TOKENS: Array<{ label: string; value: string }> = [
 
 for (const { label, value } of INVALID_TOKENS) {
   test(
-    "web(security): an INVALID configured token (" + label + ") is rejected with 401 (not adopted)",
+    "web-chat(security): an INVALID configured token (" + label + ") is rejected with 401 (not adopted)",
     async () => {
       const c = await startChild(["alice"], { token: value });
       try {
@@ -1739,7 +1743,7 @@ for (const { label, value } of INVALID_TOKENS) {
   );
 }
 
-test("web(security): a VALID long configured token IS adopted (a request presenting it gets 200)", async () => {
+test("web-chat(security): a VALID long configured token IS adopted (a request presenting it gets 200)", async () => {
   // 24 chars, all within ^[A-Za-z0-9._~+/=-]+$ — satisfies the adopt policy.
   const good = "Abc123._~-valid-token-okk";
   assert.ok(good.length >= 16 && /^[A-Za-z0-9._~+/=-]+$/.test(good), "test token must satisfy the policy");
