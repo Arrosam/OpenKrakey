@@ -273,30 +273,30 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 .he-stat .n { font-family: var(--mono); font-size: 15px; font-weight: 700; color: var(--text); }
 .he-stat .l { font-size: 12px; color: var(--muted); }
 
-/* Hero call-to-action — a BIG, unmissable first-run setup card filling the
-   hero's right column. Centered: a mint disc, a heading, one line, and a large
-   "Quick setup" button. The obvious first action for a new user. */
-.hero .he-cta-card {
-  flex: 0 0 326px; align-self: stretch;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 14px;
-  background: linear-gradient(180deg, rgba(47,214,156,0.08), var(--panel2));
-  border: 1px solid var(--mint-deep); border-radius: var(--r);
-  padding: 30px 26px; position: relative;
-  box-shadow: 0 0 0 1px var(--mint-glow), 0 16px 44px -18px rgba(47,214,156,0.35);
+/* Hero call-to-action — ONE huge button filling the hero's right column. The
+   whole thing is the button: a big "Quick setup" label + a couple of explainer
+   lines, on a LIVING mint gradient that slowly flows (the "transition color"). */
+.hero .he-cta-btn {
+  flex: 0 0 38%; min-width: 300px; align-self: stretch;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center;
+  border: 1px solid var(--mint-bright); border-radius: var(--r-lg);
+  cursor: pointer; color: var(--ink); padding: 34px 30px; font-family: var(--sans);
+  /* the transition color: a diagonal mint gradient that drifts back and forth */
+  background: linear-gradient(120deg, var(--mint-deep) 0%, var(--mint) 32%, var(--mint-bright) 50%, var(--mint) 68%, var(--mint-deep) 100%);
+  background-size: 220% 220%;
+  animation: ctaFlow 7s ease-in-out infinite;
+  box-shadow: 0 20px 56px -18px rgba(47,214,156,0.55);
+  transition: transform .2s ease, box-shadow .2s ease, filter .2s ease;
 }
-.hero .he-cta-card .disc {
-  width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center;
-  background: rgba(47,214,156,0.14); border: 1px solid var(--mint-deep); color: var(--mint);
-}
-.hero .he-cta-card .disc .ic { width: 28px; height: 28px; filter: drop-shadow(0 0 10px rgba(47,214,156,0.55)); }
-.hero .he-cta-card h3 { font-size: 20px; font-weight: 800; letter-spacing: -0.3px; }
-.hero .he-cta-card p { color: var(--muted); font-size: 13.5px; max-width: 32ch; }
-.hero .he-cta-card .btn.big {
-  width: 100%; justify-content: center; gap: 10px;
-  font-size: 16px; font-weight: 700; padding: 15px 28px; margin-top: 2px;
-}
-.hero .he-cta-card .btn.big .ic { width: 18px; height: 18px; }
-.hero .he-cta-card .tiny { font-family: var(--mono); font-size: 11px; letter-spacing: .5px; color: var(--faint); }
+.hero .he-cta-btn:hover { transform: translateY(-3px); box-shadow: 0 26px 66px -14px rgba(47,214,156,0.72); filter: brightness(1.06) saturate(1.05); }
+.hero .he-cta-btn:active { transform: translateY(-1px); }
+.hero .he-cta-btn:focus-visible { outline: 2px solid var(--mint-bright); outline-offset: 3px; }
+.hero .he-cta-btn .lab { display: inline-flex; align-items: center; gap: 12px; font-size: 27px; font-weight: 800; letter-spacing: -0.4px; }
+.hero .he-cta-btn .lab .ic { width: 27px; height: 27px; }
+.hero .he-cta-btn .sub { font-size: 14px; font-weight: 600; max-width: 30ch; color: rgba(7,11,10,0.80); }
+.hero .he-cta-btn .tiny { font-family: var(--mono); font-size: 11px; letter-spacing: .5px; color: rgba(7,11,10,0.62); }
+@keyframes ctaFlow { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+@media (prefers-reduced-motion: reduce) { .hero .he-cta-btn { animation: none; } }
 
 /* ── Surface cards (the three big openers) ─────────────────────────────────*/
 .surface-card { display: flex; flex-direction: column; }
@@ -405,7 +405,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
   .main.is-dashboard { padding: 28px 22px 70px; }
   .grid.cols-3 { grid-template-columns: 1fr; }
   .hero { flex-direction: column; gap: 22px; }
-  .hero .he-cta-card { flex-basis: auto; }
+  .hero .he-cta-btn { flex-basis: auto; min-height: 190px; }
 }
 @media (max-width: 620px) {
   .topnav .foot .status { display: none; }
@@ -563,13 +563,11 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
             statEl("activity", "Inspector", "live heartbeats") +
           `</div>` +
         `</div>` +
-        `<div class="he-cta-card">` +
-          `<div class="disc">${icon("stars")}</div>` +
-          `<h3>First-time setup</h3>` +
-          `<p>Connect an AI service and create your first agent — right here in your browser.</p>` +
-          `<button class="btn primary big" data-quick-setup>${icon("stars", "btn-ic")} Quick setup</button>` +
+        `<button class="he-cta-btn" data-quick-setup>` +
+          `<span class="lab">${icon("stars")} Quick setup</span>` +
+          `<span class="sub">Connect an AI service and create your first agent — right in your browser.</span>` +
           `<span class="tiny">~2 min · no install</span>` +
-        `</div>`;
+        `</button>`;
       main.appendChild(hero);
 
       // wire the hero's "Quick setup" → open Config at the wizard deep-link
