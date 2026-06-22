@@ -101,7 +101,7 @@ const MODALITY_LABELS = {
 // ─── Plugin catalogue (public_plugin/*) — what the agent can DO ───────────────
 // `icon` names index the inline SVG set in app.js (no emoji/glyphs).
 const PLUGINS = [
-  { id: "llm-core",      icon: "cpu",      name: "LLM core",      tagline: "talks to the AI service — required for replies", required: true },
+  { id: "llm-core",      icon: "cpu",      name: "LLM core",      tagline: "talks to the AI service — the agent's brain (optional)" },
   { id: "persona",       icon: "person",   name: "Persona",       tagline: "the agent's identity / system prompt" },
   { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
   { id: "web-chat",      icon: "chat",     name: "Web chat",      tagline: "chat with the agent from your browser", dataCarrier: true },
