@@ -347,6 +347,20 @@ function topbar(main, crumbs, title, subtitle, actions) {
 
 function btn(label, cls, onclick) { const b = el("button", "btn " + (cls || ""), label); b.onclick = onclick; return b; }
 
+// A destructive button that ARMS on the first click (extends + a warning pulse,
+// label → "Click again to confirm") and runs onConfirm only on the SECOND click.
+// Moving the pointer away disarms it back to its resting label — no modal.
+function confirmBtn(label, onConfirm) {
+  const b = el("button", "btn danger confirm-btn", label);
+  let armed = false;
+  b.onclick = () => {
+    if (!armed) { armed = true; b.classList.add("armed"); b.textContent = "Click again to confirm"; return; }
+    onConfirm();
+  };
+  b.onmouseleave = () => { if (!armed) return; armed = false; b.classList.remove("armed"); b.textContent = label; };
+  return b;
+}
+
 /* Overview / landing */
 views.overview = (main) => {
   topbar(main, ["OpenKrakey", "Console"], 'Config <span class="accent">console</span>',
@@ -466,7 +480,7 @@ function editService(name) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved draft</span><span class="spacer"></span>`;
   bar.appendChild(btn("Cancel", "ghost", () => setView("services")));
-  if (!isNew) bar.appendChild(btn("Delete", "danger", () => { delete state.services[name]; if (state.default.name === name) state.default.name = null; setView("services"); toast(`Deleted "${name}"`); }));
+  if (!isNew) bar.appendChild(confirmBtn("Delete", () => { delete state.services[name]; if (state.default.name === name) state.default.name = null; setView("services"); toast(`Deleted "${name}"`); }));
   bar.appendChild(btn("Save service", "primary", () => {
     if (!workingName) { toastErr("Name the connection first"); return; }
     if (!working.model) { toastErr("Enter a model id"); return; }
@@ -520,7 +534,6 @@ function startNewAgentWizard() {
     step: 0,
     agent: {
       id: "",
-      persona: (ds.config && ds.config.persona && ds.config.persona.text) || "You are a helpful autonomous agent. Be concise.",
       intervalMs: typeof ds.intervalMs === "number" ? ds.intervalMs : 60000,
     },
     llm: { mode: serviceNames().length ? "service" : "none", communicator: serviceNames()[0] || "" },
@@ -566,11 +579,10 @@ function naFoot(panel, onNext, nextLabel) {
 
 function naAgent(panel) {
   panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Name your agent</h2>` +
-    `<p class="lede">A name, who it is, and how often it wakes on its own.</p>`;
+    `<p class="lede">A name and how often it wakes on its own. The persona and every plugin's settings come next, in the editor.</p>`;
   const body = el("div", "wz-body");
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
-    { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
     { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
   ];
   fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
@@ -639,8 +651,7 @@ function naReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true) +
-    reviewLine("Persona", (nwz.agent.persona || "").slice(0, 48) + ((nwz.agent.persona || "").length > 48 ? "…" : ""));
+    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true);
   body.appendChild(ag);
 
   const llm = el("div", "review-blk");
@@ -666,16 +677,18 @@ function naReview(panel) {
 
 function commitNewAgent() {
   const id = nwz.agent.id;
-  const cfg = { persona: { text: nwz.agent.persona } };
+  // Seed from the default setting (keeps persona text + plugin defaults), then
+  // lay the wizard's high-level choices over it — per-plugin settings like the
+  // persona are tuned in the editor, not the wizard.
+  const def = JSON.parse(JSON.stringify({ ...state.defaultSetting, id }));
+  def.intervalMs = nwz.agent.intervalMs;
+  def.plugins = [...nwz.plugins];
+  def.privatePlugins = nwz.plugins.filter((p) => { const m = PLUGINS.find((x) => x.id === p); return m && m.dataCarrier; });
+  if (!def.config) def.config = {};
   if (nwz.plugins.includes("llm-core") && nwz.llm.mode === "service" && nwz.llm.communicator) {
-    cfg["llm-core"] = { communicator: nwz.llm.communicator };
+    def.config["llm-core"] = { ...(def.config["llm-core"] || {}), communicator: nwz.llm.communicator };
   }
-  state.agents[id] = {
-    id, intervalMs: nwz.agent.intervalMs,
-    plugins: [...nwz.plugins],
-    privatePlugins: nwz.plugins.filter((p) => { const m = PLUGINS.find((x) => x.id === p); return m && m.dataCarrier; }),
-    config: cfg,
-  };
+  state.agents[id] = def;
   toast(`Created agent "${id}"`);
   editAgent(id);
 }
@@ -748,7 +761,7 @@ function settingEditor(main, model, opts) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved changes</span><span class="spacer"></span>`;
   bar.appendChild(btn("Discard", "ghost", () => setView(opts.isDefault ? "overview" : "agents")));
-  if (!opts.isDefault) bar.appendChild(btn("Delete config", "danger", () => { delete state.agents[id]; setView("agents"); toast(`Removed "${id}"`); }));
+  if (!opts.isDefault) bar.appendChild(confirmBtn("Delete config", () => { delete state.agents[id]; setView("agents"); toast(`Removed "${id}"`); }));
   bar.appendChild(btn("Save", "primary", () => { toast(opts.isDefault ? "Saved default settings" : `Saved "${id}"`); setView(opts.isDefault ? "overview" : "agents"); }));
   main.appendChild(bar);
 }

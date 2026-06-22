@@ -491,6 +491,20 @@ function topbar(main, crumbs, title, subtitle, actions) {
 
 function btn(label, cls, onclick) { const b = el("button", "btn " + (cls || ""), label); b.onclick = onclick; return b; }
 
+// A destructive button that ARMS on the first click (extends + a warning pulse,
+// label → "Click again to confirm") and runs onConfirm only on the SECOND click.
+// Moving the pointer away disarms it back to its resting label — no modal.
+function confirmBtn(label, onConfirm) {
+  const b = el("button", "btn danger confirm-btn", label);
+  let armed = false;
+  b.onclick = () => {
+    if (!armed) { armed = true; b.classList.add("armed"); b.textContent = "Click again to confirm"; return; }
+    onConfirm();
+  };
+  b.onmouseleave = () => { if (!armed) return; armed = false; b.classList.remove("armed"); b.textContent = label; };
+  return b;
+}
+
 /* Overview / landing */
 views.overview = (main) => {
   topbar(main, ["OpenKrakey", "Console"], 'Config <span class="accent">console</span>',
@@ -610,7 +624,7 @@ function editService(name) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved draft</span><span class="spacer"></span>`;
   bar.appendChild(btn("Cancel", "ghost", () => setView("services")));
-  if (!isNew) bar.appendChild(btn("Delete", "danger", async () => {
+  if (!isNew) bar.appendChild(confirmBtn("Delete", async () => {
     const next = buildLLMConfig();
     delete next.communicators[name];
     if (next.default === name) delete next.default;
@@ -672,7 +686,6 @@ function startNewAgentWizard() {
     step: 0,
     agent: {
       id: "",
-      persona: (ds.config && ds.config.persona && ds.config.persona.text) || "You are a helpful autonomous agent. Be concise.",
       intervalMs: typeof ds.intervalMs === "number" ? ds.intervalMs : 60000,
     },
     llm: { mode: serviceNames().length ? "service" : "none", communicator: serviceNames()[0] || "" },
@@ -718,11 +731,10 @@ function naFoot(panel, onNext, nextLabel) {
 
 function naAgent(panel) {
   panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Name your agent</h2>` +
-    `<p class="lede">A name, who it is, and how often it wakes on its own.</p>`;
+    `<p class="lede">A name and how often it wakes on its own. The persona and every plugin's settings come next, in the editor.</p>`;
   const body = el("div", "wz-body");
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
-    { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
     { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
   ];
   fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
@@ -791,8 +803,7 @@ function naReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true) +
-    reviewLine("Persona", (nwz.agent.persona || "").slice(0, 48) + ((nwz.agent.persona || "").length > 48 ? "…" : ""));
+    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true);
   body.appendChild(ag);
 
   const llm = el("div", "review-blk");
@@ -820,18 +831,20 @@ function naReview(panel) {
 // then land in the editor. Mirrors the onboarding wizard's two-step write.
 async function commitNewAgent() {
   const id = nwz.agent.id;
-  const def = {
-    id,
-    intervalMs: nwz.agent.intervalMs,
-    plugins: [...nwz.plugins],
-    privatePlugins: nwz.plugins.filter((p) => PLUGINS.find((x) => x.id === p)?.dataCarrier),
-    config: { persona: { text: nwz.agent.persona } },
-  };
-  if (nwz.plugins.includes("llm-core") && nwz.llm.mode === "service" && nwz.llm.communicator) {
-    def.config["llm-core"] = { communicator: nwz.llm.communicator };
-  }
   try {
     await apiPost("/api/agents/" + encodeURIComponent(id) + "/create");
+    // The server seeded config.json from the default setting — KEEP that config
+    // (persona text + any plugin defaults) and lay the wizard's choices over it,
+    // so per-plugin settings like persona live in the editor, not the wizard.
+    const def = await apiGet("/api/agents/" + encodeURIComponent(id));
+    def.id = id;
+    def.intervalMs = nwz.agent.intervalMs;
+    def.plugins = [...nwz.plugins];
+    def.privatePlugins = nwz.plugins.filter((p) => PLUGINS.find((x) => x.id === p)?.dataCarrier);
+    if (!def.config) def.config = {};
+    if (nwz.plugins.includes("llm-core") && nwz.llm.mode === "service" && nwz.llm.communicator) {
+      def.config["llm-core"] = { ...(def.config["llm-core"] || {}), communicator: nwz.llm.communicator };
+    }
     await apiPut("/api/agents/" + encodeURIComponent(id), def);
     state.agents[id] = def;
     toast(`Created agent "${id}"`);
@@ -911,7 +924,7 @@ function settingEditor(main, model, opts) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved changes</span><span class="spacer"></span>`;
   bar.appendChild(btn("Discard", "ghost", () => setView(opts.isDefault ? "overview" : "agents")));
-  if (!opts.isDefault) bar.appendChild(btn("Delete config", "danger", async () => {
+  if (!opts.isDefault) bar.appendChild(confirmBtn("Delete config", async () => {
     try { await apiDelete("/api/agents/" + encodeURIComponent(id)); delete state.agents[id]; setView("agents"); toast(`Removed "${id}"`); }
     catch (e) { handleApiError(e); }
   }));
