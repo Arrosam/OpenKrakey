@@ -155,7 +155,10 @@ function communicatorFields(providerId) {
 const state = {
   services: {},
   default: { name: null },
-  defaultSetting: { intervalMs: 900000, plugins: [], privatePlugins: [], config: {} },
+  // Placeholder only — replaced by GET /api/default on boot (the shipped default,
+  // which falls back to agent.default.example.json). Never rendered before load,
+  // so it carries NO hardcoded interval to drift out of sync with the file.
+  defaultSetting: { intervalMs: null, plugins: [], privatePlugins: [], config: {} },
   agents: {},
   availablePlugins: [],
 };
@@ -877,7 +880,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted. 900000 = every 15 minutes." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);

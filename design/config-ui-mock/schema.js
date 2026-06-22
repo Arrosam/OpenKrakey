@@ -238,7 +238,7 @@ const PLUGIN_SCHEMAS = {
 // ─── Agent / Default base fields (the shared four) ───────────────────────────
 const AGENT_FIELDS = [
   f({ key: "intervalMs", label: "Heartbeat interval", control: "number", default: 30000, min: 1, step: 1000, unit: "ms",
-      help: "How often the agent wakes to think unprompted. 30000 = every 30 s." }),
+      help: "How often the agent wakes to think unprompted, in milliseconds (60000 = 1 minute)." }),
   f({ key: "plugins", label: "Plugins to load", control: "multiselect", optionsFrom: "plugins", default: [],
       help: "Everything this agent can do. Each is a public_plugin/." }),
   f({ key: "privatePlugins", label: "Private data copies", control: "multiselect", optionsFrom: "plugins", default: [],

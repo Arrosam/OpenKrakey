@@ -409,7 +409,7 @@ export async function runInteractiveLoop(
       if (field === "intervalMs") {
         const raw = await ask(() =>
           input({
-            message: "heartbeat interval in milliseconds (e.g. 30000 = the agent thinks every 30 seconds)",
+            message: "heartbeat interval in milliseconds (60000 = 1 minute)",
             default: String(draft.intervalMs),
             validate: (r) =>
               parsePositiveInt(r) !== undefined

@@ -135,7 +135,7 @@ export async function assembleSchema(deps: {
       min: 1,
       step: 1000,
       unit: "ms",
-      help: "How often the agent wakes to think unprompted. 30000 = every 30 s.",
+      help: "How often the agent wakes to think unprompted, in milliseconds (60000 = 1 minute).",
     },
     {
       key: "plugins",
