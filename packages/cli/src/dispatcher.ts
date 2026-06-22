@@ -14,6 +14,7 @@ export type ParsedCommand =
   | { kind: "run" }
   | { kind: "start" }
   | { kind: "stop" }
+  | { kind: "restart" }
   | { kind: "dashboard"; port: string | undefined }
   | { kind: "uninstall"; yes: boolean }
   | { kind: "update" }
@@ -43,6 +44,8 @@ export function parseCommand(argv: string[]): ParsedCommand {
       return { kind: "start" };
     case "stop":
       return { kind: "stop" };
+    case "restart":
+      return { kind: "restart" };
     case "dashboard":
       // argv[1] is the RAW port string (no numeric validation here); absent → undefined.
       return { kind: "dashboard", port: argv[1] };

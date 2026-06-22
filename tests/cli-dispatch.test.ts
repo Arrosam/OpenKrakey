@@ -21,6 +21,7 @@
  *   ["run"]                   -> { kind:"run" }
  *   ["start"]                 -> { kind:"start" }
  *   ["stop"]                  -> { kind:"stop" }
+ *   ["restart"]               -> { kind:"restart" }
  *   ["dashboard"]             -> { kind:"dashboard", port:undefined }
  *   ["dashboard","7716"]      -> { kind:"dashboard", port:"7716" }       // raw string, NO numeric validation
  *   ["uninstall"]             -> { kind:"uninstall", yes:false }
@@ -88,6 +89,11 @@ test('positive: ["start"] -> start (no payload)', () => {
 test('positive: ["stop"] -> stop (no payload)', () => {
   const expected: ParsedCommand = { kind: "stop" };
   assert.deepStrictEqual(parseCommand(["stop"]), expected);
+});
+
+test('positive: ["restart"] -> restart (no payload)', () => {
+  const expected: ParsedCommand = { kind: "restart" };
+  assert.deepStrictEqual(parseCommand(["restart"]), expected);
 });
 
 test('positive: ["dashboard"] (no port) -> dashboard with port:undefined', () => {

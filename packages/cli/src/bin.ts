@@ -69,6 +69,7 @@ commands:
   krakey run          launch the runtime in the foreground (Ctrl+C to stop)
   krakey start        launch the runtime in the background (daemon)
   krakey stop         stop background runtime instances
+  krakey restart      restart the background runtime (stop, then start)
   krakey dashboard    open the unified Console in your browser  [port]
   krakey uninstall    remove Krakey entirely from this machine  [--yes]
   krakey update       pull the latest version and re-run the installer
@@ -147,6 +148,26 @@ function stopAll(): number {
   return pids.length;
 }
 
+/**
+ * Launch the runtime DETACHED — log to .krakey/krakey.log, record the pid, and
+ * return immediately (the child is unref'd so it outlives this process). Shared
+ * by `start` and `restart`.
+ */
+function startBackground(): void {
+  ensureStateDir();
+  const logFd = openSync(LOG_FILE, "a");
+  const child = spawn(process.execPath, ["--import", "tsx", bootBin], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    windowsHide: true,
+  });
+  child.unref();
+  if (child.pid !== undefined) appendFileSync(PID_FILE, `${child.pid}\n`, "utf8");
+  console.log(`krakey: started in background (pid ${child.pid ?? "?"})`);
+  console.log(`        log: ${LOG_FILE}`);
+  console.log("        stop with: krakey stop");
+}
+
 /** Open `http://127.0.0.1:<port>` in the default browser, cross-platform. */
 function openBrowser(url: string): void {
   if (process.platform === "win32") {
@@ -187,23 +208,10 @@ switch (parsed.kind) {
     spawnChild(bootBin, []);
     break;
 
-  case "start": {
-    // Background runtime — detach boot, log to .krakey/krakey.log, record the pid.
-    ensureStateDir();
-    const logFd = openSync(LOG_FILE, "a");
-    const child = spawn(process.execPath, ["--import", "tsx", bootBin], {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      windowsHide: true,
-    });
-    child.unref();
-    if (child.pid !== undefined) appendFileSync(PID_FILE, `${child.pid}\n`, "utf8");
-    console.log(`krakey: started in background (pid ${child.pid ?? "?"})`);
-    console.log(`        log: ${LOG_FILE}`);
-    console.log("        stop with: krakey stop");
-    // Return immediately — do NOT keep the parent alive for the detached child.
+  case "start":
+    // Background runtime (detached). Returns immediately.
+    startBackground();
     break;
-  }
 
   case "stop": {
     const stopped = stopAll();
@@ -212,6 +220,18 @@ switch (parsed.kind) {
         ? "krakey: no running instances"
         : `krakey: stopped ${stopped} instance${stopped === 1 ? "" : "s"}`,
     );
+    break;
+  }
+
+  case "restart": {
+    // Stop any background instance(s), then start a fresh detached one.
+    const stopped = stopAll();
+    console.log(
+      stopped === 0
+        ? "krakey: no running instance — starting fresh"
+        : `krakey: stopped ${stopped} instance${stopped === 1 ? "" : "s"}, restarting…`,
+    );
+    startBackground();
     break;
   }
 

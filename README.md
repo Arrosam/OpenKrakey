@@ -148,6 +148,7 @@ which you can also edit by hand.
 | `krakey run` | Launch the runtime in the foreground — every configured agent (Ctrl+C to stop) |
 | `krakey start` | Launch the runtime in the background (daemon); logs to `.krakey/krakey.log` |
 | `krakey stop` | Stop the background runtime instance(s) |
+| `krakey restart` | Restart the background runtime — stop, then start a fresh daemon |
 | `krakey dashboard` | Open the unified Console in your browser; also launches Config so you can set up Krakey before the runtime is running (optional port: `krakey dashboard 7716`) |
 | `krakey uninstall` | Remove Krakey entirely from this machine (`--yes` to skip the prompt) |
 | `krakey update` | Pull the latest version and re-run the installer |
@@ -166,8 +167,9 @@ Inspector panels show **"Not connected"** until you `krakey start` (or `krakey r
 available either way. Loopback-only and access-token gated, like everything else.
 
 **Background runtime.** `krakey start` detaches `boot`, records each pid in `.krakey/run.pid`, and
-streams output to `.krakey/krakey.log`; `krakey stop` kills the recorded process tree(s). Prefer to
-watch it live? Use `krakey run` instead and stop it with Ctrl+C.
+streams output to `.krakey/krakey.log`; `krakey stop` kills the recorded process tree(s); and
+`krakey restart` does both — stop, then start fresh. Prefer to watch it live? Use `krakey run`
+instead and stop it with Ctrl+C.
 
 **Lifecycle.** `krakey update` fast-forwards the checkout (`git pull --ff-only`) and re-runs the
 installer. `krakey uninstall` permanently removes the **entire** install — agents, config, keys,
