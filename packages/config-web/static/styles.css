@@ -403,6 +403,9 @@ textarea.inp.auto { resize: none; overflow: hidden; } /* auto-grows — no scrol
 .wz-panel h2 { font-size: 24px; font-weight: 800; letter-spacing: -0.4px; margin: 14px 0 8px; }
 .wz-panel .lede { color: var(--muted); font-size: 15px; max-width: 56ch; }
 .wz-body { margin-top: 28px; display: grid; gap: 4px; }
+.wz-note { display: flex; align-items: center; gap: 9px; margin-top: 14px; padding: 12px 15px; background: rgba(47,214,156,0.06); border: 1px solid var(--mint-deep); border-radius: var(--r); color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.wz-note .ic { width: 16px; height: 16px; color: var(--mint); flex: none; }
+.wz-note b { color: var(--text); font-weight: 600; }
 .wz-foot { display: flex; align-items: center; gap: 12px; margin-top: 30px; padding-top: 24px; border-top: 1px solid var(--line); }
 .wz-foot .spacer { flex: 1; }
 

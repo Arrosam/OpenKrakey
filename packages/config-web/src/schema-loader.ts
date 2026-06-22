@@ -38,7 +38,7 @@ interface PluginMeta {
  * added plugin still renders — just without a custom icon/tagline.
  */
 const PLUGIN_META: Record<string, PluginMeta> = {
-  "llm-core": { id: "llm-core", icon: "cpu", name: "LLM core", tagline: "talks to the AI service — required for replies", required: true },
+  "llm-core": { id: "llm-core", icon: "cpu", name: "LLM core", tagline: "talks to the AI service — the agent's brain (optional)" },
   persona: { id: "persona", icon: "person", name: "Persona", tagline: "the agent's identity / system prompt" },
   "system-prompt": { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
   "web-chat": { id: "web-chat", icon: "chat", name: "Web chat", tagline: "chat with the agent from your browser", dataCarrier: true },

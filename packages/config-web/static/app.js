@@ -655,18 +655,187 @@ views.agents = (main) => {
 
 // Create a fresh agent by id: POST /api/agents/:id/create (seeds from default on
 // the server), then load it back and open its editor.
-async function createAgent() {
-  const base = "agent-" + (Object.keys(state.agents).length + 1);
-  const id = window.prompt("New agent id (letters, digits, . _ -):", base);
-  if (id === null) return;
-  const trimmed = id.trim();
-  if (!trimmed) { toastErr("Name your agent"); return; }
+function createAgent() { startNewAgentWizard(); }
+
+/* ── New-agent wizard ───────────────────────────────────────────────────────
+   "New agent" opens this guided flow instead of a bare id prompt: name the
+   agent, pick which configured AI service it uses (or No LLM — llm-core stays
+   off), choose plugins, review, then land in the full editor to fine-tune every
+   plugin's settings. Reuses the wizard rail/panel chrome + the field controls. */
+const NWZ_STEPS = ["Agent", "LLM", "Plugins", "Review"];
+let nwz = null;
+
+function startNewAgentWizard() {
+  const ds = state.defaultSetting || {};
+  const seed = [...new Set([...(ds.plugins || []), ...(ds.privatePlugins || [])])];
+  nwz = {
+    step: 0,
+    agent: {
+      id: "",
+      persona: (ds.config && ds.config.persona && ds.config.persona.text) || "You are a helpful autonomous agent. Be concise.",
+      intervalMs: typeof ds.intervalMs === "number" ? ds.intervalMs : 60000,
+    },
+    llm: { mode: serviceNames().length ? "service" : "none", communicator: serviceNames()[0] || "" },
+    plugins: seed.length ? [...seed] : ["llm-core", "persona", "system-prompt"],
+  };
+  syncLlmCore();
+  const main = $("#main"); main.innerHTML = ""; drawNewAgent(main); animateIn();
+}
+
+// Keep the LLM choice and the llm-core plugin in lock-step: a service implies
+// llm-core on; "No LLM" implies it off.
+function syncLlmCore() {
+  const has = nwz.plugins.includes("llm-core");
+  if (nwz.llm.mode === "service" && !has) nwz.plugins = ["llm-core", ...nwz.plugins];
+  if (nwz.llm.mode === "none" && has) nwz.plugins = nwz.plugins.filter((p) => p !== "llm-core");
+}
+
+function drawNewAgent(main) {
+  main.innerHTML = "";
+  const wrap = el("div", "wizard");
+  const rail = el("div", "wz-rail");
+  NWZ_STEPS.forEach((s, i) => {
+    const step = el("div", "step" + (i === nwz.step ? " active" : i < nwz.step ? " done" : ""));
+    step.innerHTML = `<span class="n">${i < nwz.step ? "✓" : i + 1}</span><span class="nm">${esc(s)}</span>`;
+    rail.appendChild(step);
+    if (i < NWZ_STEPS.length - 1) rail.appendChild(el("div", "bar" + (i < nwz.step ? " filled" : "")));
+  });
+  wrap.appendChild(rail);
+  const panel = el("div", "wz-panel");
+  [naAgent, naLLM, naPlugins, naReview][nwz.step](panel);
+  wrap.appendChild(panel);
+  main.appendChild(wrap);
+}
+
+function naFoot(panel, onNext, nextLabel) {
+  const foot = el("div", "wz-foot");
+  if (nwz.step > 0) foot.appendChild(btn(`${icon("arrowLeft", "btn-ic")}Back`, "ghost", () => { nwz.step--; drawNewAgent($("#main")); }));
+  else foot.appendChild(btn("Cancel", "ghost", () => setView("agents")));
+  foot.appendChild(el("div", "spacer"));
+  foot.appendChild(btn(nextLabel || `Continue${icon("arrowRight", "btn-ic")}`, "primary", onNext));
+  panel.appendChild(foot);
+}
+
+function naAgent(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Name your agent</h2>` +
+    `<p class="lede">A name, who it is, and how often it wakes on its own.</p>`;
+  const body = el("div", "wz-body");
+  const fields = [
+    { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
+    { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+  ];
+  fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
+  panel.appendChild(body);
+  naFoot(panel, () => {
+    const id = (nwz.agent.id || "").trim();
+    if (!id) return toastErr("Name your agent");
+    if (state.agents[id]) return toastErr(`"${id}" already exists`);
+    nwz.agent.id = id;
+    nwz.step = 1; drawNewAgent($("#main"));
+  });
+}
+
+function naLLM(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Which AI service?</h2>` +
+    `<p class="lede">Pick the LLM this agent talks to through <b>llm-core</b> — or <b>No LLM</b> for an agent that runs its heartbeat with no brain (llm-core stays off). Valid either way.</p>`;
+  const body = el("div", "wz-body");
+  const host = el("div", "pick");
+  const opts = [
+    ...serviceNames().map((n) => ({ mode: "service", value: n, title: n, sub: state.services[n] && state.services[n].provider ? `provider · ${state.services[n].provider}` : "configured AI service", ic: "server" })),
+    { mode: "none", value: "", title: "No LLM", sub: "no llm-core — heartbeat only", ic: "x" },
+  ];
+  const draw = () => {
+    host.innerHTML = "";
+    opts.forEach((o) => {
+      const sel = nwz.llm.mode === o.mode && (o.mode === "none" || nwz.llm.communicator === o.value);
+      const opt = el("div", "opt" + (sel ? " sel" : ""));
+      opt.innerHTML = `<span class="box">${sel ? icon("check") : ""}</span>` +
+        `<span class="ot"><span class="on"><span class="oi">${icon(o.ic)}</span>${esc(o.title)}</span><span class="os">${esc(o.sub)}</span></span>`;
+      opt.onclick = () => { nwz.llm.mode = o.mode; nwz.llm.communicator = o.value; syncLlmCore(); draw(); };
+      host.appendChild(opt);
+    });
+  };
+  draw();
+  body.appendChild(host);
+  if (!serviceNames().length) {
+    const note = el("div", "wz-note");
+    note.innerHTML = `${icon("alert")}<span>No AI services configured yet — add one under <b>AI services</b>, or continue with <b>No LLM</b>.</span>`;
+    body.appendChild(note);
+  }
+  panel.appendChild(body);
+  naFoot(panel, () => { nwz.step = 2; drawNewAgent($("#main")); });
+}
+
+function naPlugins(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Choose its capabilities</h2>` +
+    `<p class="lede">Each capability is a plugin — turn on what you want. <b>llm-core</b> can be turned off for an agent with no AI brain.</p>`;
+  const body = el("div", "wz-body");
+  const fld = { key: "plugins", label: "Plugins", control: "multiselect", optionsFrom: "plugins" };
+  const get = () => nwz.plugins;
+  const set = (v) => {
+    nwz.plugins = v;
+    // keep the LLM step honest when llm-core is toggled here
+    if (!v.includes("llm-core")) { nwz.llm.mode = "none"; nwz.llm.communicator = ""; }
+    else if (nwz.llm.mode === "none") { nwz.llm.mode = "service"; nwz.llm.communicator = serviceNames()[0] || ""; }
+  };
+  body.appendChild(buildControl(fld, get, set, {}));
+  panel.appendChild(body);
+  naFoot(panel, () => { nwz.step = 3; drawNewAgent($("#main")); });
+}
+
+function naReview(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Ready to create</h2>` +
+    `<p class="lede">This writes agents/${esc(nwz.agent.id)}/config.json. You'll land in the editor next to fine-tune every plugin's settings.</p>`;
+  const body = el("div", "wz-body");
+
+  const ag = el("div", "review-blk");
+  ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
+    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true) +
+    reviewLine("Persona", (nwz.agent.persona || "").slice(0, 48) + ((nwz.agent.persona || "").length > 48 ? "…" : ""));
+  body.appendChild(ag);
+
+  const llm = el("div", "review-blk");
+  llm.innerHTML = `<div class="rh"><span class="rh-ic">${icon("server")}</span> AI service</div>` +
+    reviewLine("LLM", nwz.llm.mode === "service" ? (nwz.llm.communicator || "(first chat-capable)") : "None — llm-core off", true);
+  body.appendChild(llm);
+
+  const cap = el("div", "review-blk");
+  cap.innerHTML = `<div class="rh"><span class="rh-ic">${icon("grid")}</span> Capabilities · ${nwz.plugins.length} plugins</div>` +
+    `<div class="taglist" style="margin-top:2px">` +
+    (nwz.plugins.length
+      ? nwz.plugins.map((p) => { const m = PLUGINS.find((x) => x.id === p); return `<span class="tag">${m ? `<span class="tag-ic">${icon(m.icon)}</span>` : ""}${esc(m ? m.name : p)}</span>`; }).join("")
+      : `<span class="os">No plugins — a bare agent (still completes a beat).</span>`) + `</div>`;
+  body.appendChild(cap);
+  panel.appendChild(body);
+
+  const foot = el("div", "wz-foot");
+  foot.appendChild(btn(`${icon("arrowLeft", "btn-ic")}Back`, "ghost", () => { nwz.step = 2; drawNewAgent($("#main")); }));
+  foot.appendChild(el("div", "spacer"));
+  foot.appendChild(btn("✓ Create agent", "primary", commitNewAgent));
+  panel.appendChild(foot);
+}
+
+// Persist: create the agent (server seeds the dir) then PUT the customized def,
+// then land in the editor. Mirrors the onboarding wizard's two-step write.
+async function commitNewAgent() {
+  const id = nwz.agent.id;
+  const def = {
+    id,
+    intervalMs: nwz.agent.intervalMs,
+    plugins: [...nwz.plugins],
+    privatePlugins: nwz.plugins.filter((p) => PLUGINS.find((x) => x.id === p)?.dataCarrier),
+    config: { persona: { text: nwz.agent.persona } },
+  };
+  if (nwz.plugins.includes("llm-core") && nwz.llm.mode === "service" && nwz.llm.communicator) {
+    def.config["llm-core"] = { communicator: nwz.llm.communicator };
+  }
   try {
-    await apiPost("/api/agents/" + encodeURIComponent(trimmed) + "/create");
-    const def = await apiGet("/api/agents/" + encodeURIComponent(trimmed));
-    state.agents[trimmed] = def;
-    toast(`Created "${trimmed}" from default`);
-    editAgent(trimmed);
+    await apiPost("/api/agents/" + encodeURIComponent(id) + "/create");
+    await apiPut("/api/agents/" + encodeURIComponent(id), def);
+    state.agents[id] = def;
+    toast(`Created agent "${id}"`);
+    editAgent(id);
   } catch (e) { handleApiError(e); }
 }
 
