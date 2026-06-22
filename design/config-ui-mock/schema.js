@@ -22,18 +22,6 @@
 // ─── Provider catalogue (verbatim from shared/config KNOWN_PROVIDERS) ─────────
 const PROVIDERS = [
   {
-    id: "anthropic",
-    label: "Anthropic-compatible (Messages API)",
-    summary: "Anthropic's /v1/messages wire format — Claude, or any compatible endpoint.",
-    capabilities: ["chat", "ocr"],
-    defaultCapabilities: ["chat"],
-    inputs: ["text", "image", "document"],
-    outputs: ["text"],
-    baseURLHint: "API root WITHOUT /v1 — blank for the official endpoint",
-    baseURLExample: "https://api.anthropic.com",
-    modelExample: "claude-sonnet-4-6",
-  },
-  {
     id: "openai-completion",
     label: "OpenAI-compatible (chat completions)",
     summary: "The /chat/completions format — OpenAI, oneAPI, Ollama, vLLM…",
@@ -44,6 +32,18 @@ const PROVIDERS = [
     baseURLHint: "API root INCLUDING /v1 — blank for official OpenAI",
     baseURLExample: "http://localhost:11434/v1",
     modelExample: "gpt-4o",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic-compatible (Messages API)",
+    summary: "Anthropic's /v1/messages wire format — Claude, or any compatible endpoint.",
+    capabilities: ["chat", "ocr"],
+    defaultCapabilities: ["chat"],
+    inputs: ["text", "image", "document"],
+    outputs: ["text"],
+    baseURLHint: "API root WITHOUT /v1 — blank for the official endpoint",
+    baseURLExample: "https://api.anthropic.com",
+    modelExample: "claude-sonnet-4-6",
   },
   {
     id: "openai-responses",

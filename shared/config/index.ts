@@ -133,18 +133,6 @@ export interface ProviderInfo {
 /** Every provider type the gateway accepts, with UI guidance. */
 export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
   {
-    id: "anthropic",
-    label: "Anthropic-compatible (Messages API)",
-    summary: "Anthropic's /v1/messages wire format — Claude, or any Anthropic-compatible endpoint.",
-    capabilities: ["chat", "ocr"],
-    defaultCapabilities: ["chat"],
-    inputs: ["text", "image", "document"],
-    outputs: ["text"],
-    baseURLHint: "API root WITHOUT /v1 — leave blank for the official endpoint",
-    baseURLExample: "https://api.anthropic.com",
-    modelExample: "claude-sonnet-4-6",
-  },
-  {
     id: "openai-completion",
     label: "OpenAI-compatible (chat completions)",
     summary: "The /chat/completions wire format — OpenAI, or any compatible endpoint (oneAPI, Ollama, vLLM…).",
@@ -156,6 +144,18 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
     baseURLExample: "http://localhost:11434/v1",
     modelExample: "gpt-4o",
     supportsReasoningEffort: true,
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic-compatible (Messages API)",
+    summary: "Anthropic's /v1/messages wire format — Claude, or any Anthropic-compatible endpoint.",
+    capabilities: ["chat", "ocr"],
+    defaultCapabilities: ["chat"],
+    inputs: ["text", "image", "document"],
+    outputs: ["text"],
+    baseURLHint: "API root WITHOUT /v1 — leave blank for the official endpoint",
+    baseURLExample: "https://api.anthropic.com",
+    modelExample: "claude-sonnet-4-6",
   },
   {
     id: "openai-responses",
