@@ -86,7 +86,15 @@ export interface LLMRequest {
   model?: string;
   temperature?: number;
   maxTokens?: number;
+  /** Nucleus-sampling cutoff (0–1). Adapters map this onto `top_p`. */
+  topP?: number;
   stop?: string[];
+  /**
+   * Reasoning effort ("minimal"|"low"|"medium"|"high") for reasoning-capable
+   * providers. Adapters map this onto `reasoning_effort` (OpenAI chat/Responses);
+   * providers without an effort enum (Anthropic) ignore it.
+   */
+  reasoningEffort?: string;
   /** RESERVED — streaming is not yet implemented; adapters currently ignore this. */
   stream?: boolean;
   /** RESERVED — not yet forwarded to providers; adapters currently ignore this. */
@@ -169,6 +177,11 @@ export interface Communicator {
   readonly capabilities: readonly Capability[];
   readonly input: readonly Modality[];
   readonly output: readonly Modality[];
+  /**
+   * The model's context-window size in tokens, when configured. METADATA only
+   * (never a wire param) — lets a plugin budget how much context it composes.
+   */
+  readonly contextLength?: number;
   chat?(req: LLMRequest): Promise<LLMResponse>;
   embed?(req: EmbedRequest): Promise<EmbedResponse>;
   rerank?(req: RerankRequest): Promise<RerankResponse>;

@@ -188,7 +188,12 @@ export async function chat(
   if (req.tools !== undefined) body.tools = mapTools(req.tools);
   const temperature = req.temperature ?? cfg.temperature;
   if (temperature !== undefined) body.temperature = temperature;
-  if (req.stop !== undefined) body.stop_sequences = req.stop;
+  const topP = req.topP ?? cfg.topP;
+  if (topP !== undefined) body.top_p = topP;
+  const stop = req.stop ?? cfg.stop;
+  if (stop !== undefined) body.stop_sequences = stop;
+  // reasoningEffort is deliberately NOT wired for Anthropic: the Messages API has
+  // no effort enum — it uses `thinking: { budget_tokens }`, a different mechanism.
 
   const res = await fetch(url, {
     method: "POST",

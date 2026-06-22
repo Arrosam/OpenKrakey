@@ -11,6 +11,13 @@
 (() => { // IIFE — keep these locals out of the shared global scope (schema.js owns those names)
 const { PROVIDERS, PLUGINS, PLUGIN_SCHEMAS, AGENT_FIELDS, communicatorFields, SEED } = window.OK;
 
+// Embedded vs standalone: inside the unified Krakey Console iframe the top
+// nav-bar already shows the global KRAKEY brand, so we hide our own brand block
+// to avoid two stacked logos. `window.self !== window.top` is true whenever we
+// run in a frame (works even cross-origin, where it can't read the parent).
+const EMBEDDED = (() => { try { return window.self !== window.top; } catch { return true; } })();
+if (EMBEDDED) document.documentElement.classList.add("embedded");
+
 // deep clone seed so edits in the mock don't mutate the schema module
 const state = JSON.parse(JSON.stringify(SEED));
 let dirty = false;
@@ -340,6 +347,20 @@ function topbar(main, crumbs, title, subtitle, actions) {
 
 function btn(label, cls, onclick) { const b = el("button", "btn " + (cls || ""), label); b.onclick = onclick; return b; }
 
+// A destructive button that ARMS on the first click (extends + a warning pulse,
+// label → "Click again to confirm") and runs onConfirm only on the SECOND click.
+// Moving the pointer away disarms it back to its resting label — no modal.
+function confirmBtn(label, onConfirm) {
+  const b = el("button", "btn danger confirm-btn", label);
+  let armed = false;
+  b.onclick = () => {
+    if (!armed) { armed = true; b.classList.add("armed"); b.textContent = "Click again to confirm"; return; }
+    onConfirm();
+  };
+  b.onmouseleave = () => { if (!armed) return; armed = false; b.classList.remove("armed"); b.textContent = label; };
+  return b;
+}
+
 /* Overview / landing */
 views.overview = (main) => {
   topbar(main, ["OpenKrakey", "Console"], 'Config <span class="accent">console</span>',
@@ -459,7 +480,7 @@ function editService(name) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved draft</span><span class="spacer"></span>`;
   bar.appendChild(btn("Cancel", "ghost", () => setView("services")));
-  if (!isNew) bar.appendChild(btn("Delete", "danger", () => { delete state.services[name]; if (state.default.name === name) state.default.name = null; setView("services"); toast(`Deleted "${name}"`); }));
+  if (!isNew) bar.appendChild(confirmBtn("Delete", () => { delete state.services[name]; if (state.default.name === name) state.default.name = null; setView("services"); toast(`Deleted "${name}"`); }));
   bar.appendChild(btn("Save service", "primary", () => {
     if (!workingName) { toastErr("Name the connection first"); return; }
     if (!working.model) { toastErr("Enter a model id"); return; }
@@ -492,15 +513,185 @@ views.agents = (main) => {
   main.appendChild(list);
 };
 
-function createAgent() {
-  const id = "agent-" + (Object.keys(state.agents).length + 1);
-  state.agents[id] = JSON.parse(JSON.stringify({ ...state.defaultSetting, id }));
-  toast(`Created "${id}" from default`); editAgent(id);
-}
+function createAgent() { startNewAgentWizard(); }
 
 /* Agent editor (and Default editor via shared core) */
 views.default = (main) => settingEditor(main, state.defaultSetting, { isDefault: true });
 function editAgent(id) { const main = $("#main"); main.innerHTML = ""; dirty = false; settingEditor(main, state.agents[id], { id }); animateIn(); }
+
+/* ── New-agent wizard ───────────────────────────────────────────────────────
+   "New agent" opens this guided flow instead of a bare id prompt: name the
+   agent, pick which configured AI service it uses (or No LLM — llm-core stays
+   off), choose plugins, review, then land in the full editor to fine-tune every
+   plugin's settings. Reuses the wizard rail/panel chrome + the field controls. */
+const NWZ_STEPS = ["Agent", "LLM", "Plugins", "Review"];
+let nwz = null;
+
+function startNewAgentWizard() {
+  const ds = state.defaultSetting || {};
+  const seed = [...new Set([...(ds.plugins || []), ...(ds.privatePlugins || [])])];
+  nwz = {
+    step: 0,
+    agent: {
+      id: "",
+      intervalMs: typeof ds.intervalMs === "number" ? ds.intervalMs : 60000,
+    },
+    llm: { mode: serviceNames().length ? "service" : "none", communicator: serviceNames()[0] || "" },
+    plugins: seed.length ? [...seed] : ["llm-core", "persona", "system-prompt"],
+  };
+  syncLlmCore();
+  const main = $("#main"); main.innerHTML = ""; drawNewAgent(main); animateIn();
+}
+
+// Keep the LLM choice and the llm-core plugin in lock-step: a service implies
+// llm-core on; "No LLM" implies it off.
+function syncLlmCore() {
+  const has = nwz.plugins.includes("llm-core");
+  if (nwz.llm.mode === "service" && !has) nwz.plugins = ["llm-core", ...nwz.plugins];
+  if (nwz.llm.mode === "none" && has) nwz.plugins = nwz.plugins.filter((p) => p !== "llm-core");
+}
+
+function drawNewAgent(main) {
+  main.innerHTML = "";
+  const wrap = el("div", "wizard");
+  const rail = el("div", "wz-rail");
+  NWZ_STEPS.forEach((s, i) => {
+    const step = el("div", "step" + (i === nwz.step ? " active" : i < nwz.step ? " done" : ""));
+    step.innerHTML = `<span class="n">${i < nwz.step ? "✓" : i + 1}</span><span class="nm">${esc(s)}</span>`;
+    rail.appendChild(step);
+    if (i < NWZ_STEPS.length - 1) rail.appendChild(el("div", "bar" + (i < nwz.step ? " filled" : "")));
+  });
+  wrap.appendChild(rail);
+  const panel = el("div", "wz-panel");
+  [naAgent, naLLM, naPlugins, naReview][nwz.step](panel);
+  wrap.appendChild(panel);
+  main.appendChild(wrap);
+}
+
+function naFoot(panel, onNext, nextLabel) {
+  const foot = el("div", "wz-foot");
+  if (nwz.step > 0) foot.appendChild(btn(`${icon("arrowLeft", "btn-ic")}Back`, "ghost", () => { nwz.step--; drawNewAgent($("#main")); }));
+  else foot.appendChild(btn("Cancel", "ghost", () => setView("agents")));
+  foot.appendChild(el("div", "spacer"));
+  foot.appendChild(btn(nextLabel || `Continue${icon("arrowRight", "btn-ic")}`, "primary", onNext));
+  panel.appendChild(foot);
+}
+
+function naAgent(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Name your agent</h2>` +
+    `<p class="lede">A name and how often it wakes on its own. The persona and every plugin's settings come next, in the editor.</p>`;
+  const body = el("div", "wz-body");
+  const fields = [
+    { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+  ];
+  fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
+  panel.appendChild(body);
+  naFoot(panel, () => {
+    const id = (nwz.agent.id || "").trim();
+    if (!id) return toastErr("Name your agent");
+    if (state.agents[id]) return toastErr(`"${id}" already exists`);
+    nwz.agent.id = id;
+    nwz.step = 1; drawNewAgent($("#main"));
+  });
+}
+
+function naLLM(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Which AI service?</h2>` +
+    `<p class="lede">Pick the LLM this agent talks to through <b>llm-core</b> — or <b>No LLM</b> for an agent that runs its heartbeat with no brain (llm-core stays off). Valid either way.</p>`;
+  const body = el("div", "wz-body");
+  const host = el("div", "pick");
+  const opts = [
+    ...serviceNames().map((n) => ({ mode: "service", value: n, title: n, sub: state.services[n] && state.services[n].provider ? `provider · ${state.services[n].provider}` : "configured AI service", ic: "server" })),
+    { mode: "none", value: "", title: "No LLM", sub: "no llm-core — heartbeat only", ic: "x" },
+  ];
+  const draw = () => {
+    host.innerHTML = "";
+    opts.forEach((o) => {
+      const sel = nwz.llm.mode === o.mode && (o.mode === "none" || nwz.llm.communicator === o.value);
+      const opt = el("div", "opt" + (sel ? " sel" : ""));
+      opt.innerHTML = `<span class="box">${sel ? icon("check") : ""}</span>` +
+        `<span class="ot"><span class="on"><span class="oi">${icon(o.ic)}</span>${esc(o.title)}</span><span class="os">${esc(o.sub)}</span></span>`;
+      opt.onclick = () => { nwz.llm.mode = o.mode; nwz.llm.communicator = o.value; syncLlmCore(); draw(); };
+      host.appendChild(opt);
+    });
+  };
+  draw();
+  body.appendChild(host);
+  if (!serviceNames().length) {
+    const note = el("div", "wz-note");
+    note.innerHTML = `${icon("alert")}<span>No AI services configured yet — add one under <b>AI services</b>, or continue with <b>No LLM</b>.</span>`;
+    body.appendChild(note);
+  }
+  panel.appendChild(body);
+  naFoot(panel, () => { nwz.step = 2; drawNewAgent($("#main")); });
+}
+
+function naPlugins(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Choose its capabilities</h2>` +
+    `<p class="lede">Each capability is a plugin — turn on what you want. <b>llm-core</b> can be turned off for an agent with no AI brain.</p>`;
+  const body = el("div", "wz-body");
+  const fld = { key: "plugins", label: "Plugins", control: "multiselect", optionsFrom: "plugins" };
+  const get = () => nwz.plugins;
+  const set = (v) => {
+    nwz.plugins = v;
+    // keep the LLM step honest when llm-core is toggled here
+    if (!v.includes("llm-core")) { nwz.llm.mode = "none"; nwz.llm.communicator = ""; }
+    else if (nwz.llm.mode === "none") { nwz.llm.mode = "service"; nwz.llm.communicator = serviceNames()[0] || ""; }
+  };
+  body.appendChild(buildControl(fld, get, set, {}));
+  panel.appendChild(body);
+  naFoot(panel, () => { nwz.step = 3; drawNewAgent($("#main")); });
+}
+
+function naReview(panel) {
+  panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Ready to create</h2>` +
+    `<p class="lede">This writes agents/${esc(nwz.agent.id)}/config.json. You'll land in the editor next to fine-tune every plugin's settings.</p>`;
+  const body = el("div", "wz-body");
+
+  const ag = el("div", "review-blk");
+  ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
+    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true);
+  body.appendChild(ag);
+
+  const llm = el("div", "review-blk");
+  llm.innerHTML = `<div class="rh"><span class="rh-ic">${icon("server")}</span> AI service</div>` +
+    reviewLine("LLM", nwz.llm.mode === "service" ? (nwz.llm.communicator || "(first chat-capable)") : "None — llm-core off", true);
+  body.appendChild(llm);
+
+  const cap = el("div", "review-blk");
+  cap.innerHTML = `<div class="rh"><span class="rh-ic">${icon("grid")}</span> Capabilities · ${nwz.plugins.length} plugins</div>` +
+    `<div class="taglist" style="margin-top:2px">` +
+    (nwz.plugins.length
+      ? nwz.plugins.map((p) => { const m = PLUGINS.find((x) => x.id === p); return `<span class="tag">${m ? `<span class="tag-ic">${icon(m.icon)}</span>` : ""}${esc(m ? m.name : p)}</span>`; }).join("")
+      : `<span class="os">No plugins — a bare agent (still completes a beat).</span>`) + `</div>`;
+  body.appendChild(cap);
+  panel.appendChild(body);
+
+  const foot = el("div", "wz-foot");
+  foot.appendChild(btn(`${icon("arrowLeft", "btn-ic")}Back`, "ghost", () => { nwz.step = 2; drawNewAgent($("#main")); }));
+  foot.appendChild(el("div", "spacer"));
+  foot.appendChild(btn("✓ Create agent", "primary", commitNewAgent));
+  panel.appendChild(foot);
+}
+
+function commitNewAgent() {
+  const id = nwz.agent.id;
+  // Seed from the default setting (keeps persona text + plugin defaults), then
+  // lay the wizard's high-level choices over it — per-plugin settings like the
+  // persona are tuned in the editor, not the wizard.
+  const def = JSON.parse(JSON.stringify({ ...state.defaultSetting, id }));
+  def.intervalMs = nwz.agent.intervalMs;
+  def.plugins = [...nwz.plugins];
+  def.privatePlugins = nwz.plugins.filter((p) => { const m = PLUGINS.find((x) => x.id === p); return m && m.dataCarrier; });
+  if (!def.config) def.config = {};
+  if (nwz.plugins.includes("llm-core") && nwz.llm.mode === "service" && nwz.llm.communicator) {
+    def.config["llm-core"] = { ...(def.config["llm-core"] || {}), communicator: nwz.llm.communicator };
+  }
+  state.agents[id] = def;
+  toast(`Created agent "${id}"`);
+  editAgent(id);
+}
 
 function settingEditor(main, model, opts) {
   const id = opts.id;
@@ -570,7 +761,7 @@ function settingEditor(main, model, opts) {
   const bar = el("div", "savebar");
   bar.innerHTML = `<span class="dirty"><span class="d"></span>unsaved changes</span><span class="spacer"></span>`;
   bar.appendChild(btn("Discard", "ghost", () => setView(opts.isDefault ? "overview" : "agents")));
-  if (!opts.isDefault) bar.appendChild(btn("Delete config", "danger", () => { delete state.agents[id]; setView("agents"); toast(`Removed "${id}"`); }));
+  if (!opts.isDefault) bar.appendChild(confirmBtn("Delete config", () => { delete state.agents[id]; setView("agents"); toast(`Removed "${id}"`); }));
   bar.appendChild(btn("Save", "primary", () => { toast(opts.isDefault ? "Saved default settings" : `Saved "${id}"`); setView(opts.isDefault ? "overview" : "agents"); }));
   main.appendChild(bar);
 }
@@ -586,12 +777,21 @@ const WZ_STEPS = ["Welcome", "AI service", "Capabilities", "Agent", "Review"];
 const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
-  plugins: ["llm-core", "persona", "system-prompt", "web", "krakeycode"],
+  plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
   agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. Be concise and helpful.", intervalMs: 30000 },
 };
 
 views.wizard = (main) => {
   wz.step = 0;
+  // Seed the agent defaults from the Default Setting so the wizard FOLLOWS it
+  // (heartbeat, plugin set, persona) rather than stale hardcoded values.
+  const ds = state.defaultSetting || {};
+  if (typeof ds.intervalMs === "number") wz.agent.intervalMs = ds.intervalMs;
+  if (ds.config && ds.config.persona && typeof ds.config.persona.text === "string") {
+    wz.agent.persona = ds.config.persona.text;
+  }
+  const all = [...new Set([...(ds.plugins || []), ...(ds.privatePlugins || [])])];
+  if (all.length) wz.plugins = all;
   drawWizard(main);
 };
 
@@ -702,7 +902,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted. 30000 = every 30 seconds." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -763,7 +963,7 @@ function wzReview(panel) {
     const cfg = { persona: { text: wz.agent.persona }, "llm-core": { communicator: svcName } };
     state.agents[wz.agent.id] = {
       id: wz.agent.id, intervalMs: wz.agent.intervalMs,
-      plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((x) => x === "web"), config: cfg,
+      plugins: [...wz.plugins], privatePlugins: wz.plugins.filter((x) => x === "web-chat"), config: cfg,
     };
     toast(`Created agent "${wz.agent.id}"`);
     setView("agents");
@@ -811,5 +1011,14 @@ function buildShell() {
 }
 
 buildShell();
-setView("overview");
+// Deep-link: a #wizard / #guided-setup hash (e.g. from the Console's "Quick
+// setup" button) opens the Guided-setup wizard straight away; otherwise land on
+// the overview as usual.
+setView(isWizardHash() ? "wizard" : "overview");
+
+// True when the URL hash names the onboarding wizard anchor (case-insensitive).
+function isWizardHash() {
+  const h = (location.hash || "").replace(/^#/, "").toLowerCase();
+  return h === "wizard" || h === "guided-setup";
+}
 })(); // end IIFE

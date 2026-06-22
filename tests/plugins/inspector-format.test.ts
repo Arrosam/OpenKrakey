@@ -80,7 +80,7 @@ const TOOL_HEADER = (n: number) => `— tools (${n}) —`;
 test("raw: assembled request is JSON.stringify(req, null, 2) verbatim (req 1)", () => {
   const request = {
     system: "S",
-    messages: [{ role: "user", content: "hi", name: "web" }],
+    messages: [{ role: "user", content: "hi", name: "web-chat" }],
     tools: [{ name: "t1" }],
     temperature: 0.5,
     maxTokens: 100,
@@ -166,7 +166,7 @@ test("readable: full assembled record renders all four sections in order (req 3)
         request: {
           system: "S",
           messages: [
-            { role: "user", content: "hi", name: "web" },
+            { role: "user", content: "hi", name: "web-chat" },
             { role: "assistant", content: "hey" },
           ],
           tools: [{ name: "time.now" }, { name: "note.save" }],
@@ -179,7 +179,7 @@ test("readable: full assembled record renders all four sections in order (req 3)
   );
   assert.equal(
     out,
-    "S\n\n— messages (2) —\nuser (web): hi\nassistant: hey\n\n— tools (2) —\ntime.now, note.save\n\nparams: temperature=0.7 · maxTokens=1024",
+    "S\n\n— messages (2) —\nuser (web-chat): hi\nassistant: hey\n\n— tools (2) —\ntime.now, note.save\n\nparams: temperature=0.7 · maxTokens=1024",
   );
 });
 
@@ -191,7 +191,7 @@ test("readable: no system -> first section omitted, no leading blank lines (req 
       data: {
         request: {
           messages: [
-            { role: "user", content: "hi", name: "web" },
+            { role: "user", content: "hi", name: "web-chat" },
             { role: "assistant", content: "hey" },
           ],
           tools: [{ name: "time.now" }, { name: "note.save" }],
@@ -205,7 +205,7 @@ test("readable: no system -> first section omitted, no leading blank lines (req 
   // Identical to req 3 EXCEPT the leading "S\n\n" is gone.
   assert.equal(
     out,
-    "— messages (2) —\nuser (web): hi\nassistant: hey\n\n— tools (2) —\ntime.now, note.save\n\nparams: temperature=0.7 · maxTokens=1024",
+    "— messages (2) —\nuser (web-chat): hi\nassistant: hey\n\n— tools (2) —\ntime.now, note.save\n\nparams: temperature=0.7 · maxTokens=1024",
   );
 });
 
@@ -426,10 +426,10 @@ test("readable head: empty-string name is NOT appended (non-empty rule)", () => 
 
 test("readable head: missing role but present name -> '? (name)'", () => {
   const out = formatRequest(
-    { data: { request: { messages: [{ content: "x", name: "web" }] } } },
+    { data: { request: { messages: [{ content: "x", name: "web-chat" }] } } },
     "readable",
   );
-  assert.equal(out, "— messages (1) —\n? (web): x");
+  assert.equal(out, "— messages (1) —\n? (web-chat): x");
 });
 
 test("readable head: non-string name (number) is NOT appended", () => {

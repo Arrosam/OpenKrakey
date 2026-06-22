@@ -62,13 +62,13 @@ the predecessor rotted. Open an issue to evolve the contract properly.
 ## Building a plugin
 
 The full authoring guide is [docs/PLUGIN_DEV.md](docs/PLUGIN_DEV.md). The canonical worked
-examples are `public_plugin/system-prompt/` (the simplest plugin), `public_plugin/web/` (a
+examples are `public_plugin/system-prompt/` (the simplest plugin), `public_plugin/web-chat/` (a
 tool + channel), and `public_plugin/krakeycode/` (a thorough toolkit with a complete test suite).
 
 ## Commits & pull requests
 
 - Keep each commit a single logical unit with a clear, present-tense message
-  (`area: short summary`, e.g. `web: fold tool results into the conversation block`).
+  (`area: short summary`, e.g. `web-chat: fold tool results into the conversation block`).
 - Ensure `npm test` and `npm run typecheck` pass, and that no stray `.js`/`.d.ts` were left behind.
 - Describe the change and its rationale in the PR, and note which invariant(s) it touches, if any.
 

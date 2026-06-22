@@ -97,6 +97,17 @@ function parsePositiveInt(raw: string): number | undefined {
   return n > 0 ? n : undefined;
 }
 
+/** Parse a finite, non-negative number (int or float); undefined otherwise. */
+function parseNonNegativeFloat(raw: string): number | undefined {
+  const v = raw.trim();
+  if (v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** Reasoning-effort levels offered for reasoning-capable providers. */
+const REASONING_EFFORTS = ["minimal", "low", "medium", "high"] as const;
+
 // ── Provider-catalogue helpers (selects + format hints from shared/config) ───
 
 /** Catalogue entry for a provider id; undefined for an unknown/legacy id. */
@@ -308,6 +319,47 @@ export async function runInteractiveLoop(
     }
   }
 
+  /**
+   * Edit a list of stop sequences (free strings). Returns the new list (empty
+   * when the user removes them all). Each entry is a literal string the model
+   * must not produce; ordering is preserved.
+   */
+  async function editStopSequences(current: string[]): Promise<string[]> {
+    const list = [...current];
+    for (;;) {
+      const action = await ask(() =>
+        select({
+          message: "stop sequences — generation halts when the model produces any of these",
+          choices: [
+            ...list.map((s, i) => ({
+              name: `${JSON.stringify(s)}`,
+              value: `remove:${i}`,
+            })),
+            { name: mint("+ Add a stop sequence"), value: "add" },
+            { name: DONE, value: "done" },
+          ],
+          loop: false,
+        }),
+      );
+
+      if (action === "done") return list;
+
+      if (action === "add") {
+        const seq = await ask(() =>
+          input({
+            message: "stop sequence to add (leave empty to go back)",
+          }),
+        );
+        if (seq !== "") list.push(seq);
+        continue;
+      }
+
+      // remove:<index>
+      const idx = Number(action.slice("remove:".length));
+      if (Number.isInteger(idx) && idx >= 0 && idx < list.length) list.splice(idx, 1);
+    }
+  }
+
   // ── Shared agent/default field editor ──────────────────────────────────────
   /**
    * Edit the four shared setting fields (intervalMs / plugins / privatePlugins /
@@ -357,7 +409,7 @@ export async function runInteractiveLoop(
       if (field === "intervalMs") {
         const raw = await ask(() =>
           input({
-            message: "heartbeat interval in milliseconds (e.g. 30000 = the agent thinks every 30 seconds)",
+            message: "heartbeat interval in milliseconds (60000 = 1 minute)",
             default: String(draft.intervalMs),
             validate: (r) =>
               parsePositiveInt(r) !== undefined
@@ -616,6 +668,10 @@ export async function runInteractiveLoop(
       capabilities: (existing.capabilities ?? info.defaultCapabilities) as Capability[],
       input: (existing.input ?? ["text"]) as Modality[],
       output: (existing.output ?? ["text"]) as Modality[],
+      topP: existing.topP,
+      stop: existing.stop ? [...existing.stop] : undefined,
+      reasoningEffort: existing.reasoningEffort,
+      contextLength: existing.contextLength,
     };
     // A blank baseURL only REMOVES the field when the user explicitly cleared it;
     // an untouched baseURL is preserved as-is.
@@ -634,6 +690,9 @@ export async function runInteractiveLoop(
       if (draft.input.length === 0) draft.input = ["text"];
       draft.output = draft.output.filter((m) => p.outputs.includes(m));
       if (draft.output.length === 0) draft.output = ["text"];
+      // reasoningEffort only applies to reasoning-capable providers — drop it
+      // when switching to a type that has no effort setting.
+      if (!p.supportsReasoningEffort) draft.reasoningEffort = undefined;
     };
     clampToProvider();
 
@@ -662,6 +721,26 @@ export async function runInteractiveLoop(
             {
               name: `Output types: ${draft.output.map((m) => MODALITY_LABELS[m]).join(", ")}`,
               value: "output",
+            },
+            {
+              name: `Top-p (nucleus sampling): ${draft.topP ?? "(provider default)"}`,
+              value: "topP",
+            },
+            ...(info!.supportsReasoningEffort
+              ? [
+                  {
+                    name: `Reasoning effort: ${draft.reasoningEffort ?? "(provider default)"}`,
+                    value: "reasoningEffort",
+                  },
+                ]
+              : []),
+            {
+              name: `Stop sequences: ${draft.stop && draft.stop.length > 0 ? draft.stop.join(", ") : "(none)"}`,
+              value: "stop",
+            },
+            {
+              name: `Context length: ${draft.contextLength ?? "(provider default)"} ${draft.contextLength ? "tokens" : ""}`.trimEnd(),
+              value: "contextLength",
             },
             { name: mint("Save"), value: "save" },
             // Delete only applies to an EXISTING communicator, not a new one.
@@ -714,6 +793,15 @@ export async function runInteractiveLoop(
         if (draft.baseURL) def.baseURL = draft.baseURL;
         else if (baseURLCleared) delete def.baseURL;
         if (draft.apiKey) def.apiKey = draft.apiKey;
+        // Optional tuning fields — set when present, dropped when cleared.
+        if (draft.topP !== undefined) def.topP = draft.topP;
+        else delete def.topP;
+        if (draft.stop && draft.stop.length > 0) def.stop = [...draft.stop];
+        else delete def.stop;
+        if (draft.reasoningEffort !== undefined) def.reasoningEffort = draft.reasoningEffort;
+        else delete def.reasoningEffort;
+        if (draft.contextLength !== undefined) def.contextLength = draft.contextLength;
+        else delete def.contextLength;
         cfg.communicators[name] = def;
         return true;
       }
@@ -738,6 +826,55 @@ export async function runInteractiveLoop(
         draft.input = await askModalities("input", info.inputs, draft.input);
       } else if (field === "output") {
         draft.output = await askModalities("output", info.outputs, draft.output);
+      } else if (field === "topP") {
+        const raw = await ask(() =>
+          input({
+            message:
+              "top-p — nucleus-sampling cutoff between 0 and 1 (e.g. 0.9; leave empty to clear / use the provider default)",
+            default: draft.topP !== undefined ? String(draft.topP) : "",
+            validate: (r) => {
+              const v = r.trim();
+              if (v === "") return true; // empty = clear
+              const n = parseNonNegativeFloat(v);
+              return n !== undefined && n <= 1
+                ? true
+                : "must be a number between 0 and 1";
+            },
+          }),
+        );
+        const v = raw.trim();
+        draft.topP = v === "" ? undefined : parseNonNegativeFloat(v);
+      } else if (field === "reasoningEffort") {
+        draft.reasoningEffort = await ask(() =>
+          select<string | undefined>({
+            message: "reasoning effort — how hard a reasoning-capable model thinks before answering",
+            choices: [
+              { name: dim("(provider default)"), value: undefined },
+              ...REASONING_EFFORTS.map((e) => ({ name: e, value: e as string })),
+            ],
+            default: draft.reasoningEffort,
+            loop: false,
+          }),
+        );
+      } else if (field === "stop") {
+        draft.stop = await editStopSequences(draft.stop ?? []);
+      } else if (field === "contextLength") {
+        const raw = await ask(() =>
+          input({
+            message:
+              "context length — the model's context-window size in tokens (metadata only, e.g. 200000; leave empty to clear)",
+            default: draft.contextLength !== undefined ? String(draft.contextLength) : "",
+            validate: (r) => {
+              const v = r.trim();
+              if (v === "") return true; // empty = clear
+              return parsePositiveInt(v) !== undefined
+                ? true
+                : "must be a positive whole number of tokens";
+            },
+          }),
+        );
+        const v = raw.trim();
+        draft.contextLength = v === "" ? undefined : parsePositiveInt(v);
       } else {
         // apiKey — masked entry; never pre-fill; blank keeps the current value.
         const v = await ask(() =>
@@ -939,9 +1076,9 @@ export async function runInteractiveLoop(
       if (err instanceof CliError) {
         const available = await guard(() => cli.listAvailablePlugins(), []);
         // Data-carrying plugins default to independent copies so each agent gets
-        // its own chat history (shared code, private data — R6). web persists the
+        // its own chat history (shared code, private data — R6). web-chat persists the
         // per-agent transcript (the conversation), so it is private-by-default.
-        const privateByDefault = available.filter((p) => p === "web");
+        const privateByDefault = available.filter((p) => p === "web-chat");
         await guard(async () => {
           await cli.writeDefault({
             intervalMs: 30000,

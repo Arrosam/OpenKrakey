@@ -603,6 +603,71 @@ test("responses document: inline base64 document with NO mime -> file_data prefi
 // 11. MULTIMODAL CHAT INPUT — image wire shape (input_image)
 // ===========================================================================
 
+// ===========================================================================
+// 12. PER-COMMUNICATOR TUNING FIELDS — topP / reasoningEffort wire mapping
+//     (Responses has no `stop` param — it must never be sent)
+// ===========================================================================
+
+test("responses tuning: topP -> top_p and reasoningEffort -> reasoning_effort appear when configured", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      gptr: {
+        provider: "openai-responses",
+        model: "gpt-5",
+        apiKey: "k",
+        capabilities: ["chat"],
+        topP: 0.8,
+        reasoningEffort: "high",
+      },
+    }),
+  );
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(body.top_p, 0.8, "configured topP must wire to body.top_p");
+  assert.deepEqual(body.reasoning, { effort: "high" }, "configured reasoningEffort must wire to body.reasoning.effort (Responses API nesting)");
+});
+
+test("responses tuning: a configured `stop` is NEVER sent (the Responses API has no stop param)", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      gptr: {
+        provider: "openai-responses",
+        model: "gpt-5",
+        apiKey: "k",
+        capabilities: ["chat"],
+        stop: ["END"],
+        topP: 0.5,
+      },
+    }),
+  );
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal("stop" in body, false, "the Responses API must NOT receive a stop param");
+  // topP still wires through even though stop is dropped.
+  assert.equal(body.top_p, 0.5);
+});
+
+test("responses tuning: with none set, top_p / reasoning_effort / stop are all ABSENT", async () => {
+  const lib = createCommunicatorLibrary(cfg({ gptr: RESP({ capabilities: ["chat"] }) }));
+  const c = lib.get("gptr")!;
+  cannedBody = responsesOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal("top_p" in body, false, "top_p must be absent when topP is unset");
+  assert.equal("reasoning" in body, false, "reasoning must be absent when unset");
+  assert.equal("stop" in body, false, "stop must never appear on a Responses request");
+});
+
 test("responses multimodal: [text, image{url}] emits an input_image part", async () => {
   const lib = createCommunicatorLibrary(
     cfg({ gptr: RESP({ capabilities: ["chat"], input: ["text", "image"] }) }),

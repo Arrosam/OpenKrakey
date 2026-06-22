@@ -112,6 +112,10 @@ function buildCommunicator(name: string, def: CommunicatorDef): Communicator {
     baseURL: def.baseURL ?? adapter.defaultBaseURL,
     temperature: def.temperature,
     maxTokens: def.maxTokens,
+    topP: def.topP,
+    stop: def.stop,
+    reasoningEffort: def.reasoningEffort,
+    contextLength: def.contextLength,
   };
 
   let chat: ((req: LLMRequest) => Promise<LLMResponse>) | undefined;
@@ -174,6 +178,8 @@ function buildCommunicator(name: string, def: CommunicatorDef): Communicator {
     capabilities,
     input: def.input ?? ["text"],
     output: def.output ?? ["text"],
+    // contextLength is metadata only — surfaced so plugins can budget context.
+    ...(def.contextLength !== undefined ? { contextLength: def.contextLength } : {}),
     ...(chat ? { chat } : {}),
     ...(embed ? { embed } : {}),
     ...(rerank ? { rerank } : {}),

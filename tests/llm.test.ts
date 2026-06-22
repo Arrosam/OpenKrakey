@@ -1606,3 +1606,133 @@ test("gateway guard: createCommunicatorLibrary({default:'claude'}) (no communica
   assert.deepEqual(lib.list(), [], "no communicators expected");
   assert.equal(lib.has("claude"), false, "the dangling default must not resolve to a communicator");
 });
+
+// ===========================================================================
+// 22. PER-COMMUNICATOR TUNING FIELDS — topP / stop / reasoningEffort wire mapping
+//     (present only when set; mirrors temperature/maxTokens conditionality)
+// ===========================================================================
+
+test("tuning (anthropic): topP -> top_p and stop -> stop_sequences appear when configured", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      a: {
+        provider: "anthropic",
+        model: "claude-x",
+        apiKey: "k",
+        topP: 0.7,
+        stop: ["END", "STOP"],
+      },
+    }),
+  );
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(body.top_p, 0.7, "configured topP must wire to body.top_p");
+  assert.deepEqual(body.stop_sequences, ["END", "STOP"], "configured stop must wire to body.stop_sequences");
+});
+
+test("tuning (anthropic): reasoning_effort is NEVER sent (Anthropic uses a thinking budget, not an effort enum)", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      a: {
+        provider: "anthropic",
+        model: "claude-x",
+        apiKey: "k",
+        reasoningEffort: "high",
+        topP: 0.5,
+      },
+    }),
+  );
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(
+    "reasoning_effort" in body,
+    false,
+    "Anthropic must not carry reasoning_effort even when configured",
+  );
+  // topP still wires through — only reasoningEffort is deliberately dropped.
+  assert.equal(body.top_p, 0.5);
+});
+
+test("tuning (anthropic): with none set, top_p / stop_sequences / reasoning_effort are all ABSENT", async () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  cannedBody = anthropicOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal("top_p" in body, false, "top_p must be absent when topP is unset");
+  assert.equal("stop_sequences" in body, false, "stop_sequences must be absent when stop is unset");
+  assert.equal("reasoning_effort" in body, false, "reasoning_effort must never be sent to anthropic");
+});
+
+test("tuning (openai chat): topP -> top_p, stop -> stop, reasoningEffort -> reasoning_effort all appear when set", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      o: {
+        provider: "openai-completion",
+        model: "gpt-x",
+        apiKey: "k",
+        baseURL: "https://api.openai.com/v1",
+        topP: 0.3,
+        stop: ["\n\n"],
+        reasoningEffort: "low",
+      },
+    }),
+  );
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal(body.top_p, 0.3, "configured topP must wire to body.top_p");
+  assert.deepEqual(body.stop, ["\n\n"], "configured stop must wire to body.stop");
+  assert.equal(body.reasoning_effort, "low", "configured reasoningEffort must wire to body.reasoning_effort");
+});
+
+test("tuning (openai chat): with none set, top_p / stop / reasoning_effort are all ABSENT", async () => {
+  const lib = createCommunicatorLibrary(cfg({ o: OPENAI() }));
+  const c = lib.get("o")!;
+  cannedBody = openaiOK("ok");
+
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const body = sentBody(lastCall!.init);
+  assert.equal("top_p" in body, false, "top_p must be absent when topP is unset");
+  assert.equal("stop" in body, false, "stop must be absent when stop is unset");
+  assert.equal("reasoning_effort" in body, false, "reasoning_effort must be absent when unset");
+});
+
+test("tuning: contextLength is METADATA only — exposed on the communicator, never on the wire", async () => {
+  const lib = createCommunicatorLibrary(
+    cfg({
+      a: { provider: "anthropic", model: "claude-x", apiKey: "k", contextLength: 200000 },
+    }),
+  );
+  const c = lib.get("a")!;
+  assert.equal(c.contextLength, 200000, "contextLength must be surfaced as read-only metadata");
+
+  cannedBody = anthropicOK("ok");
+  await c.chat!({ messages: [{ role: "user", content: "hi" }] });
+
+  const raw = sentBodyRaw(lastCall!.init);
+  assert.ok(
+    !raw.includes("contextLength") && !raw.includes("context_length"),
+    `contextLength must never appear in the request body: ${raw}`,
+  );
+});
+
+test("tuning: a communicator without contextLength does not expose the property", () => {
+  const lib = createCommunicatorLibrary(cfg({ a: ANTHROPIC() }));
+  const c = lib.get("a")!;
+  assert.equal(c.contextLength, undefined, "contextLength must be undefined when not configured");
+});

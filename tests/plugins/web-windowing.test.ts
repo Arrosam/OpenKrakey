@@ -6,14 +6,14 @@ import * as path from "node:path";
 import { createEventSystem } from "../../packages/event-system/src";
 import type { ContextBlock } from "../../contracts/context";
 import type { Message } from "../../contracts/llm";
-import { TranscriptStore, type TranscriptEntry } from "../../public_plugin/web/transcript-store";
+import { TranscriptStore, type TranscriptEntry } from "../../public_plugin/web-chat/transcript-store";
 
 // ---------------------------------------------------------------------------
 // BLACK-BOX edge tests for the conversation-WINDOWING helper being added to the
-// web plugin. The implementation does NOT exist yet; these tests are the
+// web-chat plugin. The implementation does NOT exist yet; these tests are the
 // acceptance criteria and are written from the spec only.
 //
-// SPEC (public_plugin/web/windowing.ts):
+// SPEC (public_plugin/web-chat/windowing.ts):
 //   windowTranscript(entries: readonly TranscriptEntry[], maxTurns: number,
 //                    maxChars: number): readonly TranscriptEntry[]
 //   - empty entries -> [].
@@ -25,18 +25,18 @@ import { TranscriptStore, type TranscriptEntry } from "../../public_plugin/web/t
 //   - return kept entries in CHRONOLOGICAL (oldest->newest) order. No mutation of
 //     input. Entry granularity only (no per-entry text clipping).
 //
-// CONFIG DEFAULTS (public_plugin/web/index.ts):
+// CONFIG DEFAULTS (public_plugin/web-chat/index.ts):
 //   conversationMaxTurns (default 60), conversationMaxChars (default 24000);
-//   invalid/missing/non-positive -> default. web.conversation render() calls
+//   invalid/missing/non-positive -> default. web-chat.conversation render() calls
 //   windowTranscript(r.store.list(), maxTurns, maxChars) then maps each entry as
 //   today: agent -> {role:"assistant", content}; user -> {role:"user", content,
-//   name:"web"}.
+//   name:"web-chat"}.
 //
 // The windowing module is imported through a TOLERANT dynamic import so a missing
 // module fails each test on a clean assertion (mirroring system-prompt.test.ts).
 // ---------------------------------------------------------------------------
 
-const winMod: any = await import("../../public_plugin/web/windowing.ts").then(
+const winMod: any = await import("../../public_plugin/web-chat/windowing.ts").then(
   (m) => m,
   () => null,
 );
@@ -47,7 +47,7 @@ function windowTranscript(
   maxTurns: number,
   maxChars: number,
 ): readonly TranscriptEntry[] {
-  assert.ok(winMod, "windowing module not implemented yet (import of public_plugin/web/windowing.ts failed)");
+  assert.ok(winMod, "windowing module not implemented yet (import of public_plugin/web-chat/windowing.ts failed)");
   assert.equal(
     typeof winMod?.windowTranscript,
     "function",
@@ -233,9 +233,9 @@ function makeWebCtx(config: unknown, dataDir: string) {
   return { ctx, store, sys };
 }
 
-test("config default conversationMaxTurns=60 caps the web.conversation block to <= 60 messages (80 seeded)", async () => {
-  const createWeb = (await import("../../public_plugin/web/index.ts")).default;
-  assert.equal(typeof createWeb, "function", "web plugin must default-export a PluginFactory");
+test("config default conversationMaxTurns=60 caps the web-chat.conversation block to <= 60 messages (80 seeded)", async () => {
+  const createWeb = (await import("../../public_plugin/web-chat/index.ts")).default;
+  assert.equal(typeof createWeb, "function", "web-chat plugin must default-export a PluginFactory");
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-win-cfg-"));
   tmpDirs.push(dir);
@@ -265,20 +265,20 @@ test("config default conversationMaxTurns=60 caps the web.conversation block to 
       () => undefined,
       (err: unknown) => {
         assert.fail(
-          "web plugin setup() threw — windowing/config-defaults feature not implemented yet: " +
+          "web-chat plugin setup() threw — windowing/config-defaults feature not implemented yet: " +
             String(err),
         );
       },
     );
 
-    const block = store.get("web.conversation");
-    assert.ok(block, "setup must register the 'web.conversation' block");
+    const block = store.get("web-chat.conversation");
+    assert.ok(block, "setup must register the 'web-chat.conversation' block");
 
     const rendered = (await (block as ContextBlock).render()) as Message[];
-    assert.ok(Array.isArray(rendered), "web.conversation render() must return a Message[]");
+    assert.ok(Array.isArray(rendered), "web-chat.conversation render() must return a Message[]");
     assert.ok(
       rendered.length <= 60,
-      `web.conversation must be windowed to <= 60 (default conversationMaxTurns) but got ${rendered.length} from ${SEEDED} seeded`,
+      `web-chat.conversation must be windowed to <= 60 (default conversationMaxTurns) but got ${rendered.length} from ${SEEDED} seeded`,
     );
     // Sanity: it should still contain the most recent turns mapped correctly.
     assert.ok(rendered.length > 0, "with 80 seeded entries the conversation must not be empty");

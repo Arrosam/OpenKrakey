@@ -17,6 +17,7 @@
         "boot",
         "cli",
         "config-web",
+        "console",
         "llm-gateway"
       ],
       "overview": "overviews/zones/core.md"
@@ -27,7 +28,7 @@
         "llm-core",
         "persona",
         "system-prompt",
-        "web",
+        "web-chat",
         "inspector",
         "krakeycode",
         "searxng",
@@ -145,6 +146,15 @@
       "status": "done",
       "overview": "overviews/nodes/config-web.md"
     },
+    "console": {
+      "zone": "core",
+      "path": "packages/console",
+      "description": "Global unified web console: a standalone static loopback server serving one shell (persistent top nav-bar + a Dashboard landing) that embeds the three web surfaces — config-web, the web chat channel, and the inspector — each in an iframe by URL. Holds no secrets and no API; surface URLs are configurable via env (defaults to the conventional loopback ports). Each embedded surface hides its own brand when framed so only the console's brand shows. Decoupled from the runtime; npm run console.",
+      "depends_on_contracts": [],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/console.md"
+    },
     "llm-gateway": {
       "zone": "core",
       "path": "packages/llm-gateway",
@@ -198,10 +208,10 @@
       "status": "done",
       "overview": "overviews/nodes/system-prompt.md"
     },
-    "web": {
+    "web-chat": {
       "zone": "plugins",
-      "path": "public_plugin/web",
-      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web.send_message tool (registered with llm-core; the orchestrator dispatches the call to web's action) — the LLM's output.message monologue is NOT auto-streamed. Contributes a `web.guidance` SYSTEM block (priority 8000, text/priority config-overridable) teaching THIS channel's own usage (Web Chat is a message channel; reach its user only by calling web.send_message) — the general monologue/operating-model rule stays in the separate `system-prompt` plugin. OWNS THE CONVERSATION via a `web.conversation` message-block (priority 5000) rendering its persisted transcript as clean turns (user input + agent sends; no monologue, no tool mechanics). The data-carrying plugin, so private-by-default (per-agent transcript). per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
+      "path": "public_plugin/web-chat",
+      "description": "Browser chat channel: a refcounted module-level node:http server (one per process); POST /api/agents/:id/message -> input.message + clock.fire_now; SSE /api/agents/:id/stream streams ONLY what the agent explicitly sends via its web-chat.send_message tool (registered with llm-core; the orchestrator dispatches the call to web-chat's action) — the LLM's output.message monologue is NOT auto-streamed. Contributes a `web-chat.guidance` SYSTEM block (priority 8000, text/priority config-overridable) teaching THIS channel's own usage (Web Chat is a message channel; reach its user only by calling web-chat.send_message) — the general monologue/operating-model rule stays in the separate `system-prompt` plugin. OWNS THE CONVERSATION via a `web-chat.conversation` message-block (priority 5000) rendering its persisted transcript as clean turns (user input + agent sends; no monologue, no tool mechanics). The data-carrying plugin, so private-by-default (per-agent transcript). per-message sent/read status (read on llm.return). Serves a dependency-free static chat page.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -210,7 +220,7 @@
       ],
       "implements_contracts": [],
       "status": "done",
-      "overview": "overviews/nodes/web.md"
+      "overview": "overviews/nodes/web-chat.md"
     },
     "inspector": {
       "zone": "plugins",
@@ -396,7 +406,7 @@
     },
     "http-auth": {
       "path": "shared/http-auth",
-      "description": "Per-process session-token primitives shared by the loopback HTTP plugins (web, inspector): constant-time tokenOk (openWhenUnset knob) + Bearer/query/cookie extractors (cookie decode knob, fail-closed). Plugins keep their own source precedence + token-from-config policy.",
+      "description": "Per-process session-token primitives shared by the loopback HTTP plugins (web-chat, inspector): constant-time tokenOk (openWhenUnset knob) + Bearer/query/cookie extractors (cookie decode knob, fail-closed). Plugins keep their own source precedence + token-from-config policy.",
       "status": "done"
     }
   }

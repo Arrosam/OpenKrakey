@@ -38,10 +38,10 @@ interface PluginMeta {
  * added plugin still renders — just without a custom icon/tagline.
  */
 const PLUGIN_META: Record<string, PluginMeta> = {
-  "llm-core": { id: "llm-core", icon: "cpu", name: "LLM core", tagline: "talks to the AI service — required for replies", required: true },
+  "llm-core": { id: "llm-core", icon: "cpu", name: "LLM core", tagline: "talks to the AI service — the agent's brain (optional)" },
   persona: { id: "persona", icon: "person", name: "Persona", tagline: "the agent's identity / system prompt" },
   "system-prompt": { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
-  web: { id: "web", icon: "chat", name: "Web chat", tagline: "chat with the agent from your browser", dataCarrier: true },
+  "web-chat": { id: "web-chat", icon: "chat", name: "Web chat", tagline: "chat with the agent from your browser", dataCarrier: true },
   krakeycode: { id: "krakeycode", icon: "code", name: "Coding tools", tagline: "read / write files, run shell, list dirs" },
   searxng: { id: "searxng", icon: "search", name: "Web search", tagline: "search the web via a SearXNG instance" },
   browser: { id: "browser", icon: "globe", name: "Browser", tagline: "read-only Chrome control — navigate + screenshot" },
@@ -135,7 +135,7 @@ export async function assembleSchema(deps: {
       min: 1,
       step: 1000,
       unit: "ms",
-      help: "How often the agent wakes to think unprompted. 30000 = every 30 s.",
+      help: "How often the agent wakes to think unprompted, in milliseconds (60000 = 1 minute).",
     },
     {
       key: "plugins",

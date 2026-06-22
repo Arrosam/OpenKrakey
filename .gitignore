@@ -163,5 +163,8 @@ public_plugin/*/data/
 # The live Default Plugin Setting — user-editable local state (template ships
 # as config/agent.default.example.json; the cli's guided setup seeds it too)
 config/agent.default.json
-.mdsmoke/
+
+# krakey CLI runtime state — background-instance PID list + log (krakey start/stop)
+.krakey/
+
 .mdsmoke/

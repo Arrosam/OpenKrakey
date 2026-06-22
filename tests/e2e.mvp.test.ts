@@ -2,20 +2,20 @@
  * E2E — the crown-jewel MVP integration test.
  *
  * A REAL `agent_instance` runs the REAL `public_plugin/` code (llm-core, persona,
- * history, web) against a LOCAL stub LLM server, driven through the WEB channel over
+ * history, web-chat) against a LOCAL stub LLM server, driven through the WEB channel over
  * HTTP. This exercises the MONOLOGUE behavior end-to-end: the LLM's plain return is
- * private; the agent reaches the browser ONLY by calling the web.send_message tool.
+ * private; the agent reaches the browser ONLY by calling the web-chat.send_message tool.
  *
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
- *     -> web: input.message Notify (channel "web") + clock.fire_now
+ *     -> web-chat: input.message Notify (channel "web") + clock.fire_now
  *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona -> <persona>) -> llm.request
- *     -> llm-core: chat({ system:<persona+web.guidance>, messages:<web's chat-history block>, tools })
+ *     -> llm-core: chat({ system:<persona+web-chat.guidance>, messages:<web-chat's chat-history block>, tools })
  *     -> stub server: BEFORE the user msg lands it returns plain content "E2E-MONOLOGUE"
- *        (a monologue — llm-core still emits output.message, but web does NOT render it);
- *        once it sees "hello krakey" it returns a web.send_message tool_call instead
- *     -> orchestrator dispatches web.send_message -> web persists + streams it (+ records
+ *        (a monologue — llm-core still emits output.message, but web-chat does NOT render it);
+ *        once it sees "hello krakey" it returns a web-chat.send_message tool_call instead
+ *     -> orchestrator dispatches web-chat.send_message -> web-chat persists + streams it (+ records
  *        the send in its OWN transcript -> a clean assistant turn in the next prompt)
- *     -> web streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser,
+ *     -> web-chat streams { type:"output", text:"E2E-FINAL-REPLY" } over SSE to the browser,
  *        while the "E2E-MONOLOGUE" return is NEVER delivered.
  *
  * The contracts that pin the wire shapes:
@@ -24,8 +24,8 @@
  *   - contracts/agent: AgentDefinition { id, intervalMs, plugins, config }
  *   - the plugin overviews (overviews/nodes/*.md) for each plugin's behavior
  *
- * RED-STATE rule: if the web plugin (or the others) is absent the loader has nothing
- * to wire — the web server never binds, the stub server sees < 2 requests, and the
+ * RED-STATE rule: if the web-chat plugin (or the others) is absent the loader has nothing
+ * to wire — the web-chat server never binds, the stub server sees < 2 requests, and the
  * SSE stream never delivers the reply. Every assertion FAILS on an assertion, and
  * nothing HANGS:
  *   - the stub server is always closed in a finally,
@@ -49,7 +49,7 @@ const REPO_ROOT = path.resolve(".");
 
 // ---------------------------------------------------------------------------
 // Stub OpenAI chat-completions server: returns plain "E2E-MONOLOGUE" content (a private
-// monologue) on every beat EXCEPT the 2nd post-input one, which returns a web.send_message
+// monologue) on every beat EXCEPT the 2nd post-input one, which returns a web-chat.send_message
 // tool_call carrying "E2E-FINAL-REPLY" — the only output that should reach the browser.
 // ---------------------------------------------------------------------------
 
@@ -87,9 +87,9 @@ async function startStubServer(): Promise<StubServer> {
       // STATE (field-targeted, so robust to out-of-order beats and not coupled to a
       // substring of the whole serialized body):
       //   • the agent "thinks out loud" — a plain content return ("E2E-MONOLOGUE") that
-      //     web must NEVER stream to the browser;
+      //     web-chat must NEVER stream to the browser;
       //   • once it has seen "hello krakey" AND already produced a monologue turn that
-      //     FOLLOWS that user message, it SPEAKS exactly once via web.send_message — so
+      //     FOLLOWS that user message, it SPEAKS exactly once via web-chat.send_message — so
       //     the first post-input beat is always a monologue (the e2e/6 guard) and the
       //     next speaks. This is the only thing that should reach the browser;
       //   • afterwards it keeps thinking, so the tool round-trip folds back into a later
@@ -114,7 +114,7 @@ async function startStubServer(): Promise<StubServer> {
               id: "c1",
               type: "function",
               function: {
-                name: "web.send_message",
+                name: "web-chat.send_message",
                 arguments: JSON.stringify({ text: "E2E-FINAL-REPLY" }),
               },
             },
@@ -197,12 +197,12 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "system-prompt", "web"],
-    // web is the data-carrying plugin now (it owns the conversation transcript), so it
+    plugins: ["llm-core", "persona", "system-prompt", "web-chat"],
+    // web-chat is the data-carrying plugin now (it owns the conversation transcript), so it
     // is private-by-default — each agent gets its OWN dataDir under agentsDir. Without
-    // this, web's transcript persists in the SHARED public_plugin/web/data across runs
+    // this, web-chat's transcript persists in the SHARED public_plugin/web-chat/data across runs
     // and pollutes the prompt with a prior run's conversation.
-    privatePlugins: ["web"],
+    privatePlugins: ["web-chat"],
     config: {
       persona: { text: "PERSONA-MARK" },
       "llm-core": { communicator: "stub" },
@@ -483,17 +483,17 @@ test("e2e/3: persona rides `system`, the user input is a role:'user' turn with i
     .flatMap((req) => messagesOfRole(req, "user"))
     .find((m) => typeof m.content === "string" && m.content.includes("hello krakey"));
   assert.ok(hello, "the user input must appear as a role:'user' turn in some request's messages[]");
-  assert.equal(hello.name, "web", "the user turn's source channel must be surfaced via name");
+  assert.equal(hello.name, "web-chat", "the user turn's source channel must be surfaced via name");
 
   const names = toolNames(first);
   assert.ok(
-    names.includes("web.send_message"),
-    "tools[] must include the web.send_message chat tool; saw [" + names.join(", ") + "]",
+    names.includes("web-chat.send_message"),
+    "tools[] must include the web-chat.send_message chat tool; saw [" + names.join(", ") + "]",
   );
 });
 
 // ===========================================================================
-// Assertion 4 — web owns its chat: the agent's web.send_message reply is recorded by
+// Assertion 4 — web-chat owns its chat: the agent's web-chat.send_message reply is recorded by
 // web and folds back into a later prompt as a CLEAN assistant turn; the tool-call /
 // tool-result mechanics never enter the conversation the LLM sees.
 // ===========================================================================
@@ -505,7 +505,7 @@ test("e2e/4: the agent's reply folds back as a clean assistant turn; no tool mec
   const cleanReply = r.requests
     .flatMap((req) => messagesOfRole(req, "assistant"))
     .some((m) => typeof m.content === "string" && m.content.includes("E2E-FINAL-REPLY"));
-  assert.ok(cleanReply, "a later request must carry a CLEAN assistant turn with the sent reply 'E2E-FINAL-REPLY' (web recorded its own send)");
+  assert.ok(cleanReply, "a later request must carry a CLEAN assistant turn with the sent reply 'E2E-FINAL-REPLY' (web-chat recorded its own send)");
 
   const anyToolCall = r.requests
     .flatMap((req) => messagesOfRole(req, "assistant"))
@@ -519,14 +519,14 @@ test("e2e/4: the agent's reply folds back as a clean assistant turn; no tool mec
 // ===========================================================================
 // Assertion 5 — the reply reaches the browser ONLY because the agent called the
 // chat tool: SSE delivered an output event carrying "E2E-FINAL-REPLY"
-// (llm.return -> web.send_message tool dispatch -> web SSE).
+// (llm.return -> web-chat.send_message tool dispatch -> web-chat SSE).
 // ===========================================================================
 
-test("e2e/5: the final reply reaches the browser via the web.send_message tool", () => {
+test("e2e/5: the final reply reaches the browser via the web-chat.send_message tool", () => {
   const r = result();
   assert.ok(
     r.sseOutputs.some((t) => t.includes("E2E-FINAL-REPLY")),
-    "the web SSE stream must deliver the reply the agent sent via web.send_message; got events:\n" +
+    "the web-chat SSE stream must deliver the reply the agent sent via web-chat.send_message; got events:\n" +
       JSON.stringify(r.sseOutputs),
   );
 });

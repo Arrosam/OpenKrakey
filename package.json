@@ -38,6 +38,7 @@
     "start": "tsx packages/boot/src/index.ts",
     "cli": "tsx packages/cli/src/bin.ts",
     "config:web": "tsx packages/config-web/src/bin.ts",
+    "console": "tsx packages/console/src/bin.ts",
     "arch:graph": "tsx docs/scripts/build-arch-graph.ts",
     "arch:serve": "tsx docs/scripts/serve-arch-graph.ts"
   },

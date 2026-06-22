@@ -764,7 +764,7 @@ test("result loop: does NOT invoke clock.fire_now for a FOREIGN result", async (
     fired++;
     return undefined;
   });
-  emitToolResult(sys, { name: "web.send_message", ok: true, data: { delivered: true } });
+  emitToolResult(sys, { name: "web-chat.send_message", ok: true, data: { delivered: true } });
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(fired, 0, "a foreign tool result must not trigger a beat");
 });

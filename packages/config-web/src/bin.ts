@@ -15,11 +15,11 @@ const cwd = process.cwd();
 
 function parsePort(raw: string | undefined): number {
   const s = (raw ?? "").trim();
-  if (s === "") return 7700;
+  if (s === "") return 7717;
   const n = Number(s);
   if (!Number.isInteger(n) || n < 1 || n > 65535) {
-    console.warn(`[config-web] invalid port "${s}", falling back to 7700`);
-    return 7700;
+    console.warn(`[config-web] invalid port "${s}", falling back to 7717`);
+    return 7717;
   }
   return n;
 }
