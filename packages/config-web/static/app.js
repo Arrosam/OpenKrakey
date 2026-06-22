@@ -155,7 +155,7 @@ function communicatorFields(providerId) {
 const state = {
   services: {},
   default: { name: null },
-  defaultSetting: { intervalMs: 30000, plugins: [], privatePlugins: [], config: {} },
+  defaultSetting: { intervalMs: 900000, plugins: [], privatePlugins: [], config: {} },
   agents: {},
   availablePlugins: [],
 };
@@ -770,6 +770,15 @@ const wz = {
 views.wizard = (main) => {
   wz.step = 0;
   wz.service.provider = (PROVIDERS[0] || {}).id || "anthropic";
+  // Seed the agent defaults from the live Default Setting so the wizard FOLLOWS
+  // it (heartbeat, plugin set, persona) rather than stale hardcoded values.
+  const ds = state.defaultSetting || {};
+  if (typeof ds.intervalMs === "number") wz.agent.intervalMs = ds.intervalMs;
+  if (ds.config && ds.config.persona && typeof ds.config.persona.text === "string") {
+    wz.agent.persona = ds.config.persona.text;
+  }
+  const all = [...new Set([...(ds.plugins || []), ...(ds.privatePlugins || [])])];
+  if (all.length) wz.plugins = all;
   drawWizard(main);
 };
 
@@ -868,7 +877,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted. 30000 = every 30 seconds." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted. 900000 = every 15 minutes." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);

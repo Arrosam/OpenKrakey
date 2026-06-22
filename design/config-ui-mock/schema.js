@@ -289,12 +289,13 @@ const SEED = {
   },
   default: { name: "AI service" }, // chosen default communicator
   defaultSetting: {
-    intervalMs: 30000,
-    plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
-    privatePlugins: ["web-chat"],
+    intervalMs: 900000,
+    plugins: ["llm-core", "persona", "system-prompt", "krakeycode", "searxng", "inspector"],
+    privatePlugins: ["web-chat", "browser"],
     config: {
       persona: { text: "You are Krakey, an autonomous agent. Be concise and helpful." },
       "web-chat": { port: 7718 },
+      browser: { headless: false },
     },
   },
   agents: {
