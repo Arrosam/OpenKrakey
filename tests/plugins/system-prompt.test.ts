@@ -26,6 +26,15 @@ const mod: any = await import("../../public_plugin/system-prompt/index.ts").then
   (m) => m,
   () => null,
 );
+// The default operating-model text is DUPLICATED: DEFAULT_TEXT (index.ts) and the
+// `text` field default in config-schema.ts. They MUST stay in sync. We import the
+// pure-data schema module separately (it has no runtime side effects).
+const schemaMod: any = await import(
+  "../../public_plugin/system-prompt/config-schema.ts"
+).then(
+  (m) => m,
+  () => null,
+);
 function plugin(): any {
   assert.ok(mod, "system-prompt module not implemented yet (import failed)");
   assert.equal(typeof mod?.default, "function", "default export must be a PluginFactory");
@@ -87,6 +96,63 @@ test("default text teaches the monologue/operating model, CHANNEL-AGNOSTIC (no c
   assert.match(text, /\btool/, "must tell the model to call a tool to act");
   assert.ok(!text.includes("web-chat.send_message"), "must NOT name a specific channel tool (channel-agnostic)");
   assert.ok(!text.includes("web chat"), "must NOT reference a specific channel");
+});
+
+test("default text EMPHASIZES the strengthened monologue model (distinctive new substrings)", async () => {
+  const { block } = await setupAndGetBlock({});
+  const text = await renderOf(block);
+  // Assert distinctive substrings (NOT the whole string) so the test stays robust
+  // to incidental wording tweaks while still pinning the strengthened model.
+  assert.ok(
+    text.includes("ALL of the plain text you produce"),
+    "must emphasize that ALL plain output is the private monologue",
+  );
+  assert.ok(
+    text.includes("read by NO ONE"),
+    "must state the monologue is read by NO ONE",
+  );
+  assert.ok(
+    text.includes("never stored, never acted upon"),
+    "must state the monologue is never stored / never acted upon",
+  );
+  assert.ok(
+    text.includes("call one of your tools"),
+    "must state the only way to act is to call one of your tools",
+  );
+});
+
+test("config-schema.ts `text` default stays in sync with the rendered DEFAULT_TEXT", async () => {
+  assert.ok(
+    schemaMod,
+    "config-schema module not implemented yet (import failed)",
+  );
+  const schema = schemaMod.SYSTEM_PROMPT_SCHEMA;
+  assert.ok(Array.isArray(schema), "SYSTEM_PROMPT_SCHEMA must be an array of ConfigField");
+  const textField = schema.find((f: any) => f?.key === "text");
+  assert.ok(textField, "config-schema must declare a 'text' field");
+  assert.equal(
+    typeof textField.default,
+    "string",
+    "config-schema 'text' field must carry a string default",
+  );
+
+  // The block rendered with NO config override must equal the schema's `text`
+  // default — i.e. DEFAULT_TEXT (index.ts) and the schema default are one value.
+  const { block } = await setupAndGetBlock({});
+  const rendered = await renderOf(block);
+  assert.equal(
+    textField.default,
+    rendered,
+    "config-schema 'text' default must equal the plugin's rendered DEFAULT_TEXT",
+  );
+
+  // And that shared default must be the STRENGTHENED text — pin a distinctive
+  // new substring on the schema side too, so a stale config-schema default
+  // (out of sync with an updated index.ts, or vice versa) is caught.
+  assert.ok(
+    (textField.default as string).includes("read by NO ONE"),
+    "config-schema 'text' default must carry the strengthened monologue wording",
+  );
 });
 
 test("config.text overrides verbatim; config.priority overrides", async () => {

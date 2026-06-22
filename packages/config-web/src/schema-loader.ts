@@ -46,7 +46,14 @@ const PLUGIN_META: Record<string, PluginMeta> = {
   searxng: { id: "searxng", icon: "search", name: "Web search", tagline: "search the web via a SearXNG instance" },
   browser: { id: "browser", icon: "globe", name: "Browser", tagline: "read-only Chrome control — navigate + screenshot" },
   inspector: { id: "inspector", icon: "activity", name: "Inspector", tagline: "live debug panel for every beat", dataCarrier: true },
-  notes: { id: "notes", icon: "journal", name: "Notes", tagline: "scratch memory the agent can jot to" },
+  "memory-note": {
+    id: "memory-note",
+    icon: "journal",
+    name: "Notes",
+    tagline: "the agent's private long-term notebook",
+    dataCarrier: true,
+  },
+  history: { id: "history", icon: "clock", name: "History", tagline: "a compacted log of the agent's tool use", dataCarrier: true },
 };
 
 export interface SchemaPayload {

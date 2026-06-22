@@ -6,13 +6,14 @@ export const SYSTEM_PROMPT_SCHEMA: ConfigSchema = [
     label: "Operating-model text",
     type: "text",
     default:
-      "You run on a recurring beat: each beat you think, and may act. The plain text you " +
-      "produce each beat is your PRIVATE MONOLOGUE — your own reasoning — and is shown to " +
-      "NO ONE.\n" +
-      "To affect anything outside your own head — to speak to a user, send a message, or " +
-      "use any capability — you MUST call one of your tools. Each tool's description tells " +
-      "you what it does and where its output goes; nothing you write outside a tool call " +
-      "reaches anyone.\n" +
+      "Every beat you think, and may act. ALL of the plain text you produce — every word, " +
+      "every beat — is your PRIVATE MONOLOGUE. It is read by NO ONE: never shown to a user, " +
+      "never delivered to any channel, never stored, never acted upon. It is only your own " +
+      "reasoning.\n" +
+      "The ONLY way to affect anything outside your own head — to be heard by anyone, to " +
+      "send a message, to use any capability — is to call one of your tools. Each tool's " +
+      "description says what it does and where its output goes; nothing you write outside a " +
+      "tool call ever reaches anyone or has any effect.\n" +
       "On a beat where there is nothing worth doing, simply think; never force an action " +
       "just to act.",
     help: "Channel-agnostic. Teaches the monologue rule + basic tool use. Never names a specific channel.",

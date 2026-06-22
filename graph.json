@@ -32,7 +32,9 @@
         "inspector",
         "krakeycode",
         "searxng",
-        "browser"
+        "browser",
+        "memory-note",
+        "history"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -279,6 +281,33 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/browser.md"
+    },
+    "memory-note": {
+      "zone": "plugins",
+      "path": "public_plugin/memory-note",
+      "description": "Krakey's private long-term notebook: gives a Krakey Agent `memory-note.remember` (save a note with a kind — goal|keep-in-mind|thought|finding — and an importance 1-5) and `memory-note.forget` (drop a note by id), declared as ToolDefs via llm.register_tool. The whole notebook is re-rendered into context EVERY beat as a `memory-note` SYSTEM block (priority 8500, grouped by kind, importance DESC) so the agent keeps it in mind; a config-overridable `memory-note.guidance` SYSTEM block (priority 6700) teaches the tools. Data-carrying, so private-by-default (per-agent notes.json under dataDir, bounded by maxNotes with LEAST-IMPORTANT eviction when full). No results block / no clock.fire_now — writes are synchronous and the notes block is itself the feedback.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/memory-note.md"
+    },
+    "history": {
+      "zone": "plugins",
+      "path": "public_plugin/history",
+      "description": "Per-agent, persisted, compacting tool-use log. AUTO-CAPTURES the bus tool.result event (every tool, all plugins) AND exposes a history.record action other plugins may push richer entries to (it authors nothing on its own). Renders a compacted trail as a `history.log` SYSTEM block (priority 4500) so the agent sees what it has done; persists to history.json under its private dataDir, bounded by maxNotes-style compaction (keep `keepRecent`, drop the rest when over `maxEntries`). On each compaction it DISTILLS a checkpoint note into memory-note — declared dependency: manifest.requires=[\"memory-note.remember\"], so the loader guarantees memory-note loads first. Volatile working buffer that hands durable milestones to [[memory-note]].",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/history.md"
     }
   },
   "contracts": {

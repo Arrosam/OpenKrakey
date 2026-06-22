@@ -10,7 +10,9 @@
   ],
   "privatePlugins": [
     "web-chat",
-    "browser"
+    "browser",
+    "memory-note",
+    "history"
   ],
   "config": {
     "persona": {
@@ -30,6 +32,8 @@
     "browser": {
       "headless": false,
       "chromePath": null
-    }
+    },
+    "memory-note": {},
+    "history": {}
   }
 }
