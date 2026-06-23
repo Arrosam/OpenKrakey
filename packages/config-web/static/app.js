@@ -167,6 +167,18 @@ let dirty = false;
 const $ = (sel, el = document) => el.querySelector(sel);
 const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// Human-friendly duration from milliseconds: "30 s", "15 min", "8 h", "2 d".
+const fmtDur = (ms) => {
+  if (typeof ms !== "number" || !isFinite(ms) || ms < 0) return "—";
+  const s = ms / 1000;
+  if (s < 60) return (Number.isInteger(s) ? s : s.toFixed(1)) + " s";
+  const m = s / 60;
+  if (m < 60) return (Number.isInteger(m) ? m : m.toFixed(1)) + " min";
+  const h = m / 60;
+  if (h < 24) return (Number.isInteger(h) ? h : h.toFixed(1)) + " h";
+  const d = h / 24;
+  return (Number.isInteger(d) ? d : d.toFixed(1)) + " d";
+};
 const serviceNames = () => Object.keys(state.services);
 
 /* ── Inline SVG icon set (line icons, currentColor — no emoji/glyphs) ───────*/
@@ -656,7 +668,7 @@ views.agents = (main) => {
     const a = state.agents[id];
     const row = el("div", "row");
     row.innerHTML = `<span class="g">${icon("robot")}</span><div class="rt"><div class="name"><span class="id">${esc(id)}</span></div>` +
-      `<div class="sub">every ${a.intervalMs != null ? a.intervalMs / 1000 : "—"}s · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
+      `<div class="sub">every ${fmtDur(a.intervalMs)} · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
       `<span class="arrow">${icon("arrowRight")}</span>`;
     row.onclick = () => editAgent(id);
     list.appendChild(row);
@@ -735,7 +747,7 @@ function naAgent(panel) {
   const body = el("div", "wz-body");
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -803,7 +815,7 @@ function naReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true);
+    reviewLine("Wakes", "every " + fmtDur(nwz.agent.intervalMs), true);
   body.appendChild(ag);
 
   const llm = el("div", "review-blk");
@@ -949,7 +961,7 @@ const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
   plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
-  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. Be concise and helpful.", intervalMs: 30000 },
+  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. You run on a heartbeat — each beat you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful.", intervalMs: 30000 },
 };
 
 views.wizard = (main) => {
@@ -1062,7 +1074,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -1098,7 +1110,7 @@ function wzReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(wz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (wz.agent.intervalMs != null ? wz.agent.intervalMs / 1000 : "—") + "s", true) +
+    reviewLine("Wakes", "every " + fmtDur(wz.agent.intervalMs), true) +
     reviewLine("Persona", (wz.agent.persona || "").slice(0, 48) + ((wz.agent.persona || "").length > 48 ? "…" : ""));
   body.appendChild(ag);
 
