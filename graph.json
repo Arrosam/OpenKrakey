@@ -35,7 +35,8 @@
         "browser",
         "memory-note",
         "history",
-        "interval_toggle"
+        "interval_toggle",
+        "restart"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -323,6 +324,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/interval_toggle.md"
+    },
+    "restart": {
+      "zone": "plugins",
+      "path": "public_plugin/restart",
+      "description": "Self-restart tool: restart.now re-execs the runtime so newly-written plugins / changed config (read only at startup) are applied. Spawns a detached replacement that waits delayMs (frees ports first), re-runs the launch command (node + execArgv + boot entry), then exits this process; dryRun reports the plan without restarting. Powerful — NOT in the default loadout. Contributes a restart.guidance SYSTEM block.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/restart.md"
     }
   },
   "contracts": {
