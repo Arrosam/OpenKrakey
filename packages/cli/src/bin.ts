@@ -62,7 +62,7 @@ const USAGE = `usage: krakey [command]
 commands:
   krakey              show this help
   krakey help         show this help
-  krakey setup        open the config console (landing menu)
+  krakey setup        open the terminal config tool (arrow-key TUI)
   krakey agent        edit agents
   krakey default      edit default settings (the template new agents copy)
   krakey providers    edit AI services (providers, endpoints, keys)
@@ -70,10 +70,12 @@ commands:
   krakey start        launch the runtime in the background (daemon)
   krakey stop         stop background runtime instances
   krakey restart      restart the background runtime (stop, then start)
-  krakey dashboard    open the unified Console in your browser  [port]
+  krakey dashboard    open the unified Console in your browser — recommended setup  [port]
   krakey uninstall    remove Krakey entirely from this machine  [--yes]
   krakey update       pull the latest version and re-run the installer
-  krakey version      print the version`;
+  krakey version      print the version
+
+new here? run 'krakey dashboard' for the guided browser setup (the Console).`;
 
 /**
  * Launch a sibling bin the way `npm test` runs tsx — `node --import tsx <bin>`.

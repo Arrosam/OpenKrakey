@@ -51,12 +51,12 @@ the npm scripts (`npm start` · `npm run config:web` · `npm run console`) or th
 
 **3 — Connect a provider and create your first agent.** The guided wizard does the whole setup —
 pick a provider, paste an API key (or reference an env var like `${ANTHROPIC_API_KEY}`), choose a
-model, and name the agent:
+model, and name the agent. **The browser Console is the recommended way in:**
 
 ```bash
-krakey setup        # arrow-key wizard in the terminal
-# …or do it in your browser:
-krakey dashboard    # the unified Console → http://127.0.0.1:7716
+krakey dashboard    # recommended — the unified Console → http://127.0.0.1:7716
+# …or stay in the terminal:
+krakey setup        # the same setup as an arrow-key wizard
 ```
 
 Prefer editing files? The wizard just writes JSON you can also hand-edit — copy the templates and
