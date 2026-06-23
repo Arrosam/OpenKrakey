@@ -264,6 +264,10 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 .field .flabel .fhelp { font-size: 12px; color: var(--muted); margin-top: 5px; line-height: 1.5; }
 .field .fcontrol { min-width: 0; }
 .field .fexample { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-top: 7px; }
+/* Model field with a "Fetch models" button beside the input. */
+.fetch-row { display: flex; gap: 8px; align-items: stretch; }
+.fetch-row .inp { flex: 1 1 auto; min-width: 0; }
+.fetch-row .btn.fetch-btn { flex: none; white-space: nowrap; }
 .kind-tag {
   font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.5px; text-transform: uppercase;
   color: var(--mint-deep); border: 1px solid var(--line2); border-radius: 4px; padding: 1px 5px; margin-left: auto;

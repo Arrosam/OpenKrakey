@@ -71,6 +71,69 @@ function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   });
 }
 
+/**
+ * Probe a provider's model catalogue SERVER-SIDE (so the browser never makes a
+ * cross-origin call). Provider-aware: OpenAI-compatible → GET {baseURL}/models
+ * (Bearer key); Anthropic → GET {base}/v1/models (x-api-key). Returns model ids.
+ * The apiKey is used AS GIVEN — a literal key works; a `${ENV}` reference is not
+ * resolved here, so probe with a literal key.
+ */
+async function probeModels(body: {
+  provider?: string;
+  baseURL?: string;
+  apiKey?: string;
+}): Promise<string[]> {
+  const provider = typeof body.provider === "string" ? body.provider : "";
+  const baseURL = typeof body.baseURL === "string" ? body.baseURL.trim() : "";
+  const key = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+  const trimRight = (u: string): string => u.replace(/\/+$/, "");
+
+  let url: string;
+  const headers: Record<string, string> = { accept: "application/json" };
+
+  if (provider === "anthropic") {
+    const base = trimRight(baseURL || "https://api.anthropic.com");
+    url = (/\/v\d+$/.test(base) ? base : base + "/v1") + "/models";
+    if (key) headers["x-api-key"] = key;
+    headers["anthropic-version"] = "2023-06-01";
+  } else if (provider === "openai-completion" || provider === "openai-responses") {
+    url = trimRight(baseURL || "https://api.openai.com/v1") + "/models";
+    if (key) headers["authorization"] = "Bearer " + key;
+  } else {
+    throw new Error('fetching models is not supported for provider "' + (provider || "?") + '"');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  let resp: Response;
+  try {
+    resp = await fetch(url, { headers, signal: controller.signal });
+  } catch (e) {
+    throw new Error("could not reach " + url + " — " + (e instanceof Error ? e.message : String(e)));
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error("provider returned HTTP " + resp.status + (text ? " — " + text.slice(0, 200) : ""));
+  }
+  const json = (await resp.json().catch(() => null)) as unknown;
+  const arr =
+    json && typeof json === "object" && Array.isArray((json as { data?: unknown }).data)
+      ? (json as { data: unknown[] }).data
+      : Array.isArray(json)
+        ? (json as unknown[])
+        : [];
+  const ids: string[] = [];
+  for (const m of arr) {
+    if (typeof m === "string") ids.push(m);
+    else if (m && typeof m === "object" && typeof (m as { id?: unknown }).id === "string") {
+      ids.push((m as { id: string }).id);
+    }
+  }
+  return ids;
+}
+
 export function createApiHandler(deps: ApiDeps): Handler {
   // One Cli for the whole process — it is stateless over plain fs calls.
   const cli = createCli({
@@ -127,6 +190,16 @@ export function createApiHandler(deps: ApiDeps): Handler {
         });
         return;
       }
+    }
+
+    // POST /api/provider-models — probe a provider's model catalogue (server-side,
+    // no browser CORS). Body: { provider, baseURL, apiKey }.
+    if (method === "POST" && pathname === "/api/provider-models") {
+      guard(async () => {
+        const body = await readJsonBody<{ provider?: string; baseURL?: string; apiKey?: string }>(req);
+        sendJson(res, 200, { models: await probeModels(body) });
+      });
+      return;
     }
 
     // /api/default — the Default Plugin Setting.

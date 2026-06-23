@@ -110,7 +110,7 @@ function communicatorFields(providerId) {
       options: PROVIDERS.map((x) => ({ value: x.id, label: x.label, summary: x.summary })),
       help: "The wire format your endpoint speaks. Drives every option below." },
     { key: "model", label: "Model id", control: "text", default: "", example: `e.g. ${p.modelExample}`,
-      placeholder: p.modelExample, help: "Exactly as your provider names it." },
+      placeholder: p.modelExample, help: "Exactly as your provider names it.", fetchModels: true },
     { key: "baseURL", label: "Endpoint URL", control: "url", default: "",
       example: `e.g. ${p.baseURLExample}`, placeholder: p.baseURLExample, help: p.baseURLHint },
     { key: "apiKey", label: "API key", control: "secret", default: "",
@@ -255,10 +255,51 @@ function renderField(field, get, set, ctx = {}) {
   wrap.appendChild(labWrap);
 
   const ctrl = el("div", "fcontrol");
-  ctrl.appendChild(buildControl(field, get, set, ctx));
+  const control = buildControl(field, get, set, ctx);
+  if (field.fetchModels) {
+    const row = el("div", "fetch-row");
+    row.appendChild(control);
+    row.appendChild(makeFetchModelsBtn(control, ctx, set));
+    ctrl.appendChild(row);
+  } else {
+    ctrl.appendChild(control);
+  }
   if (field.example) ctrl.appendChild(el("div", "fexample", "↳ " + esc(field.example)));
   wrap.appendChild(ctrl);
   return wrap;
+}
+
+// "Fetch models" affordance beside the Model field: probes the provider's model
+// list via the SERVER (no browser CORS) and offers the results as a datalist on
+// the input. Reads the sibling provider/baseURL/apiKey via ctx.peek.
+function makeFetchModelsBtn(inputEl, ctx, setModel) {
+  const btn = el("button", "btn fetch-btn");
+  btn.type = "button";
+  btn.textContent = "Fetch models";
+  btn.onclick = async () => {
+    const peek = ctx && ctx.peek ? ctx.peek : () => undefined;
+    const payload = { provider: peek("provider"), baseURL: peek("baseURL"), apiKey: peek("apiKey") };
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Fetching…";
+    try {
+      const r = await apiPost("/api/provider-models", payload);
+      const models = (r && r.models) || [];
+      if (!models.length) { toastErr("No models returned by the provider"); return; }
+      let dl = document.getElementById("models-datalist");
+      if (dl) dl.remove();
+      dl = document.createElement("datalist");
+      dl.id = "models-datalist";
+      models.forEach((m) => { const o = document.createElement("option"); o.value = m; dl.appendChild(o); });
+      document.body.appendChild(dl);
+      inputEl.setAttribute("list", "models-datalist");
+      if (!inputEl.value && models.length === 1) { inputEl.value = models[0]; setModel(models[0]); }
+      inputEl.focus();
+      toast(models.length + " model" + (models.length === 1 ? "" : "s") + " found — pick from the list");
+    } catch (e) { handleApiError(e); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  };
+  return btn;
 }
 
 function controlTag(c) {
@@ -606,6 +647,7 @@ function editService(name) {
     for (const fld of fields) {
       const sl = slice(working, fld.key, fld.default);
       const node = renderField(fld, sl.get, sl.set, {
+        peek: (k) => working[k],
         onSelect: (key) => { if (key === "provider") { reconcileProvider(); drawFields(); } },
       });
       if (node) fieldsHost.appendChild(node);
@@ -1034,7 +1076,7 @@ function wzService(panel) {
     const map = { provider: live[0], model: live[1], baseURL: live[2], apiKey: live[3] };
     [map.provider, nameFld, map.model, map.baseURL, map.apiKey].forEach((fld) => {
       const sl = slice(wz.service, fld.key, fld.default);
-      const node = renderField(fld, sl.get, sl.set, { onSelect: (k) => { if (k === "provider") draw(); } });
+      const node = renderField(fld, sl.get, sl.set, { peek: (k) => wz.service[k], onSelect: (k) => { if (k === "provider") draw(); } });
       if (node) host.appendChild(node);
     });
   };
