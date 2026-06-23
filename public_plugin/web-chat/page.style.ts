@@ -417,11 +417,15 @@ body {
 .msg.agent { justify-content: flex-start; }
 .msg.agent .bubble { background: var(--panel); color: var(--text); border-color: var(--line); border-top-left-radius: var(--r-sm); }
 
-/* user (right) — mint-tinted, no avatar. Row order is gutter THEN inner so the
-   bubble hugs the right edge and the empty quote area sits on the left. */
-.msg.me { justify-content: flex-end; }
-.msg.me .msg-inner { flex-direction: column; align-items: flex-end; gap: 4px; }
+/* user (right) — mint-tinted. The bubble + quote gutter sit in a ROW (.me-row)
+   so the gutter aligns to the BUBBLE height — the quote chip and its hover
+   highlight match the bubble exactly, like an agent row. The sent/read tick sits
+   BELOW that row, so it never inflates the gutter (which previously pushed the
+   chip down and made the hover box oversized). */
+.msg.me { flex-direction: column; align-items: flex-end; gap: 4px; }
+.msg.me .me-row { display: flex; width: 100%; align-items: stretch; justify-content: flex-end; }
 .msg.me .bubble {
+  max-width: 80%;
   background: rgba(47,214,156,0.10); color: #d9f4ea;
   border-color: var(--mint-deep); border-top-right-radius: var(--r-sm);
 }
