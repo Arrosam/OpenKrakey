@@ -6,7 +6,8 @@
     "system-prompt",
     "krakeycode",
     "searxng",
-    "inspector"
+    "inspector",
+    "interval_toggle"
   ],
   "privatePlugins": [
     "web-chat",
@@ -29,6 +30,9 @@
       "usePublicFallback": true
     },
     "inspector": {},
+    "interval_toggle": {
+      "baseIntervalMs": 900000
+    },
     "browser": {
       "headless": false,
       "chromePath": null

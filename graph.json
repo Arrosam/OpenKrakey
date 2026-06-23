@@ -34,7 +34,8 @@
         "searxng",
         "browser",
         "memory-note",
-        "history"
+        "history",
+        "interval_toggle"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -308,6 +309,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/history.md"
+    },
+    "interval_toggle": {
+      "zone": "plugins",
+      "path": "public_plugin/interval_toggle",
+      "description": "Self-pacing tools: interval.set (change the stable heartbeat) + interval.hold (run a different interval for the next N beats, then auto-revert to the base). Drives the per-Agent clock over the action bus (clock.set_interval / clock.set_default_interval, payload { ms }); counts a hold down on clock.tick and reverts via set_default_interval (set_interval is clobbered by the clock's per-beat reset). Contributes an interval.guidance SYSTEM block.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/interval_toggle.md"
     }
   },
   "contracts": {
