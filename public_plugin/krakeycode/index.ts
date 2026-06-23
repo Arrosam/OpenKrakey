@@ -310,8 +310,13 @@ function collectEntriesInner(
 function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
   const security =
     cfg.mode === "sandbox"
-      ? `Security mode: sandbox. File operations are confined to the root "${cfg.root}" — ` +
-        `paths that escape it are rejected, and krakeycode.bash is filtered by a command allowlist.`
+      ? `Security mode: sandbox (the default). File operations are confined to your own workspace "${cfg.root}" — ` +
+        `paths that escape it are rejected. ` +
+        (cfg.allowCommands
+          ? `krakeycode.bash is filtered by a command allowlist.`
+          : `krakeycode.bash (shell) is disabled.`) +
+        ` To work with files elsewhere on the computer or run shell commands, the operator must widen krakeycode's ` +
+        `config (mode "local" and/or allowCommands true).`
       : `Security mode: local. File operations use absolute paths or paths relative to the ` +
         `working directory; there is no sandbox confinement.`;
 
