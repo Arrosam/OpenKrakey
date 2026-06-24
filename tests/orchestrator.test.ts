@@ -1460,8 +1460,10 @@ test("in-flight LLM: stop() while awaiting a return drops the guard and the queu
 });
 
 test("in-flight LLM: a safety timeout releases a stuck request (no return) and runs the queued follow-up", async (t) => {
-  // A short safety timeout so the no-return case (no llm-core / hung provider) resolves quickly.
-  const { orc, events } = freshOrc(t, { requestTimeoutMs: 20 });
+  // A short-ish safety timeout so the no-return case (no llm-core / hung provider)
+  // resolves quickly, but comfortably longer than the pre-assert settle so it can't
+  // fire early on a slow runner.
+  const { orc, events } = freshOrc(t, { requestTimeoutMs: 80 });
   let requestCount = 0;
   events.on(Events.LLM_REQUEST, () => {
     requestCount++;
@@ -1469,13 +1471,12 @@ test("in-flight LLM: a safety timeout releases a stuck request (no return) and r
 
   orc.start();
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } }); // queues behind the in-flight beat; it never returns
   await settle();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } }); // queued; the first request never returns
-  await settle();
-  assert.equal(requestCount, 1, "still one request — no return yet");
+  assert.equal(requestCount, 1, "still one request — no return yet, well under the timeout");
 
   // No LLM_RETURN is ever emitted; the safety timeout must release the guard.
-  await settle(40);
+  await settle(120);
   assert.equal(
     requestCount,
     2,
