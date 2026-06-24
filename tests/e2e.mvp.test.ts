@@ -62,8 +62,9 @@ interface StubServer {
 async function startStubServer(): Promise<StubServer> {
   const requests: any[] = [];
   // The agent SPEAKS (via the chat tool) exactly once. Gating on conversation STATE
-  // (below) instead of a beat counter keeps the stub robust to out-of-order / concurrent
-  // in-flight beats (the orchestrator beat ends at LLM_REQUEST emission, not at return).
+  // (below) instead of a beat counter keeps the stub robust to beat timing — the
+  // orchestrator now serializes beats (one LLM round-trip in flight at a time), but
+  // the stub stays agnostic to exactly when each beat lands.
   let replied = false;
 
   const server = http.createServer((req, res) => {

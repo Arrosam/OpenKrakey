@@ -8,8 +8,18 @@
  *
  * Beat (driven by clock ticks bridged onto the eventbus as CLOCK_TICK):
  *   tick → PROMPT_GATHER (plugins refresh blocks) → compose → LLM_REQUEST.
- * The beat ends at the emit — the LLM round-trip returns later as LLM_RETURN,
- * whose tool calls are dispatched fire-and-forget on the actionbus.
+ * A beat stays IN FLIGHT from the moment it starts composing until its LLM
+ * round-trip returns as LLM_RETURN (whose tool calls are dispatched
+ * fire-and-forget). The clock keeps ticking on its own rhythm regardless, so when
+ * the interval is shorter than the model's response time — or a burst of
+ * immediate wakes (CLOCK_FIRE_NOW on a tool result / new message) stacks up — a
+ * tick can arrive while a request is still pending. Rather than fire a SECOND,
+ * overlapping LLM_REQUEST, the orchestrator pauses: it records a single coalesced
+ * follow-up (`beatQueued`) and runs exactly one fresh beat once the in-flight
+ * request returns (or a safety timeout elapses). Because the follow-up re-gathers
+ * and re-composes, it sends an UPDATED request reflecting whatever changed while
+ * we waited. A safety timeout guards the only no-return cases (no llm-core loaded,
+ * or a hung provider) so the guard can never permanently wedge the agent.
  */
 import type { Orchestrator } from "../../../contracts/orchestrator";
 import type { EventSystem, Unsub } from "../../../contracts/event-system";
@@ -21,21 +31,50 @@ import type { Notify, Request, Reply } from "../../../shared/actions";
 import { consoleLogger, tagged } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
 
+/** Safety net: if an LLM_REQUEST never returns (no llm-core, or a hung provider),
+ *  release the in-flight guard after this long so the agent never wedges. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
 export function createOrchestrator(deps: {
   events: EventSystem;
   clock: Clock;
   log?: Logger;
+  /** Override the in-flight safety timeout (ms). Defaults to 120s. */
+  requestTimeoutMs?: number;
 }): Orchestrator {
   // ---- internal state ----
   const blocks = new Map<string, ContextBlock>(); // the context-buffer
   let running = false;
-  let beatBusy = false;
-  let beatQueued = false;
+  // A beat is "busy" from the moment it starts composing (`composing`) through to
+  // its LLM round-trip returning (`awaitingReturn`). Ticks/immediate-fires that
+  // arrive while busy do NOT start a concurrent beat — they set `beatQueued`, and
+  // ONE coalesced follow-up runs once the in-flight request returns (or times out).
+  let composing = false; // synchronous compose phase of a beat
+  let awaitingReturn = false; // LLM_REQUEST emitted, waiting for its matching LLM_RETURN
+  let inFlightId: string | null = null; // id of the awaited request (returns matched by id)
+  let beatQueued = false; // at most one coalesced follow-up
+  let safetyTimer: ReturnType<typeof setTimeout> | null = null;
   let tickUnsub: Unsub | null = null;
   let returnUnsub: Unsub | null = null;
   let clockUnsubs: Unsub[] = []; // CLOCK_* action registrations (while started)
   let seq = 0; // beat counter
+  const requestTimeoutMs =
+    typeof deps.requestTimeoutMs === "number" && deps.requestTimeoutMs > 0
+      ? deps.requestTimeoutMs
+      : DEFAULT_REQUEST_TIMEOUT_MS;
   const log = tagged(deps.log ?? consoleLogger, "[orchestrator]");
+
+  /** True while a beat is composing OR its LLM round-trip is still pending. */
+  function busy(): boolean {
+    return composing || awaitingReturn;
+  }
+
+  function clearSafetyTimer(): void {
+    if (safetyTimer !== null) {
+      clearTimeout(safetyTimer);
+      safetyTimer = null;
+    }
+  }
 
   // ---- context composition ----
   // Split the buffer by TARGET and compose BOTH halves of the beat's request:
@@ -95,13 +134,55 @@ export function createOrchestrator(deps: {
   }
 
   // ---- the beat ----
+  /** Arm the safety net for the request we're currently awaiting (`inFlightId`). */
+  function armSafetyTimer(): void {
+    clearSafetyTimer();
+    const awaited = inFlightId;
+    safetyTimer = setTimeout(() => {
+      safetyTimer = null;
+      // Only act if we're still awaiting the SAME request (not already released).
+      if (!running || !awaitingReturn || inFlightId !== awaited) return;
+      log.warn(
+        `LLM request ${awaited} did not return within ${requestTimeoutMs}ms — releasing the beat guard`,
+      );
+      releaseInFlight();
+    }, requestTimeoutMs);
+    // The safety net must never keep the process alive on its own.
+    (safetyTimer as { unref?: () => void }).unref?.();
+  }
+
+  // The beat fully finished (compose failed, or the LLM round-trip returned / timed
+  // out). If a follow-up was queued while we were busy, run exactly ONE now — a
+  // fresh beat that re-gathers, so it carries the latest context.
+  function drainQueue(): void {
+    if (beatQueued && running) {
+      beatQueued = false;
+      setImmediate(() => {
+        if (!running || busy()) return;
+        composing = true;
+        runBeat();
+      });
+    } else {
+      beatQueued = false;
+    }
+  }
+
+  /** Release the in-flight guard (on a matching LLM_RETURN or the safety timeout). */
+  function releaseInFlight(): void {
+    clearSafetyTimer();
+    awaitingReturn = false;
+    inFlightId = null;
+    drainQueue();
+  }
+
   async function runBeat(): Promise<void> {
     // After stop() no beat work runs — emit nothing, even for a queued beat.
     if (!running) {
-      beatBusy = false;
+      composing = false;
       beatQueued = false;
       return;
     }
+    let emitted = false;
     try {
       const n = ++seq;
       // Let plugins refresh their blocks before we compose. A conversation provider
@@ -114,47 +195,53 @@ export function createOrchestrator(deps: {
       // compose() is async; if we were stopped mid-flight, emit nothing further.
       if (!running) return;
 
-      // Request the LLM round-trip; do NOT await — the beat ends here. The reply
-      // arrives later as LLM_RETURN. In Phase 0 nobody listens and that is fine.
+      // Request the LLM round-trip; do NOT await — the beat does not BLOCK here, but
+      // it stays IN FLIGHT until LLM_RETURN. Enter the in-flight window BEFORE emitting
+      // so a synchronous return can be matched, not missed.
       const payload: Request<{ context: ComposedContext; messages: Message[] }> = {
         id: String(n),
         at: Date.now(),
         data: { context, messages },
       };
+      awaitingReturn = true;
+      inFlightId = String(n);
+      armSafetyTimer();
+      emitted = true;
       deps.events.events.emit(Events.LLM_REQUEST, payload);
     } catch (err) {
       log.warn(`beat failed: ${err}`);
     } finally {
-      beatBusy = false;
-      // Only spin up a queued beat if still running; the re-entry also guards
-      // !running, so a stop() between scheduling and execution emits nothing.
-      if (beatQueued && running) {
-        beatQueued = false;
-        setImmediate(() => {
-          if (!running) return;
-          beatBusy = true;
-          runBeat();
-        });
-      } else {
-        beatQueued = false;
+      composing = false;
+      // If no request went out (compose threw, or we were stopped mid-flight) there
+      // will be no LLM_RETURN — the beat is done, so drain any queued follow-up now.
+      // If a request DID go out we wait for its return (or the safety timeout).
+      if (!emitted && !awaitingReturn) {
+        drainQueue();
       }
     }
   }
 
   function onTick(): void {
-    // At most one beat in flight and at most one queued.
-    if (beatBusy) {
+    // While a beat is in flight (composing or awaiting its LLM return), do not start
+    // a concurrent one — record a single coalesced follow-up instead.
+    if (busy()) {
       beatQueued = true;
       return;
     }
-    beatBusy = true;
+    composing = true;
     runBeat();
   }
 
   function onReturn(payload: unknown): void {
     // Guard a malformed payload: null/undefined or non-object → ignore (no throw).
     if (payload === null || typeof payload !== "object") return;
-    const p = payload as Reply<LLMResponse>;
+    const p = payload as Reply<LLMResponse> & { id?: unknown };
+    // Release the in-flight guard if this return matches the request we're awaiting.
+    // Tool dispatch (below) is INDEPENDENT of the guard, so an unmatched/stray return
+    // still dispatches its tools exactly as before.
+    if (awaitingReturn && String(p.id) === inFlightId) {
+      releaseInFlight();
+    }
     if (!p.ok || !p.data) return;
     const calls = p.data.toolCalls;
     if (!calls || calls.length === 0) return;
@@ -229,7 +316,11 @@ export function createOrchestrator(deps: {
     stop(): void {
       if (!running) return; // idempotent
       running = false;
+      composing = false;
+      awaitingReturn = false; // drop the in-flight guard
+      inFlightId = null;
       beatQueued = false; // drop any beat queued behind an in-flight one
+      clearSafetyTimer();
       tickUnsub?.();
       tickUnsub = null;
       returnUnsub?.();

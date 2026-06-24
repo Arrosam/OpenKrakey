@@ -42,10 +42,10 @@ function stubClock(): Clock {
  * and double-stop idempotency, and preventing dangling subscriptions leaking
  * across tests since each gets its OWN event-system anyway).
  */
-function freshOrc(t: { after(fn: () => void): void }) {
+function freshOrc(t: { after(fn: () => void): void }, opts?: { requestTimeoutMs?: number }) {
   const sys = createEventSystem();
   const clock = stubClock();
-  const orc = createOrchestrator({ events: sys, clock });
+  const orc = createOrchestrator({ events: sys, clock, requestTimeoutMs: opts?.requestTimeoutMs });
   t.after(() => {
     try {
       orc.stop();
@@ -797,6 +797,10 @@ test("messages: message-blocks are re-rendered each beat (reflect the current gr
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
   await settle();
 
+  // A beat stays in flight until its LLM_RETURN; release beat 1 so beat 2 can run.
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+
   turns = [{ role: "user", content: "t2" }];
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
   await settle();
@@ -1167,6 +1171,10 @@ test("compose reflects block-store edits made between beats (removal + replaceme
   await settle();
   assert.equal(texts[0], "<a>\nA1\n</a>\n\n<b>\nB\n</b>", "first beat composes both blocks");
 
+  // A beat stays in flight until its LLM_RETURN; release beat 1 so beat 2 can run.
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+
   // Mutate the store between beats: replace a, remove b.
   orc.setBlock(block("a", 100, "A2"));
   assert.equal(orc.removeBlock("b"), true);
@@ -1275,13 +1283,16 @@ test("isolation: a rejecting AND a synchronously-throwing block alongside a good
 });
 
 // ===========================================================================
-// Behavior 12 — queued-beat cancellation on stop(); in-flight collapse to ONE
-// follow-up
+// Behavior 12 — in-flight guard: at most one beat runs at a time; ticks coalesce
 // ===========================================================================
 //
-// A beat is in-flight while its (slow) render is pending. Ticks that arrive
-// during an in-flight beat collapse to at most ONE queued follow-up beat. stop()
-// cancels the queued follow-up so no further PROMPT_GATHER/LLM_REQUEST fires.
+// A beat is IN FLIGHT from the moment it starts composing until its LLM round-trip
+// returns (LLM_RETURN) — covering BOTH a slow render AND a slow model. Ticks /
+// immediate-fires that arrive while in flight collapse to at most ONE queued
+// follow-up, which runs after the return (or a safety timeout). stop() cancels the
+// queued follow-up AND the in-flight guard so no further PROMPT_GATHER/LLM_REQUEST
+// fires. The first group below exercises the compose window; the second the (longer)
+// LLM round-trip window.
 
 /** A block whose render resolves only after `ms`, letting a beat stay in-flight. */
 function slowBlock(id: string, priority: number, text: string, ms = 30): ContextBlock {
@@ -1351,48 +1362,149 @@ test("cancellation: no NEW beat work is emitted strictly AFTER stop() when a bea
   assert.equal(gathersAfterStop, 0, "no PROMPT_GATHER may fire after stop()");
 });
 
-test("queueing: 3 back-to-back ticks during ONE in-flight beat collapse to exactly TWO LLM_REQUESTs (one in-flight + one coalesced follow-up)", async (t) => {
+// --- the LLM round-trip is the longer in-flight window -------------------------
+//
+// The real overlap risk is not a slow render but a slow LLM: the clock keeps
+// ticking while a request is pending. A beat stays IN FLIGHT from LLM_REQUEST
+// until its matching LLM_RETURN, so ticks/immediate-fires meanwhile coalesce to
+// ONE follow-up that runs after the return (or a safety timeout). The follow-up
+// re-composes, so it carries an UPDATED request.
+
+test("in-flight LLM: a tick during a pending LLM round-trip does NOT start a 2nd request; it queues until the return", async (t) => {
   const { orc, events } = freshOrc(t);
   let requestCount = 0;
   events.on(Events.LLM_REQUEST, () => {
     requestCount++;
   });
 
-  orc.setBlock(slowBlock("slow", 10, "SLOW", 30));
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+  assert.equal(requestCount, 1, "first tick emits one request, now in flight");
+
+  // A tick while the first request has NOT returned must not fire a concurrent one.
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+  await settle();
+  assert.equal(requestCount, 1, "a tick during an in-flight request does not start a concurrent one");
+
+  // The matching return releases the guard → the single coalesced follow-up runs.
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 2, "after the return, exactly one queued follow-up runs");
+});
+
+test("in-flight LLM: a burst of ticks during one pending request coalesces to exactly ONE follow-up", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
 
   orc.start();
-  // Three ticks arrive while the first beat's slow render is still pending.
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+  // Five more ticks (e.g. a storm of immediate wakes) while the request is in flight.
+  for (let i = 2; i <= 6; i++) events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: i } });
+  await settle();
+  assert.equal(requestCount, 1, "the burst coalesces — still just the one in-flight request");
+
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 2, "exactly one coalesced follow-up after the return (not five)");
+
+  // The follow-up (seq 2) is now in flight; with nothing queued, no further beat.
+  events.emit(Events.LLM_RETURN, { id: "2", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 2, "no further beats without a new tick");
+});
+
+test("in-flight LLM: the coalesced follow-up re-composes — it carries context updated while waiting", async (t) => {
+  const { orc, events } = freshOrc(t);
+  const texts = captureContextTexts(events);
+
+  orc.setBlock(block("state", 10, "BEFORE"));
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+  assert.equal(texts[0], "<state>\nBEFORE\n</state>", "first beat sees the original block");
+
+  // A tick queues while the first request is in flight; meanwhile state changes.
   events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 3 } });
+  orc.setBlock(block("state", 10, "AFTER"));
 
-  // Settle long enough for the in-flight beat AND its single coalesced follow-up
-  // (each ~30ms) to fully complete.
-  await settle(150);
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(texts.length, 2, "the queued follow-up ran");
+  assert.equal(texts[1], "<state>\nAFTER\n</state>", "the follow-up re-composed with the UPDATED block");
+});
 
+test("in-flight LLM: stop() while awaiting a return drops the guard and the queued follow-up (a late return fires nothing)", async (t) => {
+  const { orc, events } = freshOrc(t);
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } }); // queued behind the in-flight request
+  await settle();
+  assert.equal(requestCount, 1);
+
+  orc.stop();
+  // A late return after stop() must not resurrect the queued follow-up.
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 1, "no follow-up after stop(), even when the late return arrives");
+});
+
+test("in-flight LLM: a safety timeout releases a stuck request (no return) and runs the queued follow-up", async (t) => {
+  // A short safety timeout so the no-return case (no llm-core / hung provider) resolves quickly.
+  const { orc, events } = freshOrc(t, { requestTimeoutMs: 20 });
+  let requestCount = 0;
+  events.on(Events.LLM_REQUEST, () => {
+    requestCount++;
+  });
+
+  orc.start();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
+  await settle();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } }); // queued; the first request never returns
+  await settle();
+  assert.equal(requestCount, 1, "still one request — no return yet");
+
+  // No LLM_RETURN is ever emitted; the safety timeout must release the guard.
+  await settle(40);
   assert.equal(
     requestCount,
     2,
-    "ticks during an in-flight beat coalesce to exactly one follow-up (1 in-flight + 1 queued = 2 total)",
+    "the safety timeout released the stuck request and ran the queued follow-up",
   );
 });
 
-test("queueing: 2 back-to-back ticks during ONE in-flight beat yield exactly TWO LLM_REQUESTs", async (t) => {
+test("in-flight LLM: a return whose id does NOT match the in-flight request leaves the guard intact", async (t) => {
   const { orc, events } = freshOrc(t);
   let requestCount = 0;
   events.on(Events.LLM_REQUEST, () => {
     requestCount++;
   });
 
-  orc.setBlock(slowBlock("slow", 10, "SLOW", 30));
-
   orc.start();
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } });
-  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } });
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 1 } }); // request id "1" in flight
+  await settle();
+  events.emit(Events.CLOCK_TICK, { at: 0, data: { seq: 2 } }); // queued
+  await settle();
 
-  await settle(150);
+  // A stale/foreign return for a different id must NOT release the in-flight guard.
+  events.emit(Events.LLM_RETURN, { id: "99", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 1, "an unmatched return does not release the guard (no follow-up)");
 
-  assert.equal(requestCount, 2, "one in-flight beat + one queued follow-up = exactly two requests");
+  // The matching return does.
+  events.emit(Events.LLM_RETURN, { id: "1", at: 0, ok: true, data: { content: "" } });
+  await settle();
+  assert.equal(requestCount, 2, "the matching return releases the guard and runs the follow-up");
 });
 
 // ===========================================================================
