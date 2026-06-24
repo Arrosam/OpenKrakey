@@ -30,6 +30,7 @@ import { PATHS } from "../../../shared/config";
 import { parseCommand } from "./dispatcher";
 import { createCli } from "./index";
 import { runInteractiveLoop } from "./pages";
+import { ensureSurfaceTokens, surfaceUrl } from "./surfaces";
 
 // Version comes from the repo-root package.json, resolved relative to this file
 // (NOT cwd) so `krakey version` is stable wherever it is invoked from.
@@ -157,6 +158,9 @@ function stopAll(): number {
  */
 function startBackground(): void {
   ensureStateDir();
+  // Pin stable tokens for the runtime's token-gated surfaces BEFORE boot reads the
+  // configs, so `krakey dashboard` can authenticate the framed Chat/Inspector panels.
+  ensureSurfaceTokens(resolve(process.cwd(), PATHS.agentsDir));
   const logFd = openSync(LOG_FILE, "a");
   const child = spawn(process.execPath, ["--import", "tsx", bootBin], {
     detached: true,
@@ -207,6 +211,8 @@ switch (parsed.kind) {
 
   case "run":
     // Foreground runtime — boot all configured agents, Ctrl+C to stop.
+    // Pin surface tokens first so a later `krakey dashboard` can authenticate Chat/Inspector.
+    ensureSurfaceTokens(resolve(process.cwd(), PATHS.agentsDir));
     spawnChild(bootBin, []);
     break;
 
@@ -263,8 +269,14 @@ switch (parsed.kind) {
         return false;
       }
     };
-    const chatUp = await probe("http://127.0.0.1:7718");
-    const inspectorUp = await probe("http://127.0.0.1:7719");
+    // Pin/read the runtime surfaces' tokens so the framed Chat/Inspector panels
+    // authenticate — they're served by the runtime with their own per-process token,
+    // which the Console can only present if it's a stable token pinned in the config.
+    const surfaces = ensureSurfaceTokens(resolve(process.cwd(), PATHS.agentsDir));
+    const chatPort = surfaces.chat?.port ?? 7718;
+    const inspectorPort = surfaces.inspector?.port ?? 7719;
+    const chatUp = await probe(`http://127.0.0.1:${chatPort}`);
+    const inspectorUp = await probe(`http://127.0.0.1:${inspectorPort}`);
 
     if (!chatUp && !inspectorUp) {
       console.log(`krakey: no agent is running — Chat and Inspector will show "Not connected".`);
@@ -293,8 +305,9 @@ switch (parsed.kind) {
       else cfg.kill();
     };
 
-    // Launch the Console (foreground) wired to all three surfaces. The Config URL
-    // carries the token so the embedded Config panel authenticates.
+    // Launch the Console (foreground) wired to all three surfaces. Every framed URL
+    // carries its `?token=` (Config's minted here; Chat/Inspector's pinned in config
+    // by ensureSurfaceTokens) so all three panels authenticate.
     const consoleChild = spawn(
       process.execPath,
       ["--import", "tsx", consoleBin],
@@ -304,8 +317,8 @@ switch (parsed.kind) {
           ...process.env,
           CONSOLE_PORT: port,
           CONFIG_WEB_URL: "http://127.0.0.1:7717/?token=" + encodeURIComponent(token),
-          WEB_CHAT_URL: "http://127.0.0.1:7718",
-          INSPECTOR_URL: "http://127.0.0.1:7719",
+          WEB_CHAT_URL: surfaceUrl(surfaces.chat, 7718),
+          INSPECTOR_URL: surfaceUrl(surfaces.inspector, 7719),
         },
       },
     );
