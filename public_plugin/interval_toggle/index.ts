@@ -55,7 +55,7 @@ const createIntervalToggle: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "interval_toggle", version: "0.1.0", configSchema: INTERVAL_TOGGLE_SCHEMA },
+    manifest: { id: "interval_toggle", version: "0.1.0", requires: ["llm.register_tool"], configSchema: INTERVAL_TOGGLE_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       const cfg = (ctx.config ?? {}) as {
