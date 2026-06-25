@@ -1,25 +1,32 @@
 /**
- * Plugin: llm-core — the LLM round-trip, and nothing else.
+ * Plugin: llm-core — the LLM round-trip, and the per-Agent send LOCK.
  *
- * It is the only thing that answers the orchestrator's `llm.request`: it picks a
- * communicator from the key-less `ctx.llm` library, reads the conversation from the
- * `llm.request` event's `messages` and builds the chat request from `{ context,
- * messages }` (with any registered tools), and reports the normalized result back as
- * `llm.return`. Right before dispatching it also emits `llm.request.sent` carrying the
- * assembled request, so observers (the inspector) can show what was actually sent. On
- * success it surfaces the assistant's text as an `output.message` — the monologue HOOK
- * observers (the inspector) watch. Channels do NOT render it; the agent reaches a channel
- * only by explicitly calling that channel's send tool (e.g. web-chat's `web-chat.send_message`).
+ * The orchestrator no longer composes on tick or guards the round-trip. Each beat it
+ * emits a body-less TRIGGER (`llm.request` = Notify<{agentId}>). llm-core owns
+ * serialization:
  *
- * Tools come from the separate `tool-manager` plugin: llm-core reads the current
- * `ToolDef`s via the `llm.list_tools` action when it assembles each chat request,
- * so the tool registry and the round-trip stay decoupled (neither imports the
- * other). The core holds no LLM strategy — model choice is config (`communicator`),
- * tools come from other plugins, and the prompt is whatever the orchestrator composed.
+ *   • It keeps at most ONE request in flight PER agentId (the trigger's `agentId` is
+ *     the lock key). A trigger that arrives while that agent is busy does NOT start a
+ *     concurrent request — it just flags `triggered`. When the in-flight request
+ *     finishes, if `triggered` is set, llm-core composes a FRESH body and sends once
+ *     more (coalescing a burst of triggers into a single follow-up), then goes idle.
+ *   • Right before each send it pulls the body ON DEMAND via the orchestrator's
+ *     `prompt.compose` action, so the request always reflects the latest blocks (a
+ *     message that arrived while a previous request was in flight is folded into the
+ *     next send). Tools come from the `tool-manager` plugin via `llm.list_tools`.
  *
- * The default export is a PluginFactory — the loader calls it once per Agent, so
- * ALL the mutable state below (the Unsubs, the captured context and config) lives
- * in the factory closure, never in shared module scope.
+ * It then picks a communicator from the key-less `ctx.llm` library, builds the chat
+ * request from `{ context, messages }` (+ tools/temperature/maxTokens), emits
+ * `llm.request.sent` (the exact assembled request, for observers), calls chat(), and
+ * reports the normalized result as `llm.return`. On success it surfaces the
+ * assistant's text as an `output.message` — the monologue HOOK observers watch;
+ * channels do NOT render it (the agent reaches a channel only by calling that
+ * channel's send tool).
+ *
+ * The core holds no LLM strategy — model choice is config (`communicator`), tools come
+ * from other plugins, the prompt is whatever the orchestrator composed. The default
+ * export is a PluginFactory — the loader calls it once per Agent, so ALL the mutable
+ * state below lives in the factory closure, never in shared module scope (R6).
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Unsub } from "../../contracts/event-system";
@@ -32,6 +39,7 @@ import type {
 } from "../../contracts/llm";
 import type { ComposedContext } from "../../contracts/context";
 import {
+  Actions,
   Events,
   type Request,
   type Reply,
@@ -56,21 +64,29 @@ function readConfig(raw: unknown): LLMCoreConfig {
   return out;
 }
 
+/** Per-agentId send lock: at most one in flight; a trigger while busy coalesces. */
+interface BeatState {
+  inFlight: boolean;
+  triggered: boolean;
+}
+
 const createLLMCore: PluginFactory = (): Plugin => {
   // --- per-Agent state (factory closure = one instance per Agent) -----------
-
+  const states = new Map<string, BeatState>(); // keyed by the trigger's agentId
+  let seq = 0; // monotonic corrId for each real dispatch (sent ↔ return)
   let unsubRequest: Unsub | undefined;
   let ctx: PluginContext | undefined;
   let config: LLMCoreConfig = {};
 
   function emitReturn(reply: Reply<LLMResponse>): void {
-    ctx!.events.emit(Events.LLM_RETURN, reply);
+    if (!ctx) return; // a late round-trip that resolves after teardown emits nothing
+    ctx.events.emit(Events.LLM_RETURN, reply);
   }
 
   /**
    * The tools to attach to a chat request — read live from the `tool-manager`
-   * plugin via the `llm.list_tools` action. Best-effort: if no registry is loaded
-   * (or it errors) the request simply goes out tool-less, never failing the beat.
+   * plugin via `llm.list_tools`. Best-effort: a missing/erroring registry just
+   * yields no tools, never failing the beat.
    */
   async function listTools(): Promise<ToolDef[]> {
     if (!ctx!.actions.has("llm.list_tools")) return [];
@@ -82,12 +98,8 @@ const createLLMCore: PluginFactory = (): Plugin => {
     }
   }
 
-  async function answer(
-    req: Request<{ context: ComposedContext; messages: Message[] }>,
-    context: ComposedContext,
-  ): Promise<void> {
-    const { id } = req;
-
+  /** One full round-trip for an already-composed body, under corrId `id`. */
+  async function roundTrip(id: string, context: ComposedContext, turns: Message[]): Promise<void> {
     const communicator: Communicator | undefined = config.communicator
       ? ctx!.llm.get(config.communicator)
       : ctx!.llm.get(ctx!.llm.withCapability("chat")[0]);
@@ -101,10 +113,8 @@ const createLLMCore: PluginFactory = (): Plugin => {
       return;
     }
 
-    // The conversation rides the llm.request event as wire-ready Message[] (the
-    // provider already stripped provenance). With turns, the composed context becomes
-    // the `system`; without, fall back to the single-user-message shape.
-    const turns: Message[] = Array.isArray(req.data?.messages) ? req.data.messages : [];
+    // With turns, the composed context becomes the `system`; without, fall back to the
+    // single-user-message shape.
     const base =
       turns.length > 0
         ? { system: context.text, messages: turns }
@@ -114,34 +124,70 @@ const createLLMCore: PluginFactory = (): Plugin => {
     const chatReq: LLMRequest = {
       ...base,
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
-      ...(config.temperature !== undefined
-        ? { temperature: config.temperature }
-        : {}),
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
       ...(config.maxTokens !== undefined ? { maxTokens: config.maxTokens } : {}),
     };
 
-    // Surface the EXACT request being dispatched (system + messages + tools + params)
-    // so observers (the inspector) can show what was actually sent — fire-and-forget,
-    // same corrId (`id`) as this beat's llm.request / llm.return.
-    const sent: Request<{ request: LLMRequest }> = {
-      id,
-      at: Date.now(),
-      data: { request: chatReq },
-    };
+    // Surface the EXACT request being dispatched so observers (the inspector) can show
+    // what was actually sent — fire-and-forget, same corrId as this beat's llm.return.
+    const sent: Request<{ request: LLMRequest }> = { id, at: Date.now(), data: { request: chatReq } };
     ctx!.events.emit(Events.LLM_REQUEST_SENT, sent);
 
     try {
       const response = await communicator.chat(chatReq);
       emitReturn({ id, at: Date.now(), ok: true, data: response });
-      if (typeof response.content === "string" && response.content.length > 0) {
+      if (ctx && typeof response.content === "string" && response.content.length > 0) {
         const msg: Notify<{ text: string; channel?: string }> = {
           at: Date.now(),
           data: { text: response.content, channel: undefined },
         };
-        ctx!.events.emit(Events.OUTPUT_MESSAGE, msg);
+        ctx.events.emit(Events.OUTPUT_MESSAGE, msg);
       }
     } catch (err) {
       emitReturn({ id, at: Date.now(), ok: false, error: String(err) });
+    }
+  }
+
+  /** Compose ON DEMAND, then run one round-trip. No-op (logged) if nothing to compose. */
+  async function sendOnce(): Promise<void> {
+    if (!ctx!.actions.has(Actions.PROMPT_COMPOSE)) {
+      ctx!.log.warn("llm-core: prompt.compose is unavailable — cannot compose this beat");
+      return;
+    }
+    let composed: { context?: ComposedContext; messages?: Message[] };
+    try {
+      composed = (await ctx!.actions.invoke(Actions.PROMPT_COMPOSE)) as {
+        context?: ComposedContext;
+        messages?: Message[];
+      };
+    } catch (err) {
+      ctx!.log.warn("llm-core: prompt.compose failed: " + String(err));
+      return;
+    }
+    const context = composed?.context;
+    if (!context || typeof context.text !== "string") {
+      ctx!.log.warn("llm-core: prompt.compose returned no usable context");
+      return;
+    }
+    const turns: Message[] = Array.isArray(composed.messages) ? composed.messages : [];
+    if (!ctx) return; // torn down while composing — emit nothing
+    await roundTrip(String(++seq), context, turns);
+  }
+
+  /**
+   * The send loop for ONE agentId. Sends once for the trigger that started it, then —
+   * while triggers kept arriving during a send — sends one more re-composed follow-up,
+   * coalescing a burst into a single extra round-trip. Always clears `inFlight` at the
+   * end (even on an error), so the lock can never wedge.
+   */
+  async function runLoop(st: BeatState): Promise<void> {
+    try {
+      do {
+        st.triggered = false;
+        await sendOnce();
+      } while (st.triggered);
+    } finally {
+      st.inFlight = false;
     }
   }
 
@@ -159,17 +205,28 @@ const createLLMCore: PluginFactory = (): Plugin => {
       ctx = pluginCtx;
       config = readConfig(pluginCtx.config);
 
-      // --- the LLM round-trip ------------------------------------------
+      // --- the per-agentId send lock -----------------------------------
+      // A trigger (`llm.request` = Notify<{agentId}>) asks for a round-trip. While an
+      // agent is in flight, a trigger only flags `triggered`; otherwise it starts the
+      // send loop. The agentId is the lock key (falls back to this Agent's own id).
       unsubRequest = pluginCtx.events.on(Events.LLM_REQUEST, (payload: unknown) => {
-        // Ignore malformed requests silently — never throw out of a listener.
         if (payload === null || typeof payload !== "object") return;
-        const req = payload as Request<{ context: ComposedContext; messages: Message[] }>;
-        const context = req.data?.context;
-        if (context === null || typeof context !== "object") return;
-        if (typeof context.text !== "string") return;
-
-        // Settle each request independently in its own async task.
-        void answer(req, context);
+        const data = (payload as Notify<{ agentId?: unknown }>).data;
+        const key =
+          typeof data?.agentId === "string" && data.agentId.length > 0
+            ? data.agentId
+            : pluginCtx.agentId;
+        let st = states.get(key);
+        if (!st) {
+          st = { inFlight: false, triggered: false };
+          states.set(key, st);
+        }
+        if (st.inFlight) {
+          st.triggered = true; // coalesce — do NOT start a concurrent request
+          return;
+        }
+        st.inFlight = true;
+        void runLoop(st);
       });
     },
 
@@ -178,6 +235,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
       unsubRequest = undefined;
       ctx = undefined;
       config = {};
+      states.clear();
     },
   };
 };
