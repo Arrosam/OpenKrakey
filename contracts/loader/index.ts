@@ -24,13 +24,21 @@
  *
  * Determinism & validation: plugin ids must be simple names (no path separators,
  * no `.`/`..`) — anything else is rejected before any filesystem access or import.
- * Plugins load in a deterministic order: the declared `plugins` list in order
- * (so a plugin may rely on an earlier one's setup-time action), then any
- * `privatePlugins` not in that list, then any custom private-folder plugins
- * declared nowhere (sorted by name). A `requires` entry containing a dot is an ACTION name
- * checked against the actionbus at that plugin's setup time; any other entry must
- * match the plugin id or a `manifest.provides` capability of a plugin in THIS
- * load set (independent of load order).
+ * The load set is gathered in a deterministic order: the declared `plugins` list in
+ * order, then any `privatePlugins` not in that list, then any custom private-folder
+ * plugins declared nowhere (sorted by name). A `requires` entry containing a dot is
+ * an ACTION name that must be registered on the actionbus by an earlier plugin's
+ * setup; any other entry must match the plugin id or a `manifest.provides` capability
+ * of a plugin in THIS load set (independent of load order).
+ *
+ * Setup ORDER satisfies `requires`: a plugin is set up only once all its
+ * requirements are met, so a dependent that is DECLARED before its action provider
+ * is deferred until the provider has set up (the declared order is otherwise
+ * preserved — independent plugins keep their listed order). This means a config
+ * need not hand-order action dependencies correctly. If no remaining plugin can
+ * have its requirements met (a dependency cycle, or a provider that was never
+ * declared), load() fails with a DependencyError — the same loud failure a missing
+ * dependency has always produced.
  *
  * Failure: load() is all-or-nothing — if any plugin fails to import/validate/
  * setup, the plugins already set up are torn down (reverse order, isolated

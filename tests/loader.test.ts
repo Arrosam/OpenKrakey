@@ -1072,6 +1072,80 @@ export default () => ({
 });
 
 // ===========================================================================
+// EXT-4b — Setup order is DEPENDENCY-DRIVEN, not strict array order. A plugin
+//           whose dotted action `requires` are not yet registered is DEFERRED
+//           until a later-declared plugin provides them; only a genuinely
+//           unsatisfiable set (cycle / missing provider) fails. This is the fix
+//           for the onboarding wizard emitting plugins in alphabetical order
+//           (e.g. history before memory-note, krakeycode before llm-core).
+// ===========================================================================
+
+test("requires (action, out of order): a consumer declared BEFORE its action provider is deferred and loads OK", async () => {
+  // "early-consumer" is listed FIRST but needs an action only "late-provider"
+  // registers in setup. The loader must defer the consumer until the provider
+  // has set up — the exact shape of the wizard's alphabetical config. Strict
+  // array-order setup (the old behavior) would have failed here.
+  writePlugin(
+    publicPluginDir,
+    "late-provider",
+    `
+export const calls = [];
+export default () => ({
+  manifest: { id: "late-provider", version: "1" },
+  async setup(ctx) { calls.push(ctx); ctx.actions.register("svc.ready", async () => "ok"); },
+});
+`,
+  );
+  writePlugin(
+    publicPluginDir,
+    "early-consumer",
+    observablePlugin({ id: "early-consumer", requires: ["svc.ready"] }),
+  );
+
+  const { loader } = makeLoader(def({ plugins: ["early-consumer", "late-provider"] }));
+  await assert.doesNotReject(
+    loader.load(),
+    "a dotted action requirement met by a LATER-declared plugin must still load (deferred setup)",
+  );
+
+  const consumer = await importPlugin(publicPluginDir, "early-consumer");
+  assert.equal(consumer.calls.length, 1, "the deferred consumer was set up once, after its provider");
+});
+
+test("requires (action cycle): two plugins each needing the other's action => DependencyError", async () => {
+  // x needs y.act, y needs x.act — neither can ever become ready, so the set is
+  // unsatisfiable and must fail loudly rather than spin or partially load.
+  writePlugin(
+    publicPluginDir,
+    "x",
+    observablePlugin({ id: "x", requires: ["y.act"], setupBody: `ctx.actions.register("x.act", async () => 1);` }),
+  );
+  writePlugin(
+    publicPluginDir,
+    "y",
+    observablePlugin({ id: "y", requires: ["x.act"], setupBody: `ctx.actions.register("y.act", async () => 1);` }),
+  );
+  const { loader } = makeLoader(def({ plugins: ["x", "y"] }));
+  await assert.rejects(loader.load(), DependencyError, "an unbreakable action-dependency cycle must fail loudly");
+});
+
+test("setup order: independent plugins (no requirements) keep their declared array order", async () => {
+  // Nothing forces a reorder, so the listed order is preserved. Each plugin
+  // prints its id in setup; the captured print order is the setup order.
+  for (const id of ["zeta", "alpha", "mid"]) {
+    writePlugin(publicPluginDir, id, observablePlugin({ id, setupBody: `ctx.print(${JSON.stringify(id)});` }));
+  }
+  const prints: string[] = [];
+  const { loader } = makeLoader(
+    def({ plugins: ["zeta", "alpha", "mid"] }),
+    stubOrchestrator(),
+    { print: (t) => prints.push(t) },
+  );
+  await loader.load();
+  assert.deepEqual(prints, ["zeta", "alpha", "mid"], "independents keep their declared order when no dep forces a reorder");
+});
+
+// ===========================================================================
 // EXT-5 — Independent copy is CODE-ONLY: the source's accumulated data/ is NOT
 //          visible to a declared independent (agent-private dataDir).
 // ===========================================================================

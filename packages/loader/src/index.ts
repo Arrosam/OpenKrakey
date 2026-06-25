@@ -159,63 +159,79 @@ export function createLoader(deps: LoaderDeps): Loader {
       }
     }
 
-    // 4. PASS 2 — per plugin IN ORDER: check requires, build context, setup.
-    //    All-or-nothing: ANY throw here (requires check, context build, or
-    //    setup) tears down the plugins already set up before rethrowing.
-    //    Pass 1 needs no rollback — nothing is set up yet.
+    // 4. PASS 2 — set up plugins, choosing an order that SATISFIES `requires`.
+    //    A `requires` entry with a dot is an ACTION that must be on the actionbus
+    //    by an EARLIER plugin's setup (order-dependent); any other entry must be a
+    //    plugin id or `provides` capability anywhere in the load set (order-
+    //    independent, checked against `available`). Rather than trust the declared
+    //    array order — which the config tools can't always get right for action
+    //    deps — we repeatedly set up the EARLIEST not-yet-set-up plugin whose
+    //    requirements are ALL currently met; setting it up may register the actions
+    //    that unblock others. Declared order is preserved among plugins ready
+    //    together, so independents keep their order. If a full scan finds nothing
+    //    ready while plugins remain, the leftover deps are genuinely unsatisfiable
+    //    (a cycle, or a missing provider) — fail loudly, exactly as a strict-order
+    //    check would have. All-or-nothing: ANY throw here tears down the plugins
+    //    already set up. Pass 1 needs no rollback — nothing is set up yet.
+    const isMet = (req: string): boolean =>
+      req.includes(".") ? deps.events.actions.has(req) : available.has(req);
+    const firstUnmet = (plugin: Plugin): string | undefined =>
+      (plugin.manifest.requires ?? []).find((req) => !isMet(req));
+
+    // Build the PluginContext for one plugin and run its setup.
+    const setUp = async (id: string, plugin: Plugin, dataDir: string): Promise<void> => {
+      const ctx: PluginContext = {
+        agentId: deps.agentId,
+        events: deps.events.events,
+        actions: deps.events.actions,
+        config: deps.def.config?.[id] ?? {},
+        dataDir,
+        llm: deps.library,
+        setBlock: (b) => deps.orchestrator.setBlock(b),
+        getBlock: (bid) => deps.orchestrator.getBlock(bid),
+        removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
+        listBlocks: () => deps.orchestrator.listBlocks(),
+        // Diagnostics go to the host Logger tagged with the plugin id; the
+        // user-facing print goes VERBATIM to the print sink. Both are also
+        // pushed on this Agent's bus as log.entry so channels can mirror them.
+        log: {
+          info: (msg) => {
+            log.info("[" + id + "] " + msg);
+            pushLogEntry("info", id, msg);
+          },
+          warn: (msg) => {
+            log.warn("[" + id + "] " + msg);
+            pushLogEntry("warn", id, msg);
+          },
+          error: (msg) => {
+            log.error("[" + id + "] " + msg);
+            pushLogEntry("error", id, msg);
+          },
+        },
+        print: (text) => {
+          printSink(text);
+          pushLogEntry("print", id, text);
+        },
+      };
+      await plugin.setup(ctx);
+      loaded.push({ plugin, ctx });
+    };
+
     try {
-      for (const { id, plugin, dataDir } of loadSet) {
-        // a. Verify declared requirements. An entry with a dot is an ACTION name
-        //    checked against the actionbus at THIS plugin's setup time (order-
-        //    dependent); any other entry must be a plugin id or provided
-        //    capability somewhere in the load set (order-independent).
-        for (const req of plugin.manifest.requires ?? []) {
-          const met = req.includes(".") ? deps.events.actions.has(req) : available.has(req);
-          if (!met) {
-            throw new DependencyError(
-              "plugin '" + id + "' requires '" + req + "' which is not available",
-            );
-          }
+      const pending = [...loadSet];
+      while (pending.length > 0) {
+        // Earliest plugin (declared order) whose requirements are ALL met now.
+        const idx = pending.findIndex(({ plugin }) => firstUnmet(plugin) === undefined);
+        if (idx === -1) {
+          // Nothing can make progress — a dependency cycle or a missing provider.
+          // Report a representative culprit the way the old strict check would.
+          const { id, plugin } = pending[0];
+          throw new DependencyError(
+            "plugin '" + id + "' requires '" + firstUnmet(plugin) + "' which is not available",
+          );
         }
-
-        // b. Build the PluginContext.
-        const ctx: PluginContext = {
-          agentId: deps.agentId,
-          events: deps.events.events,
-          actions: deps.events.actions,
-          config: deps.def.config?.[id] ?? {},
-          dataDir,
-          llm: deps.library,
-          setBlock: (b) => deps.orchestrator.setBlock(b),
-          getBlock: (bid) => deps.orchestrator.getBlock(bid),
-          removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
-          listBlocks: () => deps.orchestrator.listBlocks(),
-          // Diagnostics go to the host Logger tagged with the plugin id; the
-          // user-facing print goes VERBATIM to the print sink. Both are also
-          // pushed on this Agent's bus as log.entry so channels can mirror them.
-          log: {
-            info: (msg) => {
-              log.info("[" + id + "] " + msg);
-              pushLogEntry("info", id, msg);
-            },
-            warn: (msg) => {
-              log.warn("[" + id + "] " + msg);
-              pushLogEntry("warn", id, msg);
-            },
-            error: (msg) => {
-              log.error("[" + id + "] " + msg);
-              pushLogEntry("error", id, msg);
-            },
-          },
-          print: (text) => {
-            printSink(text);
-            pushLogEntry("print", id, text);
-          },
-        };
-
-        // c. Register the plugin.
-        await plugin.setup(ctx);
-        loaded.push({ plugin, ctx });
+        const { id, plugin, dataDir } = pending.splice(idx, 1)[0];
+        await setUp(id, plugin, dataDir);
       }
     } catch (err) {
       // Surface load/dependency failures on the bus too, so the inspector's
