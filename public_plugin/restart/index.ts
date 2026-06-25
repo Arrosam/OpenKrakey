@@ -66,7 +66,7 @@ const createRestart: PluginFactory = (): Plugin => {
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "restart", version: "0.1.0", configSchema: RESTART_SCHEMA },
+    manifest: { id: "restart", version: "0.1.0", requires: ["llm.register_tool"], configSchema: RESTART_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       const cfg = (ctx.config ?? {}) as {
