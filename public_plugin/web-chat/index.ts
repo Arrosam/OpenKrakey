@@ -263,11 +263,14 @@ const createWeb: PluginFactory = (): Plugin => {
           ),
       });
 
-      // A new request snapshots the messages now in its composed context: those
-      // pending messages are carried by THIS request and become its responsibility
-      // (so an EARLIER outstanding request's return can't claim them).
-      const offRequest = events.on(Events.LLM_REQUEST, (payload) => {
-        const reqId = (payload as EventPayloads["llm.request"] | undefined)?.id;
+      // A DISPATCHED request snapshots the messages now in its composed context: those
+      // pending messages are carried by THIS request and become its responsibility (so
+      // an EARLIER outstanding request's return can't claim them). We key off
+      // `llm.request.sent` — emitted by llm-core right before chat() with the assembled
+      // request and the SAME corrId as the eventual `llm.return` — because the plain
+      // `llm.request` is now a body-less trigger (no corrId).
+      const offRequest = events.on(Events.LLM_REQUEST_SENT, (payload) => {
+        const reqId = (payload as EventPayloads["llm.request.sent"] | undefined)?.id;
         if (typeof reqId !== "string" || r.pending.length === 0) return;
         const prior = r.inFlight.get(reqId) ?? [];
         r.inFlight.set(reqId, prior.concat(r.pending));

@@ -65,7 +65,7 @@ test.after(() => {
 // and fire_now (FIRED:<id>), and runs a stdin command loop:
 //   out <id> <text>   -> invoke web-chat.send_message{text} (the agent's explicit send) on <id>'s bus
 //   raw <id> <text>   -> emit a bare output.message{text} (the monologue hook; web ignores it)
-//   req <id> <reqId>  -> emit llm.request{id:reqId} on <id>'s bus (a beat's request)
+//   req <id> <reqId>  -> emit llm.request.sent{id:reqId} on <id>'s bus (a dispatched beat request)
 //   ret <id> <reqId>  -> emit llm.return{id:reqId} on <id>'s bus (that request's return)
 //   down <id>         -> teardown that agent's instance (TORE_DOWN:<id>)
 //   quit              -> teardown all + exit
@@ -175,7 +175,7 @@ rl.on("line", async (line) => {
     const s2 = rest.indexOf(" ");
     const id = s2 === -1 ? rest : rest.slice(0, s2);
     const rid = s2 === -1 ? "r" : rest.slice(s2 + 1);
-    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_REQUEST)}, { id: rid, at: Date.now(), data: { context: { text: "" } } });
+    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_REQUEST_SENT)}, { id: rid, at: Date.now(), data: { request: { messages: [] } } });
   } else if (op === "ret") {
     const s2 = rest.indexOf(" ");
     const id = s2 === -1 ? rest : rest.slice(0, s2);
