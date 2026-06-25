@@ -677,6 +677,12 @@ export default () => ({
       priority: 100,
       render() { throw new Error("render-boom"); },
     });
+    // METHOD B: compose happens on demand, so stand in for llm-core — pull a
+    // prompt.compose each beat so the throwing block actually renders (and the
+    // orchestrator logs the caught failure as a core:orchestrator warn).
+    ctx.events.on("clock.tick", () => {
+      if (ctx.actions.has("prompt.compose")) ctx.actions.invoke("prompt.compose").catch(() => {});
+    });
   },
 });
 `;

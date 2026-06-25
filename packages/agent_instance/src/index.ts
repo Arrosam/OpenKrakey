@@ -106,7 +106,7 @@ export function createAgentInstance(
   // loggers so they serialize among themselves but never across agents (R6).
   const mirrorGuard: MirrorGuard = { active: false };
   const orchLog = busLogger(log, events.events, "core:orchestrator", mirrorGuard);
-  const orchestrator = createOrchestrator({ events, clock, log: orchLog });
+  const orchestrator = createOrchestrator({ agentId: def.id, events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
     def,
