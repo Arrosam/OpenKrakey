@@ -11,14 +11,15 @@
  * observers (the inspector) watch. Channels do NOT render it; the agent reaches a channel
  * only by explicitly calling that channel's send tool (e.g. web-chat's `web-chat.send_message`).
  *
- * It doubles as the tool-registration hub via the `llm.register_tool` action: tool
- * plugins declare the L1 `ToolDef`s that ride along on every chat request. The core
- * holds no LLM strategy — model choice is config (`communicator`), tools come from
- * other plugins, and the prompt is whatever context the orchestrator composed.
+ * Tools come from the separate `tool-manager` plugin: llm-core reads the current
+ * `ToolDef`s via the `llm.list_tools` action when it assembles each chat request,
+ * so the tool registry and the round-trip stay decoupled (neither imports the
+ * other). The core holds no LLM strategy — model choice is config (`communicator`),
+ * tools come from other plugins, and the prompt is whatever the orchestrator composed.
  *
  * The default export is a PluginFactory — the loader calls it once per Agent, so
- * ALL the mutable state below (the tool Map, the Unsubs, the captured context and
- * config) lives in the factory closure, never in shared module scope.
+ * ALL the mutable state below (the Unsubs, the captured context and config) lives
+ * in the factory closure, never in shared module scope.
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Unsub } from "../../contracts/event-system";
@@ -58,15 +59,27 @@ function readConfig(raw: unknown): LLMCoreConfig {
 const createLLMCore: PluginFactory = (): Plugin => {
   // --- per-Agent state (factory closure = one instance per Agent) -----------
 
-  /** ToolDefs declared by tool plugins, keyed by name (re-register replaces). */
-  const tools = new Map<string, ToolDef>();
   let unsubRequest: Unsub | undefined;
-  let unregisterTool: Unsub | undefined;
   let ctx: PluginContext | undefined;
   let config: LLMCoreConfig = {};
 
   function emitReturn(reply: Reply<LLMResponse>): void {
     ctx!.events.emit(Events.LLM_RETURN, reply);
+  }
+
+  /**
+   * The tools to attach to a chat request — read live from the `tool-manager`
+   * plugin via the `llm.list_tools` action. Best-effort: if no registry is loaded
+   * (or it errors) the request simply goes out tool-less, never failing the beat.
+   */
+  async function listTools(): Promise<ToolDef[]> {
+    if (!ctx!.actions.has("llm.list_tools")) return [];
+    try {
+      const r = await ctx!.actions.invoke("llm.list_tools");
+      return Array.isArray(r) ? (r as ToolDef[]) : [];
+    } catch {
+      return [];
+    }
   }
 
   async function answer(
@@ -97,9 +110,10 @@ const createLLMCore: PluginFactory = (): Plugin => {
         ? { system: context.text, messages: turns }
         : { messages: [{ role: "user" as const, content: context.text }] };
 
+    const toolDefs = await listTools();
     const chatReq: LLMRequest = {
       ...base,
-      ...(tools.size > 0 ? { tools: [...tools.values()] } : {}),
+      ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
       ...(config.temperature !== undefined
         ? { temperature: config.temperature }
         : {}),
@@ -135,33 +149,15 @@ const createLLMCore: PluginFactory = (): Plugin => {
     manifest: {
       id: "llm-core",
       version: "0.1.0",
-      provides: ["llm.register_tool"],
+      // The tool REGISTRY moved to the `tool-manager` plugin; we read it at send
+      // time via `llm.list_tools`, so we require that action to be on the bus.
+      requires: ["llm.list_tools"],
       configSchema: LLM_CORE_SCHEMA,
     },
 
     setup(pluginCtx: PluginContext) {
       ctx = pluginCtx;
       config = readConfig(pluginCtx.config);
-
-      // --- tool registration hub ---------------------------------------
-      unregisterTool = pluginCtx.actions.register(
-        "llm.register_tool",
-        async (params: unknown) => {
-          if (
-            params === null ||
-            typeof params !== "object" ||
-            typeof (params as ToolDef).name !== "string" ||
-            (params as ToolDef).name.length === 0
-          ) {
-            throw new Error(
-              "llm.register_tool: params must be a ToolDef with a non-empty string `name`",
-            );
-          }
-          const def = params as ToolDef;
-          tools.set(def.name, def);
-          return true;
-        },
-      );
 
       // --- the LLM round-trip ------------------------------------------
       unsubRequest = pluginCtx.events.on(Events.LLM_REQUEST, (payload: unknown) => {
@@ -179,12 +175,9 @@ const createLLMCore: PluginFactory = (): Plugin => {
 
     teardown() {
       unsubRequest?.();
-      unregisterTool?.();
       unsubRequest = undefined;
-      unregisterTool = undefined;
       ctx = undefined;
       config = {};
-      tools.clear();
     },
   };
 };

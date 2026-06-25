@@ -12,6 +12,7 @@ import type {
   LLMResponse,
   Capability,
   Message,
+  ToolDef,
 } from "../../contracts/llm";
 import type { Plugin, PluginContext } from "../../contracts/plugin";
 import type { ContextBlock } from "../../contracts/context";
@@ -134,14 +135,24 @@ interface Harness {
   ctx: PluginContext;
   events: ReturnType<typeof createEventSystem>["events"];
   actions: ReturnType<typeof createEventSystem>["actions"];
+  /** Backing store for the stub `llm.list_tools` action — push ToolDefs here. */
+  toolsRef: ToolDef[];
 }
 
 function makeCtx(t: { after(fn: () => void): void }, opts: {
   config?: unknown;
   llm: CommunicatorLibrary;
+  /** Skip registering the stub tool-manager (llm.list_tools) on the bus. */
+  noToolManager?: boolean;
 }): Harness {
   const sys = createEventSystem();
   const store = blockStore();
+  // Stand in for the `tool-manager` plugin: llm-core reads tools from this action
+  // at send time. Tests push ToolDefs onto `toolsRef` to make them appear.
+  const toolsRef: ToolDef[] = [];
+  if (!opts.noToolManager) {
+    sys.actions.register("llm.list_tools", async () => [...toolsRef]);
+  }
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "llmcore-"));
   t.after(() => {
     try {
@@ -164,13 +175,13 @@ function makeCtx(t: { after(fn: () => void): void }, opts: {
     log: { info: () => {}, warn: () => {}, error: () => {} },
     print: () => {},
   };
-  return { ctx, events: sys.events, actions: sys.actions };
+  return { ctx, events: sys.events, actions: sys.actions, toolsRef };
 }
 
 /** Setup the plugin against a fresh context. Registers teardown via t.after. */
 async function setupPlugin(
   t: { after(fn: () => void): void },
-  opts: { config?: unknown; llm: CommunicatorLibrary },
+  opts: { config?: unknown; llm: CommunicatorLibrary; noToolManager?: boolean },
 ): Promise<Harness & { p: Plugin }> {
   const p = plugin();
   const h = makeCtx(t, opts);
@@ -222,12 +233,21 @@ test("manifest: id is 'llm-core'", () => {
   assert.equal(p.manifest.id, "llm-core");
 });
 
-test("manifest: provides includes 'llm.register_tool'", () => {
+test("manifest: requires includes 'llm.list_tools' (tools come from tool-manager)", () => {
   const p = plugin();
-  assert.ok(Array.isArray(p.manifest.provides), "provides must be an array");
+  assert.ok(Array.isArray(p.manifest.requires), "requires must be an array");
   assert.ok(
-    p.manifest.provides!.includes("llm.register_tool"),
-    "provides must include llm.register_tool",
+    p.manifest.requires!.includes("llm.list_tools"),
+    "requires must include llm.list_tools so the loader orders tool-manager first",
+  );
+});
+
+test("manifest: no longer provides 'llm.register_tool' (moved to tool-manager)", () => {
+  const p = plugin();
+  const provides = p.manifest.provides ?? [];
+  assert.ok(
+    !provides.includes("llm.register_tool"),
+    "the tool registry now lives in tool-manager; llm-core must not claim it",
   );
 });
 
@@ -237,98 +257,10 @@ test("manifest: exposes setup and teardown functions", () => {
   assert.equal(typeof p.teardown, "function");
 });
 
-test("setup: registers the llm.register_tool action on the actionbus", async (t) => {
+test("setup: does NOT register llm.register_tool (that is tool-manager's job now)", async (t) => {
   const lib = library([chatCommunicator({})]);
   const { actions } = await setupPlugin(t, { llm: lib });
-  assert.equal(actions.has("llm.register_tool"), true);
-  assert.ok(actions.list().includes("llm.register_tool"));
-});
-
-// ===========================================================================
-// 2. llm.register_tool action
-// ===========================================================================
-
-// ---- positive --------------------------------------------------------------
-
-test("register_tool: a valid ToolDef resolves true", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  const res = await actions.invoke("llm.register_tool", {
-    name: "t1",
-    description: "first tool",
-    parameters: { type: "object" },
-  });
-  assert.equal(res, true);
-});
-
-test("register_tool: name-only ToolDef (no description/parameters) resolves true", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  const res = await actions.invoke("llm.register_tool", { name: "bare" });
-  assert.equal(res, true);
-});
-
-// ---- state transitions -----------------------------------------------------
-
-test("register_tool: a registered def appears on the next chat request's tools", async (t) => {
-  const com = chatCommunicator({});
-  const { actions, events } = await setupPlugin(t, { llm: library([com]) });
-  await actions.invoke("llm.register_tool", { name: "t1", description: "d" });
-  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
-  await settle();
-  assert.equal(com.calls.length, 1);
-  const tools = com.calls[0].tools ?? [];
-  assert.equal(tools.length, 1);
-  assert.equal(tools[0].name, "t1");
-});
-
-test("register_tool: two distinct names both appear on the chat request", async (t) => {
-  const com = chatCommunicator({});
-  const { actions, events } = await setupPlugin(t, { llm: library([com]) });
-  await actions.invoke("llm.register_tool", { name: "a" });
-  await actions.invoke("llm.register_tool", { name: "b" });
-  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
-  await settle();
-  const names = (com.calls[0].tools ?? []).map((d) => d.name).sort();
-  assert.deepEqual(names, ["a", "b"]);
-});
-
-test("register_tool: re-registering the same name REPLACES (later def wins)", async (t) => {
-  const com = chatCommunicator({});
-  const { actions, events } = await setupPlugin(t, { llm: library([com]) });
-  await actions.invoke("llm.register_tool", { name: "t1", description: "first" });
-  await actions.invoke("llm.register_tool", { name: "t1", description: "second" });
-  events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
-  await settle();
-  const tools = com.calls[0].tools ?? [];
-  // same name registered twice -> exactly one entry, the later def
-  assert.equal(tools.filter((d) => d.name === "t1").length, 1);
-  assert.equal(tools[0].description, "second");
-});
-
-// ---- negative --------------------------------------------------------------
-
-test("register_tool: rejects on null params", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  await assert.rejects(actions.invoke("llm.register_tool", null));
-});
-
-test("register_tool: rejects when params is not an object (string)", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  await assert.rejects(actions.invoke("llm.register_tool", "t1"));
-});
-
-test("register_tool: rejects when name is missing", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  await assert.rejects(actions.invoke("llm.register_tool", { description: "no name" }));
-});
-
-test("register_tool: rejects on empty-string name", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  await assert.rejects(actions.invoke("llm.register_tool", { name: "" }));
-});
-
-test("register_tool: rejects when name is not a string (number)", async (t) => {
-  const { actions } = await setupPlugin(t, { llm: library([chatCommunicator({})]) });
-  await assert.rejects(actions.invoke("llm.register_tool", { name: 123 }));
+  assert.equal(actions.has("llm.register_tool"), false);
 });
 
 // ===========================================================================
@@ -401,15 +333,28 @@ test("chat request: with ZERO registered tools the tools key is ABSENT", async (
   );
 });
 
-test("chat request: registered ToolDef is included on the tools array", async (t) => {
+test("chat request: a ToolDef from tool-manager (llm.list_tools) is included on the tools array", async (t) => {
   const com = chatCommunicator({});
-  const { events, actions } = await setupPlugin(t, { llm: library([com]) });
-  await actions.invoke("llm.register_tool", { name: "t1", parameters: { type: "object" } });
+  const { events, toolsRef } = await setupPlugin(t, { llm: library([com]) });
+  toolsRef.push({ name: "t1", parameters: { type: "object" } });
   events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX"));
   await settle();
   assert.ok(Array.isArray(com.calls[0].tools));
   assert.equal(com.calls[0].tools!.length, 1);
   assert.equal(com.calls[0].tools![0].name, "t1");
+});
+
+test("chat request: with NO llm.list_tools action on the bus, the request goes out tool-less (no throw)", async (t) => {
+  const com = chatCommunicator({});
+  const { events } = await setupPlugin(t, { llm: library([com]), noToolManager: true });
+  assert.doesNotThrow(() => events.emit(Events.LLM_REQUEST, llmRequest("1", "CTX")));
+  await settle();
+  assert.equal(com.calls.length, 1, "a missing tool registry must not block the chat call");
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(com.calls[0], "tools"),
+    false,
+    "tools key omitted when no registry is available",
+  );
 });
 
 // ===========================================================================
@@ -619,15 +564,6 @@ test("teardown: after teardown a later llm.request produces nothing", async (t) 
   assert.equal(com.calls.length, 0);
 });
 
-test("teardown: unregisters llm.register_tool (actions.has -> false)", async (t) => {
-  const p = plugin();
-  const h = makeCtx(t, { llm: library([chatCommunicator({})]) });
-  await p.setup(h.ctx);
-  assert.equal(h.actions.has("llm.register_tool"), true);
-  await p.teardown?.();
-  assert.equal(h.actions.has("llm.register_tool"), false);
-});
-
 // ===========================================================================
 // 10. config temperature / maxTokens forwarding
 // ===========================================================================
@@ -819,11 +755,11 @@ test("messages: a non-array `messages` is treated as absent (single-user fallbac
 
 test("messages: event messages + registered tools + temperature + maxTokens all flow on one request", async (t) => {
   const com = chatCommunicator({ response: { content: "ok" } });
-  const { events, actions } = await setupPlugin(t, {
+  const { events, toolsRef } = await setupPlugin(t, {
     config: { temperature: 0.7, maxTokens: 128 },
     llm: library([com]),
   });
-  await actions.invoke("llm.register_tool", { name: "t1", description: "d", parameters: { type: "object" } });
+  toolsRef.push({ name: "t1", description: "d", parameters: { type: "object" } });
   const convo: Message[] = [
     { role: "user", content: "q", name: "web-chat" },
     { role: "assistant", content: "a" },
@@ -901,12 +837,12 @@ function collectSent(events: Harness["events"]): Array<{
 
 test("request.sent: data.request deep-equals the chat() arg; id matches; carries system/messages/tools/temperature/maxTokens", async (t) => {
   const com = chatCommunicator({ response: { content: "ok" } });
-  const { events, actions } = await setupPlugin(t, {
+  const { events, toolsRef } = await setupPlugin(t, {
     config: { temperature: 0.7, maxTokens: 128 },
     llm: library([com]),
   });
   const sent = collectSent(events);
-  await actions.invoke("llm.register_tool", {
+  toolsRef.push({
     name: "t1",
     description: "d",
     parameters: { type: "object" },
