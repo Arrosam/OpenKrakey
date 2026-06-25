@@ -11,24 +11,30 @@
  *     actions (`clock.set_interval` / `clock.set_default_interval` /
  *     `clock.fire_now` — see shared/actions Actions.CLOCK_*) on the actionbus so
  *     plugins can adjust the rhythm; they are unregistered on stop().
+ *  6. compose the prompt ON DEMAND: while started, it registers `prompt.compose`
+ *     (Actions.PROMPT_COMPOSE) on the actionbus — gather → compose → resolve
+ *     `{ context, messages }`; unregistered on stop().
  *
- * Beat (EVENT-driven, fire-and-forget): clock tick (a `clock.tick` event) →
- * emit `prompt.gather` (plugins refresh blocks) → compose → emit `llm.request`
- * (Request<{context, messages}>) WITHOUT awaiting — the beat ends at the emit. compose
- * splits the block buffer by `target`: "system" blocks form the system prompt text
- * (priority DESC, wrapped `<label>`); "messages" blocks each render a `Message[]` GROUP,
- * concatenated by priority DESC (order within a group preserved) into `messages` — the
- * conversation (`history`) is one such block. The orchestrator never inspects message
- * content. The LLM round-trip returns later as an `llm.return` event (Reply<LLMResponse>)
- * whose tool calls are dispatched fire-and-forget on the actionbus. As EACH dispatched
- * call settles, a `tool.result` event is emitted (Reply: id = the ToolCall id,
- * name = the action name; ok+data on success, ok:false+error on rejection) so
- * plugins can fold tool outcomes into the next beat's context.
+ * Beat (EVENT-driven, fire-and-forget): a clock tick (a `clock.tick` event) makes the
+ * orchestrator emit `llm.request` as a body-less TRIGGER (Notify<{agentId}>) WITHOUT
+ * awaiting — the beat ends at the emit. It does NOT decide when to send or guard the
+ * round-trip: the round-trip plugin (llm-core) owns serialization — at most one request
+ * in flight PER agentId, coalescing triggers that arrive while busy — and, right before
+ * it sends, invokes `prompt.compose` to pull a freshly-gathered body. compose splits the
+ * block buffer by `target`: "system" blocks form the system prompt text (priority DESC,
+ * wrapped `<label>`); "messages" blocks each render a `Message[]` GROUP, concatenated by
+ * priority DESC (order within a group preserved) into `messages` — the conversation
+ * (`history`) is one such block. The orchestrator never inspects message content. The LLM
+ * round-trip returns later as an `llm.return` event (Reply<LLMResponse>) whose tool calls
+ * are dispatched fire-and-forget on the actionbus. As EACH dispatched call settles, a
+ * `tool.result` event is emitted (Reply: id = the ToolCall id, name = the action name;
+ * ok+data on success, ok:false+error on rejection) so plugins can fold tool outcomes into
+ * the next beat's context.
  *
  * Degradation: compose renders each block in ISOLATION — a block whose render()
  * throws/rejects degrades to empty text for that beat (logged); it never drops
- * the other blocks or the beat. After stop(), no further beat work runs: a beat
- * queued behind an in-flight one is cancelled.
+ * the other blocks or the beat. After stop(), no further beat work runs — the tick
+ * subscription and registered actions are torn down.
  *
  * `agent_instance` uses start/stop; `loader` wires PluginContext's block ops to
  * the block-store methods below.
