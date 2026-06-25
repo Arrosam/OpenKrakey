@@ -198,7 +198,7 @@ async function main() {
   const def = {
     id: "e2e-agent",
     intervalMs: 250,
-    plugins: ["llm-core", "persona", "system-prompt", "web-chat"],
+    plugins: ["llm-core", "tool-manager", "persona", "system-prompt", "web-chat"],
     // web-chat is the data-carrying plugin now (it owns the conversation transcript), so it
     // is private-by-default — each agent gets its OWN dataDir under agentsDir. Without
     // this, web-chat's transcript persists in the SHARED public_plugin/web-chat/data across runs

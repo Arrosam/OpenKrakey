@@ -26,6 +26,7 @@
       "description": "Phase-1 MVP plugins under public_plugin/ — the essential set that makes a bare agent converse, remember, and use tools, exercising every core function. Each implements the L1 plugin contract and talks ONLY via the per-Agent event-system.",
       "nodes": [
         "llm-core",
+        "tool-manager",
         "persona",
         "system-prompt",
         "web-chat",
@@ -175,7 +176,7 @@
     "llm-core": {
       "zone": "plugins",
       "path": "public_plugin/llm-core",
-      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content — the monologue HOOK for observers, NOT a channel send). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content — the monologue HOOK for observers, NOT a channel send). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Reads the registered tools from the tool-manager plugin via the llm.list_tools action when assembling each request (the llm.register_tool registry moved to tool-manager); requires:[llm.list_tools].",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -185,6 +186,19 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/llm-core.md"
+    },
+    "tool-manager": {
+      "zone": "plugins",
+      "path": "public_plugin/tool-manager",
+      "description": "The per-Agent tool registry, extracted from llm-core so the round-trip and the tool plugins stay decoupled (neither imports the other). Owns the llm.register_tool action (same name tool plugins already call — add/replace a ToolDef by name, validated) and exposes llm.list_tools -> ToolDef[] (a fresh snapshot). provides:[llm.register_tool] so the loader sequences it before every tool plugin; llm-core requires:[llm.list_tools]. Holds no LLM/model behaviour; all state in the factory closure (one registry per Agent, R6).",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/tool-manager.md"
     },
     "persona": {
       "zone": "plugins",

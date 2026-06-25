@@ -39,6 +39,7 @@ interface PluginMeta {
  */
 const PLUGIN_META: Record<string, PluginMeta> = {
   "llm-core": { id: "llm-core", icon: "cpu", name: "LLM core", tagline: "talks to the AI service — the agent's brain (optional)" },
+  "tool-manager": { id: "tool-manager", icon: "grid", name: "Tool registry", tagline: "shared registry every tool plugin registers into — keep on", required: true },
   persona: { id: "persona", icon: "person", name: "Persona", tagline: "the agent's identity / system prompt" },
   "system-prompt": { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
   "web-chat": { id: "web-chat", icon: "chat", name: "Web chat", tagline: "chat with the agent from your browser", dataCarrier: true },

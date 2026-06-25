@@ -1002,7 +1002,7 @@ const WZ_STEPS = ["Welcome", "AI service", "Capabilities", "Agent", "Review"];
 const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
-  plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
+  plugins: ["llm-core", "tool-manager", "persona", "system-prompt", "web-chat", "krakeycode"],
   agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. You run on a heartbeat — each beat you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful.", intervalMs: 30000 },
 };
 

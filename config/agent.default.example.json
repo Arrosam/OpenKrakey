@@ -2,6 +2,7 @@
   "intervalMs": 900000,
   "plugins": [
     "llm-core",
+    "tool-manager",
     "persona",
     "system-prompt",
     "krakeycode",
