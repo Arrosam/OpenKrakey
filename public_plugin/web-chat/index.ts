@@ -255,12 +255,36 @@ const createWeb: PluginFactory = (): Plugin => {
         id: CONVERSATION_BLOCK_ID,
         target: "messages",
         priority: CONVERSATION_PRIORITY,
-        render: (): Message[] =>
-          windowTranscript(r.store.list(), maxTurns, maxChars).map((e) =>
+        render: (): Message[] => {
+          const entries = windowTranscript(r.store.list(), maxTurns, maxChars);
+          const msgs: Message[] = entries.map((e) =>
             e.role === "agent"
               ? { role: "assistant", content: e.text }
               : { role: "user", content: e.text, name: "web-chat" },
-          ),
+          );
+          // Append a situational-status marker computed from the LAST visible turn,
+          // so the model knows whether the user is awaiting a reply (their latest
+          // message is unanswered) or has already been fully answered (the last turn
+          // was the agent's). On an empty transcript there is nothing to mark.
+          if (entries.length > 0) {
+            const last = entries[entries.length - 1];
+            msgs.push(
+              last.role === "agent"
+                ? {
+                    role: "user",
+                    content:
+                      "[Status: you have already replied to everything the user has said. They have not sent anything new since. Do not message again unless you genuinely have something new to add.]",
+                    name: "web-chat.status",
+                  }
+                : {
+                    role: "user",
+                    content: "[Status: the user's latest message above has not been answered yet.]",
+                    name: "web-chat.status",
+                  },
+            );
+          }
+          return msgs;
+        },
       });
 
       // A DISPATCHED request snapshots the messages now in its composed context: those
