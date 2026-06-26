@@ -5,10 +5,12 @@ import type { ContextBlock } from "../../contracts/context";
 import type { ToolDef } from "../../contracts/llm";
 
 // ---------------------------------------------------------------------------
-// Edge tests for the `restart` plugin. The real path re-execs the process (it
-// calls process.exit), which can't be exercised in-process — so these run with
-// dryRun:true, which reports the plan WITHOUT restarting. That covers tool
-// registration, guidance, and the reconstructed launch command.
+// Edge tests for the `restart` plugin. The plugin no longer owns process
+// lifecycle: instead of process.exit it invokes the core `core.restart` action,
+// which IS exercisable in-process by stubbing that action on the bus. dryRun still
+// reports the plan WITHOUT restarting. Covered: tool registration, guidance, the
+// reconstructed launch command (dryRun), the live core.restart delegation, and the
+// no-seam degrade path.
 // ---------------------------------------------------------------------------
 
 const RESTART = "restart.now";
@@ -73,4 +75,22 @@ test("teardown: removes the guidance block and unregisters the tool", async () =
   await p.teardown();
   assert.equal(store.get(GUIDANCE), undefined, "guidance removed");
   assert.ok(!sys.actions.list().includes(RESTART), "restart.now unregistered");
+});
+
+test("restart.now (live): invokes core.restart with the configured delayMs (and never process.exit)", async () => {
+  const { sys } = await setup({ delayMs: 2222 });
+  const calls: unknown[] = [];
+  sys.actions.register("core.restart", async (p: unknown) => { calls.push(p); return { restarting: true }; });
+  const res: any = await sys.actions.invoke(RESTART, {});
+  // This test process is still alive afterwards ⇒ the plugin did NOT call process.exit.
+  assert.equal(res.restarting, true, "reports it is restarting");
+  assert.equal(res.delayMs, 2222);
+  assert.deepEqual(calls, [{ delayMs: 2222 }], "core.restart invoked once with the configured delayMs");
+});
+
+test("restart.now (live) with NO core.restart seam: degrades to a no-op + error (no throw, no exit)", async () => {
+  const { sys } = await setup({});
+  const res: any = await sys.actions.invoke(RESTART, {});
+  assert.equal(res.restarting, false, "must not claim to restart without the core seam");
+  assert.ok(typeof res.error === "string" && res.error.length > 0, "reports why it could not restart");
 });
