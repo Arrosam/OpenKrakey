@@ -12,7 +12,6 @@
   ],
   "privatePlugins": [
     "web-chat",
-    "browser",
     "memory-note",
     "history"
   ],
@@ -33,10 +32,6 @@
     "inspector": {},
     "interval_toggle": {
       "baseIntervalMs": 900000
-    },
-    "browser": {
-      "headless": false,
-      "chromePath": null
     },
     "memory-note": {},
     "history": {}

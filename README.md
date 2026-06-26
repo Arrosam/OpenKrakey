@@ -94,8 +94,9 @@ The Console frames the other three — run config-web and at least one agent for
 ## What your agent can do
 
 Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set
-below; `web-chat` and `browser` are loaded as **private** (per-agent) plugins. Add or remove them
-per agent in its config.
+below; `web-chat` is loaded as a **private** (per-agent) plugin. `browser` is **off by default** —
+it drives your own Chrome, so turn it on per agent when you want it. Add or remove any of them per
+agent in its config.
 
 | Plugin | Gives the agent | Notes |
 |---|---|---|
