@@ -140,35 +140,50 @@ export class TranscriptStore {
   }
 
   /**
-   * Flip the matching in-memory entry's status to "read" so a reconnect/replay shows
-   * "read" immediately, and compactSync bakes it onto disk (M-9). No-op if no entry
-   * carries that id. Scans only the retained window.
+   * Flip the matching in-memory entry's status to "read" AND persist the flip
+   * immediately, so a reconnect/replay shows "read" and — crucially — the status
+   * survives a NON-graceful exit (crash, kill, or restart.now's process.exit, none of
+   * which run teardown/compactSync). No-op if no entry carries that id, or if it is
+   * already "read". Scans only the retained window.
+   *
+   * Append-only JSONL can't patch a line in place, so the write-through REWRITES the
+   * compacted window. The serialized snapshot is taken SYNCHRONOUSLY (the file content
+   * as of this flip) and the write is chained onto `writing`, so it never interleaves
+   * with appends (no duplicated lines) and never blocks delivery; once `closed`
+   * (teardown), it no-ops and the synchronous compactSync rewrite is authoritative.
    */
   markRead(id: number): void {
     const end = this.head + this.count;
     for (let i = this.head; i < end; i++) {
       if (this.buf[i].id === id) {
+        if (this.buf[i].status === "read") return; // already read — nothing to persist
         this.buf[i].status = "read";
+        const snapshot = this.serialize();
+        this.writing = this.writing
+          .then(() => (this.closed ? undefined : fs.promises.writeFile(this.chatPath, snapshot)))
+          .catch(() => {});
         return;
       }
     }
+  }
+
+  /** The live window serialized as chat.jsonl text (trailing newline iff non-empty). */
+  private serialize(): string {
+    const kept = this.buf.slice(this.head, this.head + this.count);
+    return kept.map((e) => JSON.stringify(e)).join("\n") + (kept.length ? "\n" : "");
   }
 
   /**
    * Stop the async append chain, then synchronously rewrite the file from the
    * in-memory transcript — compacting it to <= MAX_TRANSCRIPT entries and baking in
    * current statuses (e.g. messages flipped to "read"), so it replays exactly after a
-   * clean restart (M-9). Setting `closed` first makes any in-flight async append a
-   * no-op, leaving this sync write authoritative. Best-effort.
+   * clean restart (M-9). Setting `closed` first makes any in-flight async append/
+   * write-through a no-op, leaving this sync write authoritative. Best-effort.
    */
   compactSync(): void {
     this.closed = true;
     try {
-      const kept = this.buf.slice(this.head, this.head + this.count);
-      fs.writeFileSync(
-        this.chatPath,
-        kept.map((e) => JSON.stringify(e)).join("\n") + (kept.length ? "\n" : ""),
-      );
+      fs.writeFileSync(this.chatPath, this.serialize());
     } catch {
       /* persistence is best-effort — a write failure must not break shutdown */
     }
