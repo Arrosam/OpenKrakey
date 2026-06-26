@@ -33,6 +33,17 @@ export const Actions = {
    * never decides WHEN to send; it only composes when asked.
    */
   PROMPT_COMPOSE: "prompt.compose",
+  /**
+   * Request a GRACEFUL restart of the whole runtime. Registered by the core
+   * composition root (agent_instance, fed a `requestRestart` callback by boot)
+   * while an Agent is started — present only when boot wired the callback. Params:
+   * `{ delayMs?: number }`. The handler stops every Agent (running each plugin's
+   * teardown, so best-effort state like the web-chat transcript is flushed) BEFORE
+   * re-execing the process — unlike a raw `process.exit`, which skips teardown. The
+   * `restart` plugin invokes it (guarded by `has`) instead of exiting itself, so it
+   * never owns process lifecycle. Core registers it; no plugin can `provide` it.
+   */
+  CORE_RESTART: "core.restart",
 } as const;
 
 /** Well-known generic events emitted on the eventbus to activate plugins. */
