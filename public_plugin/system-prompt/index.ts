@@ -29,8 +29,14 @@ const DEFAULT_TEXT =
   "send a message, to use any capability — is to call one of your tools. Each tool's " +
   "description says what it does and where its output goes; nothing you write outside a " +
   "tool call ever reaches anyone or has any effect.\n" +
-  "On a beat where there is nothing worth doing, simply think; never force an action " +
-  "just to act.";
+  "You run on a recurring HEARTBEAT — each beat is your own clock ticking, NOT a new " +
+  "request from anyone. Every beat you are shown the full history, including messages " +
+  "and results you have ALREADY handled. Before you act, judge the current situation: " +
+  "is there something genuinely NEW and unaddressed — a message you haven't answered, a " +
+  "fresh tool result to use? If so, act on it. If nothing has changed since your last " +
+  "beat, just think; do not re-send a message you've already sent, re-run a tool whose " +
+  "effect already holds, or act merely because a beat occurred. Doing nothing is the " +
+  "right move when nothing is new.";
 
 interface SystemPromptConfig {
   text?: string;
