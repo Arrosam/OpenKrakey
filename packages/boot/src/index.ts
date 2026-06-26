@@ -115,13 +115,17 @@ function spawnReplacement(delayMs: number): void {
   }
 }
 
+/** Brief settle (ms) after teardown so the agent's final SSE frame / buffered log reaches the socket before exit. */
+const RESTART_SETTLE_MS = 200;
+
 /**
  * GRACEFUL restart of the whole runtime: stop EVERY agent — running each plugin's
  * teardown, so best-effort state (e.g. the web-chat transcript's read-receipts) is
  * flushed — BEFORE re-execing, unlike a raw `process.exit` which skips teardown.
  * Wired into each Agent (via `createAgentInstance`'s `requestRestart`) so the
  * `restart` plugin's `core.restart` action lands here. `hooks` lets tests substitute
- * the re-exec/exit; the real ones end this process after the replacement is spawned.
+ * the re-exec/exit AND short-circuit the settle; the real path settles briefly so the
+ * agent's last reply finishes flushing to the socket, then ends this process.
  */
 export async function requestRestart(
   handles: AgentHandle[],
@@ -130,7 +134,16 @@ export async function requestRestart(
 ): Promise<void> {
   await Promise.allSettled(handles.map((h) => h.stop()));
   (hooks?.spawn ?? spawnReplacement)(delayMs);
-  (hooks?.exit ?? ((code: number): void => void process.exit(code)))(0);
+  // Test seam: an injected exit short-circuits — immediate, no real exit, no settle.
+  if (hooks?.exit) {
+    hooks.exit(0);
+    return;
+  }
+  // Real path: a brief settle so teardown's final res.end() frames + any buffered log
+  // reach the socket before process.exit (which does NOT wait for pending I/O). The
+  // replacement waits delayMs (>> this) before binding, so the ports free in time.
+  await new Promise((resolve) => setTimeout(resolve, RESTART_SETTLE_MS));
+  process.exit(0);
 }
 
 /**
