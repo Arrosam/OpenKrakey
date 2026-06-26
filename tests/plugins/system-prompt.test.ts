@@ -94,8 +94,10 @@ test("default text teaches the monologue/operating model, CHANNEL-AGNOSTIC (no c
   const text = (await renderOf(block)).toLowerCase();
   assert.match(text, /monologue/, "must state the reply-is-a-monologue rule");
   assert.match(text, /\btool/, "must tell the model to call a tool to act");
-  assert.ok(!text.includes("web-chat.send_message"), "must NOT name a specific channel tool (channel-agnostic)");
+  // Channel-agnostic: never name a specific channel or its send tool.
+  assert.ok(!text.includes("web-chat"), "must NOT name the web-chat channel (channel-agnostic)");
   assert.ok(!text.includes("web chat"), "must NOT reference a specific channel");
+  assert.ok(!text.includes("send_message"), "must NOT name a specific channel send tool (channel-agnostic)");
 });
 
 test("default text EMPHASIZES the strengthened monologue model (distinctive new substrings)", async () => {
@@ -118,6 +120,35 @@ test("default text EMPHASIZES the strengthened monologue model (distinctive new 
   assert.ok(
     text.includes("call one of your tools"),
     "must state the only way to act is to call one of your tools",
+  );
+});
+
+test("default text carries the NEW heartbeat / situational-judgment paragraph (distinctive substrings)", async () => {
+  const { block } = await setupAndGetBlock({});
+  const text = await renderOf(block);
+  // Paragraph 3 was REPLACED: the old "nothing worth doing / never force an action
+  // just to act" line is gone; the new paragraph teaches heartbeat-aware judgment.
+  assert.ok(
+    text.includes("HEARTBEAT"),
+    "new paragraph 3 must introduce the recurring HEARTBEAT model",
+  );
+  assert.ok(
+    text.includes("do not re-send a message you've already sent"),
+    "new paragraph 3 must warn against re-sending an already-sent message",
+  );
+  assert.ok(
+    text.includes("Doing nothing is the right move when nothing is new"),
+    "new paragraph 3 must end on the doing-nothing-is-right rule",
+  );
+
+  // The OLD paragraph-3 wording must be GONE (guards against a stale default).
+  assert.ok(
+    !text.includes("nothing worth doing"),
+    "old paragraph-3 wording 'nothing worth doing' must be removed",
+  );
+  assert.ok(
+    !text.includes("never force an action just to act"),
+    "old paragraph-3 wording 'never force an action just to act' must be removed",
   );
 });
 
