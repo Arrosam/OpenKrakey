@@ -47,6 +47,29 @@ const PLUGIN_URL = pathToFileURL(
 /** The chat-tool action the agent invokes to speak to the web channel. */
 const SEND_ACTION = "web-chat.send_message";
 
+// --------------------------------------------------------------------------
+// Situational-status marker appended to the conversation block's rendered
+// Message[]. After mapping the transcript to clean turns, render() APPENDS one
+// status Message — computed from the LAST transcript entry's role — as the
+// FINAL element of the array:
+//   * LAST entry is an AGENT turn  -> the "already replied" marker
+//   * LAST entry is a USER turn     -> the "not yet answered" marker
+//   * EMPTY transcript              -> NOTHING appended (no status marker)
+// Both markers are { role:"user", name:"web-chat.status", content:<EXACT text> }.
+// The content text is EXACT, byte-for-byte (asserted via deepEqual below).
+// --------------------------------------------------------------------------
+const STATUS_AGENT_LAST = {
+  role: "user",
+  name: "web-chat.status",
+  content:
+    "[Status: you have already replied to everything the user has said. They have not sent anything new since. Do not message again unless you genuinely have something new to add.]",
+};
+const STATUS_USER_LAST = {
+  role: "user",
+  name: "web-chat.status",
+  content: "[Status: the user's latest message above has not been answered yet.]",
+};
+
 let TMP: string;
 test.before(() => {
   TMP = fs.mkdtempSync(path.join(os.tmpdir(), "krakey-web-"));
@@ -717,8 +740,11 @@ test("web-chat: contributes a 'web-chat.conversation' messages-block rendering i
       [
         { role: "user", content: "hi there", name: "web-chat" },
         { role: "assistant", content: "hello back" },
+        // The transcript ends with an AGENT send, so render() appends the
+        // "already replied" status marker as the FINAL element.
+        STATUS_AGENT_LAST,
       ],
-      "user -> {role:user,name:web}; agent send -> {role:assistant}; nothing else",
+      "user -> {role:user,name:web}; agent send -> {role:assistant}; then the agent-last status marker",
     );
 
     // Registered in setup, removed on teardown.
@@ -728,6 +754,146 @@ test("web-chat: contributes a 'web-chat.conversation' messages-block rendering i
       c.lines.includes("BLOCK_REMOVED:alice:web-chat.conversation"),
       "teardown must remove the conversation block",
     );
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Scenario 3b-status — the conversation block APPENDS a situational-status
+// Message as the LAST element of its rendered Message[], computed from the
+// LAST transcript entry's role (RED until `web` implements it):
+//   * LAST entry is a USER turn   -> STATUS_USER_LAST  ("not yet answered")
+//   * LAST entry is an AGENT turn -> STATUS_AGENT_LAST ("already replied")
+//   * EMPTY transcript            -> NO status marker appended at all
+// The marker is { role:"user", name:"web-chat.status", content:<EXACT text> };
+// the content text is pinned byte-for-byte. The conversation turns are
+// otherwise unchanged — the marker is strictly the FINAL element.
+// ===========================================================================
+
+/** Render the conversation block for `id` and return the parsed Message[] (or null). */
+async function renderConversation(c: Child, id: string): Promise<any[] | null> {
+  const verb = "BLOCK_RENDER:" + id + ":web-chat.conversation:";
+  c.send("render " + id + " web-chat.conversation");
+  const ok = await c.waitFor((ls) => ls.some((l) => l.startsWith(verb)));
+  if (!ok) return null;
+  // Use the LAST matching render line so a re-render in the same test reflects
+  // the latest transcript state (not a stale earlier render).
+  const line = [...c.lines].reverse().find((l) => l.startsWith(verb))!;
+  return JSON.parse(line.slice(verb.length));
+}
+
+// --- Status S1: a lone unanswered USER message -> the "not yet answered" marker ---
+test("web-chat: conversation render appends the USER-last status marker when the user's latest message is unanswered", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) =>
+        ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+      ),
+      "web must register a web-chat.conversation block",
+    );
+
+    // Transcript with ONLY a user message — no agent send follows it.
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "are you there?" }),
+    });
+    assert.equal(res.status, 202, "the user message is accepted (and stored)");
+    // Give the POST time to append to the transcript before rendering.
+    await new Promise((r) => setTimeout(r, 250));
+
+    const msgs = await renderConversation(c, "alice");
+    assert.ok(msgs, "the conversation block must render its messages");
+
+    // The LAST entry is the user turn, so the appended marker is the USER-last one.
+    assert.deepEqual(
+      msgs![msgs!.length - 1],
+      STATUS_USER_LAST,
+      "the final element is the 'not yet answered' status marker (EXACT text)",
+    );
+    // The user turn precedes the marker, in order, with nothing in between.
+    assert.deepEqual(
+      msgs,
+      [{ role: "user", content: "are you there?", name: "web-chat" }, STATUS_USER_LAST],
+      "render is [user turn, USER-last status marker]",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Status S2: a transcript ending with an AGENT send -> the "already replied" marker ---
+test("web-chat: conversation render appends the AGENT-last status marker when the agent has already replied", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) =>
+        ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+      ),
+      "web must register a web-chat.conversation block",
+    );
+
+    // A user message, then an agent send — the transcript ENDS with the agent turn.
+    const res = await fetch(api(c, "/api/agents/alice/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hi" }),
+    });
+    assert.equal(res.status, 202, "the user message is accepted (and stored)");
+    c.send("out alice all done");
+    await new Promise((r) => setTimeout(r, 250)); // let the agent send append
+
+    const msgs = await renderConversation(c, "alice");
+    assert.ok(msgs, "the conversation block must render its messages");
+
+    // The LAST entry is the agent send, so the appended marker is the AGENT-last one.
+    assert.deepEqual(
+      msgs![msgs!.length - 1],
+      STATUS_AGENT_LAST,
+      "the final element is the 'already replied' status marker (EXACT text)",
+    );
+    // The clean turns precede the marker, in order.
+    assert.deepEqual(
+      msgs,
+      [
+        { role: "user", content: "hi", name: "web-chat" },
+        { role: "assistant", content: "all done" },
+        STATUS_AGENT_LAST,
+      ],
+      "render is [user turn, agent turn, AGENT-last status marker]",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- Status S3: an EMPTY transcript -> NO status marker at all ---
+test("web-chat: conversation render appends NO status marker on an empty transcript", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) =>
+        ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+      ),
+      "web must register a web-chat.conversation block",
+    );
+
+    // No POST, no agent send — render on a fresh agent with an empty transcript.
+    const msgs = await renderConversation(c, "alice");
+    assert.ok(msgs, "the conversation block must render (an array) even when empty");
+
+    // NOTHING is appended: no message carries the status name.
+    assert.ok(
+      !msgs!.some((m) => m && m.name === "web-chat.status"),
+      "an empty transcript must NOT append any status marker; got " + JSON.stringify(msgs),
+    );
+    // Belt-and-suspenders: the rendered array is empty (no turns, no marker).
+    assert.deepEqual(msgs, [], "an empty transcript renders an empty Message[]");
   } finally {
     await c.close();
   }
