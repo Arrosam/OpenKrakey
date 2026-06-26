@@ -309,12 +309,11 @@ const createWeb: PluginFactory = (): Plugin => {
         const done = r.inFlight.get(reqId);
         if (!done) return;
         r.inFlight.delete(reqId);
-        for (const id of done) {
-          broadcast(r, { type: "status", id, status: "read" });
-          // Also flip the in-memory transcript so a reconnect/replay shows "read"
-          // immediately, and teardown's compacting rewrite bakes it onto disk (M-9).
-          r.store.markRead(id);
-        }
+        for (const id of done) broadcast(r, { type: "status", id, status: "read" });
+        // Flip the in-memory transcript so a reconnect/replay shows "read", and persist
+        // (write-through, so the flips survive a non-graceful exit). markReadMany
+        // coalesces all of THIS beat's flips into a SINGLE rewrite instead of one per id.
+        r.store.markReadMany(done);
       });
 
       // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web-chat's

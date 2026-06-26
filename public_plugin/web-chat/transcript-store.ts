@@ -139,32 +139,49 @@ export class TranscriptStore {
       .catch(() => {});
   }
 
-  /**
-   * Flip the matching in-memory entry's status to "read" AND persist the flip
-   * immediately, so a reconnect/replay shows "read" and — crucially — the status
-   * survives a NON-graceful exit (crash, kill, or restart.now's process.exit, none of
-   * which run teardown/compactSync). No-op if no entry carries that id, or if it is
-   * already "read". Scans only the retained window.
-   *
-   * Append-only JSONL can't patch a line in place, so the write-through REWRITES the
-   * compacted window. The serialized snapshot is taken SYNCHRONOUSLY (the file content
-   * as of this flip) and the write is chained onto `writing`, so it never interleaves
-   * with appends (no duplicated lines) and never blocks delivery; once `closed`
-   * (teardown), it no-ops and the synchronous compactSync rewrite is authoritative.
-   */
+  /** Flip one entry to "read" and persist (see markReadMany for the rationale). */
   markRead(id: number): void {
+    if (this.flip(id)) this.persist();
+  }
+
+  /**
+   * Flip MANY entries to "read" in ONE persisted rewrite. A completed beat marks every
+   * message it carried read at once; coalescing avoids a full-file rewrite PER message.
+   * No-op (no write) when nothing actually changed.
+   */
+  markReadMany(ids: readonly number[]): void {
+    let changed = false;
+    for (const id of ids) changed = this.flip(id) || changed;
+    if (changed) this.persist();
+  }
+
+  /** Flip one retained entry to "read" in memory; returns true iff it changed. No-op for an unknown/already-read id. */
+  private flip(id: number): boolean {
     const end = this.head + this.count;
     for (let i = this.head; i < end; i++) {
       if (this.buf[i].id === id) {
-        if (this.buf[i].status === "read") return; // already read — nothing to persist
+        if (this.buf[i].status === "read") return false;
         this.buf[i].status = "read";
-        const snapshot = this.serialize();
-        this.writing = this.writing
-          .then(() => (this.closed ? undefined : fs.promises.writeFile(this.chatPath, snapshot)))
-          .catch(() => {});
-        return;
+        return true;
       }
     }
+    return false;
+  }
+
+  /**
+   * Persist the current window NOW so the "read" flips survive a NON-graceful exit
+   * (crash, kill, or restart.now's process.exit — none run teardown/compactSync).
+   * Append-only JSONL can't patch a line in place, so rewrite the compacted window. The
+   * snapshot is taken SYNCHRONOUSLY (the file content as of this call) and the write is
+   * chained onto `writing`, so it never interleaves with appends (no duplicated lines)
+   * and never blocks delivery; once `closed` (teardown), it no-ops and the synchronous
+   * compactSync rewrite is authoritative.
+   */
+  private persist(): void {
+    const snapshot = this.serialize();
+    this.writing = this.writing
+      .then(() => (this.closed ? undefined : fs.promises.writeFile(this.chatPath, snapshot)))
+      .catch(() => {});
   }
 
   /** The live window serialized as chat.jsonl text (trailing newline iff non-empty). */
