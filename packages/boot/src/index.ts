@@ -9,6 +9,7 @@
  * `npm start` runs `tsx packages/boot/src/index.ts`. The exported functions let
  * tests import this module without launching anything (see the isMain guard).
  */
+import * as cp from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -83,6 +84,55 @@ export function summaryLine(started: number, total: number): string {
   return mint(STAR) + " " + counts + " agent(s) running — Ctrl+C to stop.";
 }
 
+/** The exact command that launched this runtime (node + execArgv + script + args). */
+function launchCommand(): { exe: string; args: string[] } {
+  return { exe: process.execPath, args: [...process.execArgv, ...process.argv.slice(1)] };
+}
+
+/**
+ * Spawn a DETACHED replacement that waits `delayMs` (so this process can exit and
+ * free its loopback ports first), then re-runs the launch command. Cross-platform
+ * via the OS shell; quoting guards paths with spaces. (Moved here from the `restart`
+ * plugin so the plugin never owns process lifecycle — it only requests a restart.)
+ */
+function spawnReplacement(delayMs: number): void {
+  const { exe, args } = launchCommand();
+  const cwd = process.cwd();
+  const env = process.env;
+  if (process.platform === "win32") {
+    const q = (s: string): string => '"' + s.replace(/"/g, '""') + '"';
+    const cmd = [exe, ...args].map(q).join(" ");
+    const secs = Math.max(1, Math.ceil(delayMs / 1000));
+    cp.spawn("cmd.exe", ["/c", "timeout /t " + secs + " /nobreak >nul & " + cmd], {
+      cwd, env, detached: true, stdio: "ignore", windowsHide: true,
+    }).unref();
+  } else {
+    const q = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
+    const cmd = [exe, ...args].map(q).join(" ");
+    cp.spawn("sh", ["-c", "sleep " + Math.max(0, delayMs) / 1000 + "; exec " + cmd], {
+      cwd, env, detached: true, stdio: "ignore",
+    }).unref();
+  }
+}
+
+/**
+ * GRACEFUL restart of the whole runtime: stop EVERY agent — running each plugin's
+ * teardown, so best-effort state (e.g. the web-chat transcript's read-receipts) is
+ * flushed — BEFORE re-execing, unlike a raw `process.exit` which skips teardown.
+ * Wired into each Agent (via `createAgentInstance`'s `requestRestart`) so the
+ * `restart` plugin's `core.restart` action lands here. `hooks` lets tests substitute
+ * the re-exec/exit; the real ones end this process after the replacement is spawned.
+ */
+export async function requestRestart(
+  handles: AgentHandle[],
+  delayMs: number,
+  hooks?: { spawn?: (delayMs: number) => void; exit?: (code: number) => void },
+): Promise<void> {
+  await Promise.allSettled(handles.map((h) => h.stop()));
+  (hooks?.spawn ?? spawnReplacement)(delayMs);
+  (hooks?.exit ?? ((code: number): void => void process.exit(code)))(0);
+}
+
 /**
  * Construct and start an Agent per definition, returning the handles that started
  * successfully. A failure to construct/start one agent is logged and skipped so
@@ -100,10 +150,15 @@ export async function run(
     report?: (line: string) => void;
     publicPluginDir?: string;
     agentsDir?: string;
+    /** Test seam: substitute the restart re-exec/exit (see requestRestart). */
+    restartHooks?: { spawn?: (delayMs: number) => void; exit?: (code: number) => void };
   },
 ): Promise<AgentHandle[]> {
   const report = opts?.report;
   const handles: AgentHandle[] = [];
+  // A graceful restart stops EVERY agent, so the callback closes over the shared
+  // `handles` array (fully populated by the time any core.restart fires at runtime).
+  const onRestart = (delayMs: number): Promise<void> => requestRestart(handles, delayMs, opts?.restartHooks);
   for (const def of defs) {
     report?.(dim(STAR + " agent '" + def.id + "' starting…"));
     let agent: AgentHandle | undefined;
@@ -115,6 +170,7 @@ export async function run(
         agentsDir: opts?.agentsDir,
         // Plugin starting messages land indented under their agent's line.
         print: report ? (text) => report("    " + text) : undefined,
+        requestRestart: onRestart,
       });
       await agent.start();
       handles.push(agent);
@@ -204,10 +260,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  process.on("SIGINT", () => {
-    console.log("\nShutting down...");
+  // Graceful shutdown on BOTH SIGINT (Ctrl+C) and SIGTERM (what `krakey stop`/
+  // `restart` signal a backgrounded daemon): run every agent's teardown — flushing
+  // best-effort state like the web-chat transcript's read-receipts — before exiting,
+  // instead of dying mid-write.
+  const shutdown = (signal: string): void => {
+    console.log(`\n${signal} — shutting down...`);
     Promise.allSettled(handles.map((h) => h.stop())).then(() => process.exit(0));
-  });
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 const invokedDirectly =
