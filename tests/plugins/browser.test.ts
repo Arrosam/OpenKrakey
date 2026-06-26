@@ -391,7 +391,7 @@ test("result loop: each of the 5 browser tools is accepted into the ring", async
 
 test("result loop: a FOREIGN tool.result name is ignored (block stays empty)", async () => {
   const { store, sys } = await setup({});
-  emitToolResult(sys, { name: "searxng.search", ok: true, data: { results: [] } });
+  emitToolResult(sys, { name: "web-search.search", ok: true, data: { results: [] } });
   const msgs = await renderMsgs(resultsBlock(store));
   assert.deepEqual(msgs, [], "another tool's result must not enter the browser ring");
 });
@@ -428,7 +428,7 @@ test("result loop: invokes clock.fire_now after an own result when registered", 
 
 test("result loop: does NOT invoke clock.fire_now for a FOREIGN result", async () => {
   const { sys, fireNow } = await setup({}, { withClock: true });
-  emitToolResult(sys, { name: "searxng.search", ok: true, data: { results: [] } });
+  emitToolResult(sys, { name: "web-search.search", ok: true, data: { results: [] } });
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(fireNow.count, 0, "a foreign tool result must not trigger a beat");
 });

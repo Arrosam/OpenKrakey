@@ -6,31 +6,33 @@ import type { ContextBlock } from "../../contracts/context";
 import type { Message, ToolDef } from "../../contracts/llm";
 
 // ---------------------------------------------------------------------------
-// BLACK-BOX edge tests for the NEW `searxng` plugin — a SearXNG web-search tool.
+// BLACK-BOX edge tests for the `web-search` plugin — a web-search tool that
+// waterfalls over SearXNG endpoints and falls back to DuckDuckGo Lite.
 //
 // Derived ONLY from the contract/spec (impl not read — it does not exist yet):
-//   default export = PluginFactory; manifest = { id:"searxng",
+//   default export = PluginFactory; manifest = { id:"web-search",
 //                                                 version:"0.1.0",
 //                                                 requires:["llm.register_tool"] }
 //   config slice (all optional w/ defaults):
 //     instanceUrl null; localUrl "http://localhost:8080";
 //     publicInstances [searx.be, search.inetol.net, paulgo.io, searx.tiekoetter.com];
-//     usePublicFallback true; language "auto"; categories "general";
-//     safesearch 0; timeoutMs 10000; maxResults 5; maxSnippetChars 400;
-//     maxResultChars 1200; maxResultsTotalChars 12000; guidance null;
-//     guidancePriority 6000; resultsPriority 3500.
-//   setup: TWO blocks (searxng.guidance @system/6000,
-//          searxng.results @messages/3500) + ONE action/tool searxng.search
+//     usePublicFallback true; useDuckDuckGoFallback true; language "auto";
+//     categories "general"; safesearch 0; timeoutMs 10000; maxResults 5;
+//     maxSnippetChars 400; maxResultChars 1200; maxResultsTotalChars 12000;
+//     guidance null; guidancePriority 6000; resultsPriority 3500.
+//   setup: TWO blocks (web-search.guidance @system/6000,
+//          web-search.results @messages/3500) + ONE action/tool web-search.search
 //          declared to llm.register_tool.
 //
-// searxng has no fs and reaches the network via globalThis.fetch — every network
-// test stubs fetch with a fake Response-like object and restores it afterwards.
+// web-search has no fs and reaches the network via globalThis.fetch — every
+// network test stubs fetch with a fake Response-like object and restores it
+// afterwards.
 // ---------------------------------------------------------------------------
 
-const ID = "searxng";
-const GUIDANCE_BLOCK = "searxng.guidance";
-const RESULTS_BLOCK = "searxng.results";
-const SEARCH = "searxng.search";
+const ID = "web-search";
+const GUIDANCE_BLOCK = "web-search.guidance";
+const RESULTS_BLOCK = "web-search.results";
+const SEARCH = "web-search.search";
 
 const DEFAULT_LOCAL = "http://localhost:8080";
 const DEFAULT_PUBLIC = [
@@ -40,26 +42,32 @@ const DEFAULT_PUBLIC = [
   "https://searx.tiekoetter.com",
 ];
 
+// The default public-instance pool is now EMPTY (public SearXNG JSON is unreliable;
+// the keyless DuckDuckGo fallback covers the default case). Tests that exercise the
+// SearXNG endpoint WATERFALL must therefore supply an explicit public pool — and
+// turn the DDG fallback OFF so the 2nd attempt is deterministically a public SearXNG.
+const SEARX_CFG = { publicInstances: DEFAULT_PUBLIC, useDuckDuckGoFallback: false };
+
 // ---- tolerant dynamic import: a missing module fails each test cleanly ----
-const mod: any = await import("../../public_plugin/searxng/index.ts").then(
+const mod: any = await import("../../public_plugin/web-search/index.ts").then(
   (m) => m,
   () => null,
 );
 function plugin(): any {
-  assert.ok(mod, "searxng module not implemented yet (import failed)");
+  assert.ok(mod, "web-search module not implemented yet (import failed)");
   assert.equal(typeof mod?.default, "function", "default export must be a PluginFactory");
   return mod.default();
 }
 
 // ---- tolerant dynamic import of the pure-helper module (optional) ---------
-const helpers: any = await import("../../public_plugin/searxng/searxng.ts").then(
+const helpers: any = await import("../../public_plugin/web-search/search.ts").then(
   (m) => m,
   () => null,
 );
 
 // ---- fake PluginContext over a REAL event system --------------------------
 // A real recording "llm.register_tool" action records each declared ToolDef.
-// Blocks are backed by a Map. searxng does no fs, so dataDir can be any string.
+// Blocks are backed by a Map. web-search does no fs, so dataDir can be any string.
 function makeCtx(config: unknown) {
   const store = new Map<string, ContextBlock>();
   const sys = createEventSystem();
@@ -73,7 +81,7 @@ function makeCtx(config: unknown) {
     events: sys.events,
     actions: sys.actions,
     config,
-    dataDir: "/tmp/searxng-test-datadir",
+    dataDir: "/tmp/web-search-test-datadir",
     llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
     setBlock: (b: ContextBlock) => {
       store.set(b.id, b);
@@ -96,12 +104,12 @@ async function setup(config: unknown) {
 
 function guidanceBlock(store: Map<string, ContextBlock>): ContextBlock {
   const b = store.get(GUIDANCE_BLOCK);
-  assert.ok(b, "setup must register a block under id 'searxng.guidance'");
+  assert.ok(b, "setup must register a block under id 'web-search.guidance'");
   return b as ContextBlock;
 }
 function resultsBlock(store: Map<string, ContextBlock>): ContextBlock {
   const b = store.get(RESULTS_BLOCK);
-  assert.ok(b, "setup must register a block under id 'searxng.results'");
+  assert.ok(b, "setup must register a block under id 'web-search.results'");
   return b as ContextBlock;
 }
 const renderStr = async (b: ContextBlock): Promise<string> => (await b.render()) as string;
@@ -113,12 +121,13 @@ const renderMsgs = async (b: ContextBlock): Promise<Message[]> => (await b.rende
 // shorthand object. The stub records every requested url into `urls`.
 type Step = (url: string, init?: any) => any;
 
-function makeResponse(opts: { ok?: boolean; status?: number; json?: () => any }): any {
+function makeResponse(opts: { ok?: boolean; status?: number; json?: () => any; text?: () => any }): any {
   const status = opts.status ?? (opts.ok === false ? 500 : 200);
   return {
     ok: opts.ok ?? (status >= 200 && status < 300),
     status,
     json: opts.json ?? (async () => ({})),
+    text: opts.text ?? (async () => ""),
   };
 }
 
@@ -138,7 +147,7 @@ function installFetch(handler: Step) {
   return { urls, restore };
 }
 
-// A success body in SearXNG's native shape (results: [{title,url,content}]).
+// A success body in SearXNG's native JSON shape (results: [{title,url,content}]).
 function searxBody(results: Array<{ title?: string; url?: string; content?: string }>) {
   return { results };
 }
@@ -154,15 +163,19 @@ function originOf(u: string): string {
   }
 }
 
+// A deterministic DuckDuckGo Lite HTML body containing two results.
+const DDG_HTML =
+  `<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fnodejs.org%2Fdownload&amp;rut=x1" class='result-link'>Node.js Downloads &amp; Docs</a> <td class='result-snippet'>Node.js&#39;s official site.</td> <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x2" class='result-link'>Example <b>Page</b></a> <td class='result-snippet'>An <b>example</b> snippet.</td>`;
+
 // ===========================================================================
 // 1. manifest / factory
 // ===========================================================================
 
 test("manifest/factory: default export is a function (PluginFactory)", () => {
-  assert.equal(typeof mod?.default, "function", "searxng default export must be a function");
+  assert.equal(typeof mod?.default, "function", "web-search default export must be a function");
 });
 
-test("manifest: id 'searxng' and version '0.1.0'", () => {
+test("manifest: id 'web-search' and version '0.1.0'", () => {
   const p = plugin();
   assert.equal(p.manifest.id, ID);
   assert.equal(p.manifest.version, "0.1.0");
@@ -181,7 +194,7 @@ test("manifest: requires includes 'llm.register_tool'", () => {
 // 2. setup — context blocks
 // ===========================================================================
 
-test("guidance block: system-target at default priority 6000, id 'searxng.guidance'", async () => {
+test("guidance block: system-target at default priority 6000, id 'web-search.guidance'", async () => {
   const { store } = await setup({});
   const b = guidanceBlock(store);
   assert.equal(b.id, GUIDANCE_BLOCK);
@@ -195,15 +208,15 @@ test("guidance block: guidancePriority overrides the default", async () => {
   assert.equal(guidanceBlock(store).priority, 12345);
 });
 
-test("guidance text: default mentions the searxng.search tool", async () => {
+test("guidance text: default mentions the web-search.search tool", async () => {
   const { store } = await setup({});
   const text = await renderStr(guidanceBlock(store));
-  assert.match(text, /searxng\.search/, "default guidance must name the search tool");
+  assert.match(text, /web-search\.search/, "default guidance must name the search tool");
 });
 
 test("guidance text: cfg.guidance overrides verbatim", async () => {
-  const { store } = await setup({ guidance: "CUSTOM SEARXNG GUIDANCE" });
-  assert.equal(await renderStr(guidanceBlock(store)), "CUSTOM SEARXNG GUIDANCE");
+  const { store } = await setup({ guidance: "CUSTOM WEB-SEARCH GUIDANCE" });
+  assert.equal(await renderStr(guidanceBlock(store)), "CUSTOM WEB-SEARCH GUIDANCE");
 });
 
 test("results block: messages-target at default priority 3500, renders [] initially", async () => {
@@ -226,22 +239,22 @@ test("results block: resultsPriority overrides the default", async () => {
 // 3. setup — the single ToolDef
 // ===========================================================================
 
-test("setup: registers the searxng.search action on the actionbus", async () => {
+test("setup: registers the web-search.search action on the actionbus", async () => {
   const { sys } = await setup({});
-  assert.ok(sys.actions.list().includes(SEARCH), "actions.list() must include searxng.search");
+  assert.ok(sys.actions.list().includes(SEARCH), "actions.list() must include web-search.search");
 });
 
-test("setup: declares exactly ONE ToolDef to llm.register_tool, named searxng.search", async () => {
+test("setup: declares exactly ONE ToolDef to llm.register_tool, named web-search.search", async () => {
   const { tools } = await setup({});
   assert.equal(tools.length, 1, "exactly one ToolDef declared");
   assert.equal(tools[0].name, SEARCH);
 });
 
-test("ToolDef: description is a non-empty string mentioning the next-beat 'searxng' delivery", async () => {
+test("ToolDef: description is a non-empty string mentioning the next-beat 'web-search' delivery", async () => {
   const { tools } = await setup({});
   const desc = String(tools[0].description ?? "");
   assert.ok(desc.length > 0, "description must be non-empty");
-  assert.match(desc, /searxng/, "description must mention the searxng tag");
+  assert.match(desc, /web-search/, "description must mention the web-search tag");
 });
 
 test("ToolDef: parameters schema has query+pageno properties and required ['query']", async () => {
@@ -432,7 +445,7 @@ function firstBadSecondGood(firstStep: Step) {
 }
 
 test("fallthrough: HTTP 500 on the first endpoint -> second endpoint wins", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup(SEARX_CFG);
   const { urls, restore } = firstBadSecondGood(() => makeResponse({ ok: false, status: 500 }));
   try {
     const res: any = await sys.actions.invoke(SEARCH, { query: "q" });
@@ -445,7 +458,7 @@ test("fallthrough: HTTP 500 on the first endpoint -> second endpoint wins", asyn
 });
 
 test("fallthrough: fetch THROWS on the first endpoint -> second endpoint wins", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup(SEARX_CFG);
   const { urls, restore } = firstBadSecondGood(() => {
     throw new Error("ECONNREFUSED");
   });
@@ -459,7 +472,7 @@ test("fallthrough: fetch THROWS on the first endpoint -> second endpoint wins", 
 });
 
 test("fallthrough: non-JSON (json() throws) on the first endpoint -> second endpoint wins", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup(SEARX_CFG);
   const { urls, restore } = firstBadSecondGood(() =>
     makeResponse({
       ok: true,
@@ -478,7 +491,7 @@ test("fallthrough: non-JSON (json() throws) on the first endpoint -> second endp
 });
 
 test("fallthrough: json without a results array on the first endpoint -> second endpoint wins", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup(SEARX_CFG);
   const { urls, restore } = firstBadSecondGood(() =>
     makeResponse({ ok: true, json: async () => ({ something: "else" }) }),
   );
@@ -492,7 +505,7 @@ test("fallthrough: json without a results array on the first endpoint -> second 
 });
 
 test("fallthrough: an EMPTY results array on the first endpoint -> second endpoint wins", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup(SEARX_CFG);
   const { urls, restore } = firstBadSecondGood(() =>
     makeResponse({ ok: true, json: async () => searxBody([]) }),
   );
@@ -506,11 +519,73 @@ test("fallthrough: an EMPTY results array on the first endpoint -> second endpoi
 });
 
 // ===========================================================================
-// 7. all endpoints fail -> action THROWS naming the tried endpoints
+// 7. DuckDuckGo Lite fallback in the waterfall
+// ===========================================================================
+
+// When every SearXNG endpoint fails AND no instanceUrl is pinned, the waterfall
+// reaches DuckDuckGo Lite. The stub serves DDG_HTML for any duckduckgo.com url
+// and fails every SearXNG endpoint (non-JSON). Assert the parsed DDG results win.
+test("ddg fallback: all SearXNG endpoints fail -> DuckDuckGo Lite is queried and its results returned", async () => {
+  const { sys } = await setup({});
+  const { urls, restore } = installFetch((u) => {
+    if (u.includes("duckduckgo.com")) {
+      return makeResponse({ ok: true, text: async () => DDG_HTML });
+    }
+    // Every SearXNG endpoint returns non-JSON (json() throws).
+    return makeResponse({
+      ok: true,
+      json: async () => {
+        throw new Error("not json");
+      },
+    });
+  });
+  try {
+    const res: any = await sys.actions.invoke(SEARCH, { query: "node downloads" });
+    assert.ok(Array.isArray(res.results), "results is an array");
+    assert.equal(res.results.length, 2, "two DDG results parsed");
+    assert.deepEqual(res.results[0], {
+      title: "Node.js Downloads & Docs",
+      url: "https://nodejs.org/download",
+      snippet: "Node.js's official site.",
+    });
+    // The winning endpoint url (a request that was actually issued) is DuckDuckGo.
+    assert.ok(
+      urls.some((u) => u.includes("duckduckgo.com")),
+      "the waterfall must reach a duckduckgo.com url",
+    );
+    // DDG was tried only AFTER the SearXNG endpoints.
+    assert.equal(originOf(urls[0]), DEFAULT_LOCAL, "SearXNG localUrl tried first");
+  } finally {
+    restore();
+  }
+});
+
+test("ddg fallback: NOT used when useDuckDuckGoFallback:false and all SearXNG endpoints fail -> throws", async () => {
+  const { sys } = await setup({ useDuckDuckGoFallback: false });
+  const { urls, restore } = installFetch((u) => {
+    if (u.includes("duckduckgo.com")) {
+      return makeResponse({ ok: true, text: async () => DDG_HTML });
+    }
+    return makeResponse({ ok: false, status: 500 });
+  });
+  try {
+    await assert.rejects(sys.actions.invoke(SEARCH, { query: "q" }));
+    assert.ok(
+      !urls.some((u) => u.includes("duckduckgo.com")),
+      "DuckDuckGo must NOT be queried when the fallback is disabled",
+    );
+  } finally {
+    restore();
+  }
+});
+
+// ===========================================================================
+// 8. all endpoints fail -> action THROWS naming the tried endpoints
 // ===========================================================================
 
 test("all-fail: every endpoint returns non-2xx -> action throws naming tried endpoints", async () => {
-  const { sys } = await setup({});
+  // DuckDuckGo also fails here (HTTP error) so the whole waterfall is exhausted.
+  const { sys } = await setup({ publicInstances: DEFAULT_PUBLIC });
   const { urls, restore } = installFetch(() => makeResponse({ ok: false, status: 502 }));
   try {
     await assert.rejects(
@@ -529,8 +604,11 @@ test("all-fail: every endpoint returns non-2xx -> action throws naming tried end
         return true;
       },
     );
-    // It tried the full waterfall: local + all public instances.
-    assert.equal(urls.length, 1 + DEFAULT_PUBLIC.length, "tried local + every public instance");
+    // It tried the full waterfall: local + all public instances + DuckDuckGo.
+    assert.ok(
+      urls.length >= 1 + DEFAULT_PUBLIC.length,
+      "tried at least local + every public instance",
+    );
   } finally {
     restore();
   }
@@ -549,7 +627,7 @@ test("all-fail: every endpoint throws on fetch -> action still throws (no silent
 });
 
 // ===========================================================================
-// 8. instanceUrl pin — ONLY that url is fetched
+// 9. instanceUrl pin — ONLY that url is fetched
 // ===========================================================================
 
 test("instanceUrl: set -> ONLY that url is fetched; localUrl & public NOT hit", async () => {
@@ -577,7 +655,7 @@ test("instanceUrl: set -> ONLY that url is fetched; localUrl & public NOT hit", 
   }
 });
 
-test("instanceUrl: set but failing -> throws WITHOUT trying local/public (only one attempt)", async () => {
+test("instanceUrl: set but failing -> throws WITHOUT trying local/public/DDG (only one attempt)", async () => {
   const pinned = "https://my.searx.internal";
   const { sys } = await setup({ instanceUrl: pinned });
   const { urls, restore } = installFetch(() => makeResponse({ ok: false, status: 500 }));
@@ -585,17 +663,21 @@ test("instanceUrl: set but failing -> throws WITHOUT trying local/public (only o
     await assert.rejects(sys.actions.invoke(SEARCH, { query: "q" }));
     assert.equal(urls.length, 1, "a pinned instance failing must not fall through to defaults");
     assert.equal(originOf(urls[0]), pinned);
+    assert.ok(
+      !urls.some((u) => u.includes("duckduckgo.com")),
+      "a pinned instance must not fall through to DuckDuckGo either",
+    );
   } finally {
     restore();
   }
 });
 
 // ===========================================================================
-// 9. usePublicFallback:false — only localUrl attempted
+// 10. usePublicFallback:false — only localUrl attempted
 // ===========================================================================
 
-test("usePublicFallback:false, no instanceUrl -> only localUrl attempted", async () => {
-  const { sys } = await setup({ usePublicFallback: false });
+test("usePublicFallback:false, no instanceUrl, no DDG -> only localUrl attempted", async () => {
+  const { sys } = await setup({ usePublicFallback: false, useDuckDuckGoFallback: false });
   const { urls, restore } = installFetch(() => makeResponse({ ok: false, status: 500 }));
   try {
     await assert.rejects(sys.actions.invoke(SEARCH, { query: "q" }));
@@ -607,7 +689,7 @@ test("usePublicFallback:false, no instanceUrl -> only localUrl attempted", async
 });
 
 test("usePublicFallback:true (default), localUrl fails -> public instances ARE tried", async () => {
-  const { sys } = await setup({});
+  const { sys } = await setup({ publicInstances: DEFAULT_PUBLIC });
   const { urls, restore } = installFetch(() => makeResponse({ ok: false, status: 500 }));
   try {
     await assert.rejects(sys.actions.invoke(SEARCH, { query: "q" }));
@@ -619,7 +701,7 @@ test("usePublicFallback:true (default), localUrl fails -> public instances ARE t
 });
 
 // ===========================================================================
-// 10. timeout — abortable, robust (no real wall-clock dependency)
+// 11. timeout — abortable, robust (no real wall-clock dependency)
 // ===========================================================================
 
 // The stub never resolves on its own but rejects when the AbortController fires.
@@ -627,7 +709,11 @@ test("usePublicFallback:true (default), localUrl fails -> public instances ARE t
 // must reject rather than hang. We bound the whole test on a generous timer so a
 // truly-hung impl fails loudly instead of stalling the suite.
 test("timeout: a never-resolving endpoint that honors the abort signal -> action rejects (not hung)", async () => {
-  const { sys } = await setup({ usePublicFallback: false, timeoutMs: 30 });
+  const { sys } = await setup({
+    usePublicFallback: false,
+    useDuckDuckGoFallback: false,
+    timeoutMs: 30,
+  });
   const original = globalThis.fetch;
   (globalThis as any).fetch = (_url: any, init?: any) =>
     new Promise((_resolve, reject) => {
@@ -652,7 +738,7 @@ test("timeout: a never-resolving endpoint that honors the abort signal -> action
 });
 
 test("timeout: passes an AbortSignal to fetch (request is abortable)", async () => {
-  const { sys } = await setup({ usePublicFallback: false });
+  const { sys } = await setup({ usePublicFallback: false, useDuckDuckGoFallback: false });
   let sawSignal = false;
   const original = globalThis.fetch;
   (globalThis as any).fetch = async (_url: any, init?: any) => {
@@ -671,7 +757,7 @@ test("timeout: passes an AbortSignal to fetch (request is abortable)", async () 
 });
 
 // ===========================================================================
-// 11. tool.result loop (Events.TOOL_RESULT -> searxng.results block)
+// 12. tool.result loop (Events.TOOL_RESULT -> web-search.results block)
 // ===========================================================================
 
 // Emit a tool.result envelope (Reply<unknown> & { name }) on the bus, as the
@@ -691,8 +777,8 @@ function emitToolResult(
   });
 }
 
-// The shape of a successful searxng.search return — what the orchestrator carries
-// as the tool.result `data` field.
+// The shape of a successful web-search.search return — what the orchestrator
+// carries as the tool.result `data` field.
 function successData(query = "q") {
   return {
     endpoint: "http://localhost:8080",
@@ -701,16 +787,16 @@ function successData(query = "q") {
   };
 }
 
-test("result loop: an own ok:true result -> one {role:'user', name:'searxng'} message tagged 'ok'", async () => {
+test("result loop: an own ok:true result -> one {role:'user', name:'web-search'} message tagged 'ok'", async () => {
   const { store, sys } = await setup({});
   emitToolResult(sys, { name: SEARCH, ok: true, data: successData("kittens") });
   const msgs = await renderMsgs(resultsBlock(store));
   assert.equal(msgs.length, 1);
   const m = msgs[0];
   assert.equal(m.role, "user");
-  assert.equal(m.name, "searxng");
+  assert.equal(m.name, "web-search");
   const content = String(m.content);
-  assert.match(content, /searxng\.search/, "header names the tool");
+  assert.match(content, /web-search\.search/, "header names the tool");
   assert.match(content, /\bok\b/, "header marks success as ok");
 });
 
@@ -718,17 +804,18 @@ test("result loop: a FOREIGN tool.result name is ignored (block stays empty)", a
   const { store, sys } = await setup({});
   emitToolResult(sys, { name: "krakeycode.read_file", ok: true, data: { content: "x" } });
   const msgs = await renderMsgs(resultsBlock(store));
-  assert.deepEqual(msgs, [], "another tool's result must not enter the searxng ring");
+  assert.deepEqual(msgs, [], "another tool's result must not enter the web-search ring");
 });
 
-test("result loop: an ok:false result -> rendered content contains 'Error: <message>'", async () => {
+test("result loop: an ok:false result -> rendered content surfaces the failure with a 'Tell the user' nudge", async () => {
   const { store, sys } = await setup({});
   emitToolResult(sys, { name: SEARCH, ok: false, error: "oops" });
   const msgs = await renderMsgs(resultsBlock(store));
   assert.equal(msgs.length, 1);
   const content = String(msgs[0].content);
-  assert.match(content, /error/i, "header marks the failure as error");
-  assert.match(content, /Error:\s*oops/, "body carries 'Error: oops'");
+  assert.match(content, /FAILED/, "header marks the failure with 'FAILED'");
+  assert.match(content, /Tell the user/, "body instructs the model to surface the failure to the user");
+  assert.match(content, /oops/, "body carries the underlying error message");
 });
 
 test("result loop: ring bounded by maxResults (emit maxResults+1, keep only last maxResults)", async () => {
@@ -779,7 +866,7 @@ test("result loop: does NOT throw when clock.fire_now is not registered", async 
 });
 
 // ===========================================================================
-// 12. total-char budgeting — oldest degrades to header-only
+// 13. total-char budgeting — oldest degrades to header-only
 // ===========================================================================
 
 test("budget: combined size over maxResultsTotalChars -> the OLDER entry renders header-only (shorter)", async () => {
@@ -830,7 +917,7 @@ test("budget: combined size over maxResultsTotalChars -> the OLDER entry renders
 });
 
 // ===========================================================================
-// 13. teardown
+// 14. teardown
 // ===========================================================================
 
 test("teardown: removes both context blocks", async () => {
@@ -842,11 +929,11 @@ test("teardown: removes both context blocks", async () => {
   assert.equal(store.get(RESULTS_BLOCK), undefined, "results removed");
 });
 
-test("teardown: unregisters the searxng.search action", async () => {
+test("teardown: unregisters the web-search.search action", async () => {
   const { p, sys } = await setup({});
   assert.ok(sys.actions.list().includes(SEARCH), "search registered before teardown");
   await p.teardown();
-  assert.ok(!sys.actions.list().includes(SEARCH), "searxng.search unregistered after teardown");
+  assert.ok(!sys.actions.list().includes(SEARCH), "web-search.search unregistered after teardown");
 });
 
 test("teardown: is idempotent (double teardown does not throw)", async () => {
@@ -858,7 +945,57 @@ test("teardown: is idempotent (double teardown does not throw)", async () => {
 });
 
 // ===========================================================================
-// 14. pure-helper unit tests (TOLERANT — skip cleanly until searxng.ts exists)
+// 15. parseDuckDuckGoLite — pure helper (exported from search.ts)
+// ===========================================================================
+
+// parseDuckDuckGoLite(html, maxResults, maxSnippetChars) decodes the real URL
+// out of the `uddg` query param, strips HTML tags + entities from title/snippet,
+// caps the count at maxResults, and truncates snippets to maxSnippetChars.
+test("parseDuckDuckGoLite: parses the deterministic sample into decoded {title,url,snippet}", () => {
+  assert.ok(
+    helpers && typeof helpers.parseDuckDuckGoLite === "function",
+    "search.ts must export parseDuckDuckGoLite",
+  );
+  const out = helpers.parseDuckDuckGoLite(DDG_HTML, 5, 400);
+  assert.deepEqual(out, [
+    {
+      title: "Node.js Downloads & Docs",
+      url: "https://nodejs.org/download",
+      snippet: "Node.js's official site.",
+    },
+    { title: "Example Page", url: "https://example.com/a", snippet: "An example snippet." },
+  ]);
+});
+
+test("parseDuckDuckGoLite: maxResults caps the count (pass 1 -> length 1)", () => {
+  assert.ok(
+    helpers && typeof helpers.parseDuckDuckGoLite === "function",
+    "search.ts must export parseDuckDuckGoLite",
+  );
+  const out = helpers.parseDuckDuckGoLite(DDG_HTML, 1, 400);
+  assert.equal(out.length, 1, "count capped to maxResults");
+  assert.equal(out[0].title, "Node.js Downloads & Docs", "the FIRST result is kept");
+});
+
+test("parseDuckDuckGoLite: maxSnippetChars truncates a long snippet", () => {
+  assert.ok(
+    helpers && typeof helpers.parseDuckDuckGoLite === "function",
+    "search.ts must export parseDuckDuckGoLite",
+  );
+  // A DDG body with a long (>cap) snippet on the single result.
+  const longSnippet = "z".repeat(200);
+  const html =
+    `<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Flong&amp;rut=x1" class='result-link'>Long</a> <td class='result-snippet'>${longSnippet}</td>`;
+  const cap = 20;
+  const out = helpers.parseDuckDuckGoLite(html, 5, cap);
+  assert.equal(out.length, 1, "one result parsed");
+  const snip = String(out[0].snippet);
+  assert.ok(snip.length <= cap + 1, `snippet (${snip.length}) must be ~<= cap (${cap}) + ellipsis`);
+  assert.ok(snip.length < longSnippet.length, "snippet shorter than the source");
+});
+
+// ===========================================================================
+// 16. other pure-helper unit tests (TOLERANT — skip cleanly until search.ts exists)
 // ===========================================================================
 
 test("helpers.readConfig: applies documented defaults over an empty slice", () => {
@@ -866,8 +1003,9 @@ test("helpers.readConfig: applies documented defaults over an empty slice", () =
   const cfg: any = helpers.readConfig({});
   assert.equal(cfg.instanceUrl, null);
   assert.equal(cfg.localUrl, DEFAULT_LOCAL);
-  assert.deepEqual(cfg.publicInstances, DEFAULT_PUBLIC);
+  assert.deepEqual(cfg.publicInstances, []);
   assert.equal(cfg.usePublicFallback, true);
+  assert.equal(cfg.useDuckDuckGoFallback, true);
   assert.equal(cfg.language, "auto");
   assert.equal(cfg.categories, "general");
   assert.equal(cfg.safesearch, 0);
@@ -891,7 +1029,9 @@ test("helpers.resolveEndpoints: instanceUrl set -> ONLY [instanceUrl]", () => {
 
 test("helpers.resolveEndpoints: no instanceUrl + fallback -> [localUrl, ...public]", () => {
   if (!helpers || typeof helpers.resolveEndpoints !== "function") return; // tolerant skip
-  const cfg: any = (helpers.readConfig ? helpers.readConfig : (x: any) => x)({});
+  const cfg: any = (helpers.readConfig ? helpers.readConfig : (x: any) => x)({
+    publicInstances: DEFAULT_PUBLIC,
+  });
   const eps = helpers.resolveEndpoints(cfg);
   assert.equal(eps[0], DEFAULT_LOCAL);
   assert.deepEqual(eps.slice(1), DEFAULT_PUBLIC);

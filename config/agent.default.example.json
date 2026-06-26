@@ -6,7 +6,7 @@
     "persona",
     "system-prompt",
     "krakeycode",
-    "searxng",
+    "web-search",
     "inspector",
     "interval_toggle"
   ],
@@ -24,10 +24,10 @@
       "port": 7718
     },
     "krakeycode": {},
-    "searxng": {
+    "web-search": {
       "instanceUrl": null,
       "localUrl": "http://localhost:8080",
-      "usePublicFallback": true
+      "useDuckDuckGoFallback": true
     },
     "inspector": {},
     "interval_toggle": {

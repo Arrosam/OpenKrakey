@@ -9,7 +9,7 @@ import type { ToolDef } from "../../contracts/llm";
 
 // ---------------------------------------------------------------------------
 // BLACK-BOX edge tests for the NEW `memory-note` plugin — Krakey's private
-// long-term notebook. A tool + data-carrying plugin in the searxng/web family.
+// long-term notebook. A tool + data-carrying plugin in the web-search/tool family.
 //
 // Derived ONLY from the SPEC + contracts (impl not read — it does not exist yet):
 //   default export = PluginFactory; manifest = { id:"memory-note",

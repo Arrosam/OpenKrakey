@@ -40,11 +40,11 @@ has effect.
 - **`krakeycode`** grants the Agent computer access (read/write/edit files, run shell, list
   directories). It supports **local** and **sandbox** modes; run untrusted or experimental Agents
   in sandbox mode, and scope the working directory deliberately.
-- **`searxng`** searches a SearXNG instance. **Endpoint policy:** if `instanceUrl` is set it is
-  used; otherwise the plugin tries a local instance, and **otherwise falls back to a set of
-  built-in public SearXNG instances.** This means that *by default, with no local instance, your
-  queries are sent to third-party public services.* To keep search private, point `instanceUrl`
-  at your own instance or set `usePublicFallback: false`.
+- **`web-search`** searches the web. **Backend policy:** if `instanceUrl` is set it queries that
+  SearXNG instance; otherwise it tries a local SearXNG, and **otherwise falls back to a keyless
+  DuckDuckGo query.** This means that *by default, with no local instance, your queries are sent to
+  a third-party service (DuckDuckGo, plus any public SearXNG instances you add).* To keep search
+  private, point `instanceUrl` at your own instance and set `useDuckDuckGoFallback: false`.
 - **`browser`** drives a managed Chrome over the DevTools Protocol. It is **read-only and
   non-interactive**: it navigates, reads pages, lists/activates tabs, and screenshots — it never
   clicks, types, or executes scripts. Still, navigation reaches arbitrary URLs; treat any content

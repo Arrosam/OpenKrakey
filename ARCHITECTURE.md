@@ -240,7 +240,7 @@ OpenKrakey/
 ├─ packages/           # module implementations
 │   agent_instance · boot · cli · clock · event-system · llm-gateway · loader · orchestrator
 ├─ public_plugin/<id>/ # shared plugins
-│   llm-core · persona · system-prompt · web-chat · krakeycode · searxng · browser · inspector
+│   llm-core · persona · system-prompt · web-chat · krakeycode · web-search · browser · inspector
 ├─ shared/             # cross-cutting helpers (actions, config, errors, http-auth, logging, theme)
 ├─ config/             # *.example.json templates (llm, agent.default)
 ├─ tests/              # contract-derived edge tests (run via tsx)

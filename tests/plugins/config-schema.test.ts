@@ -27,7 +27,7 @@ import { LLM_CORE_SCHEMA } from "../../public_plugin/llm-core/config-schema";
 import { WEB_SCHEMA } from "../../public_plugin/web-chat/config-schema";
 import { INSPECTOR_SCHEMA } from "../../public_plugin/inspector/config-schema";
 import { KRAKEYCODE_SCHEMA } from "../../public_plugin/krakeycode/config-schema";
-import { SEARXNG_SCHEMA } from "../../public_plugin/searxng/config-schema";
+import { WEB_SEARCH_SCHEMA } from "../../public_plugin/web-search/config-schema";
 import { BROWSER_SCHEMA } from "../../public_plugin/browser/config-schema";
 
 // ---------------------------------------------------------------------------
@@ -302,16 +302,17 @@ test("krakeycode: root has showIf { key:'mode', equals:'sandbox' }", () => {
 });
 
 // ===========================================================================
-// 7. searxng — 14 keys + targeted type/option assertions
+// 7. web-search — 16 keys + targeted type/option assertions
 // ===========================================================================
-test("searxng: schema is contract-valid and covers exactly its fifteen keys", () => {
-  assertValidConfigSchema(SEARXNG_SCHEMA, "SEARXNG_SCHEMA");
+test("web-search: schema is contract-valid and covers exactly its sixteen keys", () => {
+  assertValidConfigSchema(WEB_SEARCH_SCHEMA, "WEB_SEARCH_SCHEMA");
   assertKeysExactly(
-    SEARXNG_SCHEMA as ConfigSchema,
+    WEB_SEARCH_SCHEMA as ConfigSchema,
     [
       "instanceUrl",
       "localUrl",
       "usePublicFallback",
+      "useDuckDuckGoFallback",
       "publicInstances",
       "safesearch",
       "language",
@@ -325,46 +326,51 @@ test("searxng: schema is contract-valid and covers exactly its fifteen keys", ()
       "guidancePriority",
       "resultsPriority",
     ],
-    "SEARXNG_SCHEMA",
+    "WEB_SEARCH_SCHEMA",
   );
 });
 
-test("searxng: safesearch is an enum whose option values are exactly [0,1,2] (numbers)", () => {
-  const f = field(SEARXNG_SCHEMA as ConfigSchema, "safesearch", "SEARXNG_SCHEMA");
-  assert.equal(f.type, "enum", "searxng.safesearch must be type 'enum'");
-  assert.ok(Array.isArray(f.options), "searxng.safesearch must declare options");
+test("web-search: safesearch is an enum whose option values are exactly [0,1,2] (numbers)", () => {
+  const f = field(WEB_SEARCH_SCHEMA as ConfigSchema, "safesearch", "WEB_SEARCH_SCHEMA");
+  assert.equal(f.type, "enum", "web-search.safesearch must be type 'enum'");
+  assert.ok(Array.isArray(f.options), "web-search.safesearch must declare options");
   const values = (f.options as Array<{ value: string | number }>).map((o) => o.value);
   // Numbers, NOT strings — assert both the values and that each is a number.
   for (const v of values) {
-    assert.equal(typeof v, "number", `searxng.safesearch option value ${JSON.stringify(v)} must be a number`);
+    assert.equal(typeof v, "number", `web-search.safesearch option value ${JSON.stringify(v)} must be a number`);
   }
   assert.deepEqual(
     [...values].sort(),
     [0, 1, 2],
-    "searxng.safesearch option values must be exactly [0,1,2]",
+    "web-search.safesearch option values must be exactly [0,1,2]",
   );
 });
 
-test("searxng: usePublicFallback is a boolean field", () => {
-  const f = field(SEARXNG_SCHEMA as ConfigSchema, "usePublicFallback", "SEARXNG_SCHEMA");
-  assert.equal(f.type, "boolean", "searxng.usePublicFallback must be type 'boolean'");
+test("web-search: usePublicFallback is a boolean field", () => {
+  const f = field(WEB_SEARCH_SCHEMA as ConfigSchema, "usePublicFallback", "WEB_SEARCH_SCHEMA");
+  assert.equal(f.type, "boolean", "web-search.usePublicFallback must be type 'boolean'");
 });
 
-test("searxng: publicInstances is a list field", () => {
-  const f = field(SEARXNG_SCHEMA as ConfigSchema, "publicInstances", "SEARXNG_SCHEMA");
-  assert.equal(f.type, "list", "searxng.publicInstances must be type 'list'");
+test("web-search: useDuckDuckGoFallback is a boolean field", () => {
+  const f = field(WEB_SEARCH_SCHEMA as ConfigSchema, "useDuckDuckGoFallback", "WEB_SEARCH_SCHEMA");
+  assert.equal(f.type, "boolean", "web-search.useDuckDuckGoFallback must be type 'boolean'");
 });
 
-test("searxng: instanceUrl and localUrl are url fields", () => {
+test("web-search: publicInstances is a list field", () => {
+  const f = field(WEB_SEARCH_SCHEMA as ConfigSchema, "publicInstances", "WEB_SEARCH_SCHEMA");
+  assert.equal(f.type, "list", "web-search.publicInstances must be type 'list'");
+});
+
+test("web-search: instanceUrl and localUrl are url fields", () => {
   assert.equal(
-    field(SEARXNG_SCHEMA as ConfigSchema, "instanceUrl", "SEARXNG_SCHEMA").type,
+    field(WEB_SEARCH_SCHEMA as ConfigSchema, "instanceUrl", "WEB_SEARCH_SCHEMA").type,
     "url",
-    "searxng.instanceUrl must be type 'url'",
+    "web-search.instanceUrl must be type 'url'",
   );
   assert.equal(
-    field(SEARXNG_SCHEMA as ConfigSchema, "localUrl", "SEARXNG_SCHEMA").type,
+    field(WEB_SEARCH_SCHEMA as ConfigSchema, "localUrl", "WEB_SEARCH_SCHEMA").type,
     "url",
-    "searxng.localUrl must be type 'url'",
+    "web-search.localUrl must be type 'url'",
   );
 });
 

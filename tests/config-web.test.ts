@@ -48,7 +48,7 @@ const REQUIRED_PLUGIN_IDS = [
   "web-chat",
   "inspector",
   "krakeycode",
-  "searxng",
+  "web-search",
   "browser",
 ] as const;
 

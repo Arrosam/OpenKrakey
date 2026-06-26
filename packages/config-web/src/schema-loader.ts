@@ -44,7 +44,7 @@ const PLUGIN_META: Record<string, PluginMeta> = {
   "system-prompt": { id: "system-prompt", icon: "terminal", name: "System prompt", tagline: "operating model: monologue rule + tool use" },
   "web-chat": { id: "web-chat", icon: "chat", name: "Web chat", tagline: "chat with the agent from your browser", dataCarrier: true },
   krakeycode: { id: "krakeycode", icon: "code", name: "Coding tools", tagline: "read / write files, run shell, list dirs" },
-  searxng: { id: "searxng", icon: "search", name: "Web search", tagline: "search the web via a SearXNG instance" },
+  "web-search": { id: "web-search", icon: "search", name: "Web search", tagline: "search the web — DuckDuckGo by default, or your own SearXNG" },
   browser: { id: "browser", icon: "globe", name: "Browser", tagline: "read-only Chrome control — navigate + screenshot" },
   inspector: { id: "inspector", icon: "activity", name: "Inspector", tagline: "live debug panel for every beat", dataCarrier: true },
   "memory-note": {

@@ -32,7 +32,7 @@
         "web-chat",
         "inspector",
         "krakeycode",
-        "searxng",
+        "web-search",
         "browser",
         "memory-note",
         "history",
@@ -270,10 +270,10 @@
       "status": "done",
       "overview": "overviews/nodes/krakeycode.md"
     },
-    "searxng": {
+    "web-search": {
       "zone": "plugins",
-      "path": "public_plugin/searxng",
-      "description": "Web-search tool: gives a Krakey Agent a `searxng.search` tool (registered via llm.register_tool) that queries a SearXNG instance's JSON API (GET /search?format=json) over native fetch with an AbortController timeout. Open-box endpoint resolution: an explicit config `instanceUrl` is authoritative (remote OR local); otherwise a local instance (http://localhost:8080) is tried FIRST, then a built-in pool of public JSON-capable SearXNG instances (overridable via publicInstances, gateable via usePublicFallback) — the first endpoint returning valid JSON with results wins, failures fall through, all-fail throws. NEVER spawns containers; no persistence. Contributes a `searxng.guidance` SYSTEM block (priority 6000) describing the tool + the next-beat delay + endpoint strategy, and a `searxng.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:searxng turns, query in the header, newest-first total-char budget) and nudging clock.fire_now.",
+      "path": "public_plugin/web-search",
+      "description": "Web-search tool: gives a Krakey Agent a `web-search.search` tool (registered via llm.register_tool) that fetches results over native fetch with an AbortController timeout. Backend waterfall: an explicit config `instanceUrl` (a SearXNG instance) is authoritative when set; otherwise a local SearXNG (http://localhost:8080) is tried FIRST, then optional public SearXNG instances (publicInstances, default EMPTY — public SearXNG JSON is unreliable), then a keyless DuckDuckGo Lite fallback (useDuckDuckGoFallback, default true; HTML scraped) — the first backend returning results wins, all-fail throws. NEVER spawns containers; no persistence. Contributes a `web-search.guidance` SYSTEM block (priority 6000) and a `web-search.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:web-search turns; on failure it tells the agent to surface the error to the user) and nudging clock.fire_now.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -282,7 +282,7 @@
       ],
       "implements_contracts": [],
       "status": "done",
-      "overview": "overviews/nodes/searxng.md"
+      "overview": "overviews/nodes/web-search.md"
     },
     "browser": {
       "zone": "plugins",
