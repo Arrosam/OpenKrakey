@@ -945,6 +945,267 @@ test("compaction (new): total budget strips oldest bodies (oldest header-only, n
 });
 
 // ===========================================================================
+// 10d. CONTEXT-PRESSURE (new feature): on Events.CONTEXT_FULL{round:R} the
+//      results block SYNCHRONOUSLY drops the R OLDEST entries from the ring so
+//      the immediately-following re-compose renders fewer messages. round:0 is a
+//      no-op. Events.LLM_RETURN RESETS pressure for the next frame.
+//
+//      Shape note: CONTEXT_FULL carries the Notify envelope
+//      { at:number, data:{ estimatedTokens, limit, overBy, round } } — matching
+//      the CLOCK_TICK convention used elsewhere in the suite.
+//
+//      Marker strategy: each result body carries a unique tag (M0, M1, …) so the
+//      rendered message text lets us assert which entries survive a drop. Entries
+//      render in chronological order (oldest first), per the compaction tests, so
+//      "oldest" == lowest index, "newest" == highest.
+// ===========================================================================
+
+// A small per-result marker so the rendered text identifies each entry uniquely.
+function marker(i: number): string {
+  return `MARKER_${i}_END`;
+}
+// Emit a `context.full` Notify with the given pressure round (+ plausible budget
+// fields). estimatedTokens/limit/overBy are not load-bearing for the drop; only
+// `round` is, so they get sane stand-in values.
+function emitContextFull(
+  sys: ReturnType<typeof createEventSystem>,
+  round: number,
+  over = 100,
+) {
+  sys.events.emit(Events.CONTEXT_FULL, {
+    at: Date.now(),
+    data: { estimatedTokens: 1000 + over, limit: 1000, overBy: over, round },
+  });
+}
+// Populate the ring with N own-tool results, each tagged with a unique marker;
+// returns the captured results block for convenience.
+function fillResults(sys: ReturnType<typeof createEventSystem>, n: number) {
+  for (let i = 0; i < n; i++) {
+    emitToolResult(sys, { name: READ, ok: true, data: { content: marker(i) } });
+  }
+}
+// Which markers (by index) appear in the rendered messages, in render order.
+async function renderedMarkers(b: ContextBlock, n: number): Promise<number[]> {
+  const msgs = await renderMsgs(b);
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  const present: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (joined.includes(marker(i))) present.push(i);
+  }
+  return present;
+}
+
+// ---- positive: the ring renders all N entries before any pressure -----------
+
+test("pressure (positive): N entries render with all N markers, newest last, no pressure applied", async () => {
+  const N = 5;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  const msgs = await renderMsgs(b);
+  assert.equal(msgs.length, N, "all N results render before pressure");
+  assert.deepEqual(
+    await renderedMarkers(b, N),
+    [0, 1, 2, 3, 4],
+    "all markers present, in chronological (oldest→newest) order",
+  );
+  assert.ok(
+    String(msgs[msgs.length - 1].content).includes(marker(N - 1)),
+    "the newest entry renders last",
+  );
+});
+
+// ---- positive: round:1 drops exactly the single oldest entry ----------------
+
+test("pressure (positive): context.full{round:1} drops the 1 OLDEST entry, newest survive", async () => {
+  const N = 5;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(b);
+  assert.equal(msgs.length, N - 1, "exactly one entry dropped");
+  const present = await renderedMarkers(b, N);
+  assert.ok(!present.includes(0), "the OLDEST (marker 0) is gone");
+  assert.deepEqual(present, [1, 2, 3, 4], "the four newest survive, order preserved");
+});
+
+// ---- state transition: pressure accumulates oldest-first within one frame ---
+
+test("pressure (state): round:1 then round:2 drops three oldest total (1 + 2), oldest-first", async () => {
+  const N = 5;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+
+  emitContextFull(sys, 1); // drop oldest 1 → [1,2,3,4]
+  assert.deepEqual(await renderedMarkers(b, N), [1, 2, 3, 4], "after round 1: oldest gone");
+
+  emitContextFull(sys, 2); // drop oldest 2 more → [3,4]
+  const msgs = await renderMsgs(b);
+  assert.equal(msgs.length, 2, "three total dropped (1 then 2)");
+  assert.deepEqual(await renderedMarkers(b, N), [3, 4], "two newest survive after escalating pressure");
+});
+
+test("pressure (state): a single round:2 drops exactly the two oldest at once", async () => {
+  const N = 4;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 2);
+  assert.deepEqual(
+    await renderedMarkers(b, N),
+    [2, 3],
+    "round:2 in one shot drops the two oldest (0,1), keeps newest (2,3)",
+  );
+});
+
+// ---- state transition: LLM_RETURN resets pressure for the next frame ---------
+
+test("pressure (state): LLM_RETURN resets — entries already dropped stay gone, but new results render full again", async () => {
+  const N = 4;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+
+  emitContextFull(sys, 2); // drop oldest two → survivors [2,3]
+  assert.deepEqual(await renderedMarkers(b, N), [2, 3], "two dropped under pressure");
+
+  // Frame ends.
+  sys.events.emit(Events.LLM_RETURN, { id: "r1", at: Date.now(), ok: true, data: { content: "ok" } });
+
+  // Next frame: append two fresh results; with pressure reset they render in full
+  // alongside the survivors (no lingering drop count applied to the new frame).
+  emitToolResult(sys, { name: READ, ok: true, data: { content: marker(98) } });
+  emitToolResult(sys, { name: READ, ok: true, data: { content: marker(99) } });
+  const msgs = await renderMsgs(b);
+  assert.equal(msgs.length, 4, "survivors [2,3] + two fresh = 4, no extra drop from stale pressure");
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  assert.ok(joined.includes(marker(98)) && joined.includes(marker(99)), "fresh results render in full");
+  assert.ok(joined.includes(marker(2)) && joined.includes(marker(3)), "prior survivors still present");
+});
+
+test("pressure (state): after reset, a NEW context.full{round:1} again drops only one oldest", async () => {
+  const { store, sys } = await setup({ maxResults: 10 });
+  // Frame 1: fill 3, drop 1 under pressure → survivors [1,2].
+  fillResults(sys, 3);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 1);
+  assert.deepEqual(await renderedMarkers(b, 3), [1, 2], "frame 1: oldest dropped");
+
+  // Reset.
+  sys.events.emit(Events.LLM_RETURN, { id: "r2", at: Date.now(), ok: true, data: { content: "ok" } });
+
+  // Frame 2: one fresh result, then fresh pressure drops just the single oldest
+  // of the CURRENT ring (marker 1), not two from accumulated state.
+  emitToolResult(sys, { name: READ, ok: true, data: { content: marker(50) } });
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(b);
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  assert.ok(!joined.includes(marker(1)), "frame 2 round:1 drops exactly one current-oldest (marker 1)");
+  assert.ok(joined.includes(marker(2)) && joined.includes(marker(50)), "the rest survive — only one dropped");
+});
+
+// ---- boundary: round:0 / no pressure is a no-op ------------------------------
+
+test("pressure (boundary): context.full{round:0} is a no-op — all entries still render", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 0);
+  assert.equal((await renderMsgs(b)).length, N, "round:0 drops nothing");
+  assert.deepEqual(await renderedMarkers(b, N), [0, 1, 2], "every marker survives a round:0");
+});
+
+test("pressure (boundary): no context.full at all — the ring renders untouched", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  assert.deepEqual(await renderedMarkers(b, N), [0, 1, 2], "no pressure event ⇒ no drops");
+});
+
+test("pressure (boundary): round:1 against a single-entry ring renders [] (drops the only entry)", async () => {
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, 1);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 1);
+  assert.deepEqual(await renderMsgs(b), [], "the one and only entry is the oldest, so it is dropped");
+});
+
+test("pressure (boundary): round:1 against an EMPTY ring stays [] and does not throw", async () => {
+  const { store, sys } = await setup({ maxResults: 10 });
+  const b = resultsBlock(store);
+  assert.doesNotThrow(() => emitContextFull(sys, 1), "pressure on an empty ring must not throw");
+  assert.deepEqual(await renderMsgs(b), [], "nothing to drop, still empty");
+});
+
+// ---- negative / over-shoot: round larger than the ring drains it to [] -------
+
+test("pressure (negative): round greater than entry count drains the ring to [] (no underflow/throw)", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  assert.doesNotThrow(() => emitContextFull(sys, 99), "an over-large round must not throw");
+  assert.deepEqual(await renderMsgs(b), [], "dropping more than present empties the ring, no negative count");
+});
+
+test("pressure (negative): cumulative rounds exceeding the ring drain it without going negative", async () => {
+  const N = 2;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 1); // [1]
+  emitContextFull(sys, 1); // []
+  emitContextFull(sys, 1); // still [] — must not throw or resurrect entries
+  assert.deepEqual(await renderMsgs(b), [], "ring stays empty under continued pressure");
+});
+
+// ---- negative: pressure does not resurrect or reorder; foreign results still ignored ----
+
+test("pressure (negative): a foreign tool.result after pressure is still ignored (no resurrection)", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  emitContextFull(sys, 1); // survivors [1,2]
+  emitToolResult(sys, { name: "web-chat.send_message", ok: true, data: { delivered: true } });
+  assert.deepEqual(
+    await renderedMarkers(b, N),
+    [1, 2],
+    "foreign result ignored; pressured survivors unchanged",
+  );
+});
+
+// ---- negative: malformed context.full payloads must not throw ----------------
+
+test("pressure (negative): context.full with undefined/null payload does not throw and drops nothing", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  assert.doesNotThrow(() => sys.events.emit(Events.CONTEXT_FULL, undefined as any));
+  assert.doesNotThrow(() => sys.events.emit(Events.CONTEXT_FULL, null as any));
+  assert.equal((await renderMsgs(b)).length, N, "malformed pressure events are inert — nothing dropped");
+});
+
+test("pressure (negative): context.full missing the round field drops nothing (treated as no-op)", async () => {
+  const N = 3;
+  const { store, sys } = await setup({ maxResults: 10 });
+  fillResults(sys, N);
+  const b = resultsBlock(store);
+  assert.doesNotThrow(() =>
+    sys.events.emit(Events.CONTEXT_FULL, {
+      at: Date.now(),
+      data: { estimatedTokens: 1100, limit: 1000, overBy: 100 },
+    } as any),
+  );
+  assert.equal((await renderMsgs(b)).length, N, "absent round behaves like round:0 — no drop");
+});
+
+// ===========================================================================
 // 11. teardown
 // ===========================================================================
 
