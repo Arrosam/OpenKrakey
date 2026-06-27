@@ -96,6 +96,7 @@ const SCREENSHOT_TOOL: ToolDef = {
 const createBrowser: PluginFactory = (): Plugin => {
   let client: ChromeClient | null = null;
   let results: ResultEntry[] = [];
+  let pressureRound = 0;
   let unsubs: Array<() => void> = [];
 
   return {
@@ -339,6 +340,25 @@ const createBrowser: PluginFactory = (): Plugin => {
         }
       });
 
+      const offContextFull = ctx.events.on(Events.CONTEXT_FULL, (payload: unknown): void => {
+        try {
+          const raw = (payload as any)?.data?.round;
+          const round =
+            typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : 0;
+          pressureRound = round;
+          if (round > 0) {
+            const toDrop = Math.min(round, results.length);
+            if (toDrop > 0) results = results.slice(toDrop);
+          }
+        } catch {
+          /* never throw */
+        }
+      });
+
+      const offReturn = ctx.events.on(Events.LLM_RETURN, (): void => {
+        pressureRound = 0;
+      });
+
       unsubs = [
         offNavigate,
         offRead,
@@ -346,6 +366,8 @@ const createBrowser: PluginFactory = (): Plugin => {
         offActivate,
         offShot,
         offResult,
+        offContextFull,
+        offReturn,
         () => ctx.removeBlock("browser.guidance"),
         () => ctx.removeBlock("browser.results"),
       ];
@@ -371,6 +393,7 @@ const createBrowser: PluginFactory = (): Plugin => {
         client = null;
       }
       results = [];
+      pressureRound = 0;
     },
   };
 };
