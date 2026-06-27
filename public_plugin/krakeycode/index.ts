@@ -343,6 +343,7 @@ function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
 
 const createKrakeycode: PluginFactory = (): Plugin => {
   let results: ResultEntry[] = [];
+  let pressureRound = 0;
   let unsubs: Array<() => void> = [];
 
   return {
@@ -579,6 +580,26 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         }
       });
 
+      // ---- context-pressure reaction: shed the oldest folded results ----
+      // Synchronous + incremental: each emission drops the `round` OLDEST entries
+      // (front of the array) from the CURRENT buffer, so the immediately-following
+      // re-compose sees a smaller MESSAGES block. Any non-positive-integer
+      // round (0/negative/NaN/non-integer/missing) → no-op (drops nothing).
+      const offContextFull = events.on(Events.CONTEXT_FULL, (payload) => {
+        const raw = (payload as any)?.data?.round;
+        const round = typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : 0;
+        pressureRound = round;
+        if (round > 0) {
+          const toDrop = Math.min(round, results.length);
+          if (toDrop > 0) results = results.slice(toDrop);
+        }
+      });
+
+      // Reset pressure once the frame's round-trip returns, for the next frame.
+      const offReturn = events.on(Events.LLM_RETURN, () => {
+        pressureRound = 0;
+      });
+
       unsubs = [
         offRead,
         offWrite,
@@ -586,6 +607,8 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         offBash,
         offList,
         offResult,
+        offContextFull,
+        offReturn,
         () => removeBlock(GUIDANCE_BLOCK_ID),
         () => removeBlock(RESULTS_BLOCK_ID),
       ];
@@ -597,6 +620,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       results = [];
+      pressureRound = 0;
     },
   };
 };
