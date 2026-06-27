@@ -959,3 +959,278 @@ test("buildCdpMessage: preserves the params object as given (including empty)", 
   assert.deepEqual(msg.params, { expression: "1+1" });
   assert.equal(msg.sessionId, "sess");
 });
+
+// ===========================================================================
+// 16. context.full -> context-pressure shedding of the browser.results ring
+//
+// NEW behavior (black-box, derived ONLY from the contract):
+//   Events.CONTEXT_FULL = "context.full", payload Notify<{ estimatedTokens;
+//   limit; overBy; round }> (i.e. { at, data: {...} }).
+//
+//   * On context.full with round = R, the plugin SYNCHRONOUSLY drops the R
+//     OLDEST entries from its browser.results ring -> the browser.results block
+//     render() returns fewer MESSAGES (oldest-first eviction).
+//   * The listener never throws (incl. malformed payloads).
+//   * round = 0 / no pressure is a no-op.
+//   * Events.LLM_RETURN RESETS the accumulated pressure for the next frame.
+//
+// We reuse the existing harness verbatim: setup() over the real event system,
+// emitToolResult() to populate the ring (same tool.result mechanism), and
+// resultsBlock()/renderMsgs() to observe the MESSAGES block. No Chrome launch.
+// ===========================================================================
+
+const LLM_RETURN = Events.LLM_RETURN; // "llm.return"
+const CONTEXT_FULL = Events.CONTEXT_FULL; // "context.full"
+
+// Sanity-check the contract constants the suite below is built on.
+test("context.full: Events.CONTEXT_FULL is the string 'context.full'", () => {
+  assert.equal(CONTEXT_FULL, "context.full");
+});
+
+// Emit a context.full Notify envelope: { at, data: { estimatedTokens, limit, overBy, round } }.
+function emitContextFull(
+  sys: ReturnType<typeof createEventSystem>,
+  round: number,
+  over: Partial<{ estimatedTokens: number; limit: number; overBy: number }> = {},
+) {
+  sys.events.emit(CONTEXT_FULL, {
+    at: Date.now(),
+    data: {
+      estimatedTokens: over.estimatedTokens ?? 9000,
+      limit: over.limit ?? 8000,
+      overBy: over.overBy ?? 1000,
+      round,
+    },
+  });
+}
+
+// Emit an llm.return Reply envelope (frame boundary) — shape per EventPayloads.
+function emitLlmReturn(sys: ReturnType<typeof createEventSystem>) {
+  sys.events.emit(LLM_RETURN, {
+    id: "llm-" + Date.now(),
+    at: Date.now(),
+    ok: true,
+    data: { message: { role: "assistant", content: "" } },
+  });
+}
+
+// Fill the ring with N distinct, tagged navigate results (oldest-first: 0..N-1).
+// maxResults is raised above N so the natural ring cap never interferes with the
+// context-pressure shedding under test.
+async function withRing(n: number, extraConfig: Record<string, unknown> = {}) {
+  const h = await setup({ maxResults: Math.max(n + 5, 20), ...extraConfig });
+  for (let i = 0; i < n; i++) {
+    emitToolResult(h.sys, { name: NAVIGATE, ok: true, data: navData(`https://ring/${i}`) });
+  }
+  return h;
+}
+
+// Which ring tags (0..N-1) survive in the rendered MESSAGES block, in order.
+async function survivingTags(store: Map<string, ContextBlock>): Promise<number[]> {
+  const msgs = await renderMsgs(resultsBlock(store));
+  const out: number[] = [];
+  for (const m of msgs) {
+    const match = /https:\/\/ring\/(\d+)/.exec(String(m.content));
+    if (match) out.push(Number(match[1]));
+  }
+  return out;
+}
+
+// ---- positive: the shed actually reduces the rendered message count ----
+
+test("context.full: populated ring renders all N before any pressure", async () => {
+  const { store } = await withRing(5);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, 5, "all 5 recorded results render before pressure");
+  assert.deepEqual(await survivingTags(store), [0, 1, 2, 3, 4], "oldest-first order intact");
+});
+
+test("context.full {round:1}: synchronously drops the SINGLE oldest entry", async () => {
+  const { store, sys } = await withRing(5);
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, 4, "exactly one entry shed");
+  assert.deepEqual(await survivingTags(store), [1, 2, 3, 4], "oldest (0) dropped, rest kept in order");
+});
+
+test("context.full {round:3}: drops the 3 oldest entries (oldest-first)", async () => {
+  const { store, sys } = await withRing(5);
+  emitContextFull(sys, 3);
+  assert.deepEqual(await survivingTags(store), [3, 4], "the three oldest (0,1,2) shed");
+});
+
+test("context.full: the listener returns without throwing on a well-formed event", async () => {
+  const { sys } = await withRing(3);
+  assert.doesNotThrow(() => emitContextFull(sys, 1), "a valid context.full must not throw");
+});
+
+// ---- boundary value analysis on `round` ----
+
+test("context.full {round:0}: no-op — ring unchanged", async () => {
+  const { store, sys } = await withRing(4);
+  emitContextFull(sys, 0);
+  assert.deepEqual(await survivingTags(store), [0, 1, 2, 3], "round 0 sheds nothing");
+});
+
+test("context.full {round:1}: minimal shed (boundary min+1) — one dropped", async () => {
+  const { store, sys } = await withRing(4);
+  emitContextFull(sys, 1);
+  assert.equal((await survivingTags(store)).length, 3, "round 1 drops exactly one");
+});
+
+test("context.full {round = ringSize}: drops every entry -> empty block (boundary)", async () => {
+  const { store, sys } = await withRing(4);
+  emitContextFull(sys, 4);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "round == size empties the ring");
+});
+
+test("context.full {round > ringSize}: clamps — empties the ring, does not throw (boundary)", async () => {
+  const { store, sys } = await withRing(3);
+  assert.doesNotThrow(() => emitContextFull(sys, 99), "over-large round must not throw");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "shedding more than present empties the ring, never goes negative");
+});
+
+test("context.full on an EMPTY ring: no-op, no throw (boundary — nothing to shed)", async () => {
+  const { store, sys } = await setup({});
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "precondition: empty ring");
+  assert.doesNotThrow(() => emitContextFull(sys, 2), "shedding an empty ring must not throw");
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "still empty after pressure");
+});
+
+test("context.full {round:1} on a single-entry ring: drops it -> empty (boundary)", async () => {
+  const { store, sys } = await withRing(1);
+  emitContextFull(sys, 1);
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "the lone entry is shed");
+});
+
+// ---- state transition: incremental per-emission shedding, then reset ----
+
+test("context.full: successive emissions shed INCREMENTALLY within a frame (1 then 2 = 3 total)", async () => {
+  const { store, sys } = await withRing(6);
+  emitContextFull(sys, 1); // drops 1 oldest from the CURRENT buffer (6 -> 5): [1,2,3,4,5]
+  assert.deepEqual(await survivingTags(store), [1, 2, 3, 4, 5], "after emission round:1");
+  emitContextFull(sys, 2); // drops 2 oldest from the CURRENT buffer (5 -> 3): [3,4,5]
+  assert.deepEqual(
+    await survivingTags(store),
+    [3, 4, 5],
+    "round:1 then round:2 drops 1+2 = 3 total (per-emission, not cumulative depth)",
+  );
+});
+
+test("context.full: each emission drops `round` from the CURRENT buffer (1,2,3 = 6 total)", async () => {
+  const { store, sys } = await withRing(8);
+  emitContextFull(sys, 1); // 8 -> 7: [1..7]
+  assert.deepEqual(await survivingTags(store), [1, 2, 3, 4, 5, 6, 7], "after round:1");
+  emitContextFull(sys, 2); // 7 -> 5: [3..7]
+  assert.deepEqual(await survivingTags(store), [3, 4, 5, 6, 7], "after round:2");
+  emitContextFull(sys, 3); // 5 -> 2: [6,7]
+  assert.deepEqual(
+    await survivingTags(store),
+    [6, 7],
+    "1+2+3 = 6 dropped from an 8-entry ring (incremental per emission, not max depth 3)",
+  );
+});
+
+test("llm.return: zeroes the pressure counter but does NOT restore already-dropped entries", async () => {
+  const { store, sys } = await withRing(5);
+  emitContextFull(sys, 3); // frame A: shed 3 oldest -> [3,4]
+  assert.deepEqual(await survivingTags(store), [3, 4], "frame A shed 3");
+
+  emitLlmReturn(sys); // frame boundary: pressure counter resets — dropped entries stay dropped
+
+  assert.deepEqual(
+    await survivingTags(store),
+    [3, 4],
+    "llm.return must NOT restore the entries shed in frame A",
+  );
+
+  // New results arrive in frame B; tags 5,6 appended after the survivors.
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/5") });
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/6") });
+  assert.deepEqual(await survivingTags(store), [3, 4, 5, 6], "frame B buffer = survivors + new");
+
+  emitContextFull(sys, 1); // frame B emission -> drop the single current-oldest
+  assert.deepEqual(
+    await survivingTags(store),
+    [4, 5, 6],
+    "post-reset emission sheds per-emission from the current buffer",
+  );
+});
+
+test("llm.return: after reset, each per-emission shed still drops `round` from the current buffer", async () => {
+  const { store, sys } = await withRing(5);
+  emitContextFull(sys, 1); // frame A: drop 1 -> [1,2,3,4]
+  assert.deepEqual(await survivingTags(store), [1, 2, 3, 4]);
+  emitLlmReturn(sys); // reset pressure counter (no restore)
+  emitContextFull(sys, 1); // frame B: drop one more current-oldest -> [2,3,4]
+  assert.deepEqual(
+    await survivingTags(store),
+    [2, 3, 4],
+    "each emission drops `round` from the current buffer regardless of frame boundary",
+  );
+});
+
+test("state: render() after shedding is stable / non-mutating (idempotent reads)", async () => {
+  const { store, sys } = await withRing(4);
+  emitContextFull(sys, 2);
+  const first = await renderMsgs(resultsBlock(store));
+  const second = await renderMsgs(resultsBlock(store));
+  assert.equal(first.length, 2, "two survivors after shedding 2");
+  assert.equal(second.length, 2, "render() does not consume / further shrink the ring");
+  assert.deepEqual(
+    first.map((m) => String(m.content)),
+    second.map((m) => String(m.content)),
+    "two consecutive renders are identical",
+  );
+});
+
+// ---- negative / error guessing: malformed payloads must never throw ----
+
+for (const bad of [
+  { label: "null payload", value: null },
+  { label: "non-object (string)", value: "oops" },
+  { label: "number payload", value: 7 },
+  { label: "missing data", value: { at: 1 } },
+  { label: "data is null", value: { at: 1, data: null } },
+  { label: "data missing round", value: { at: 1, data: { estimatedTokens: 9000, limit: 8000, overBy: 1000 } } },
+  { label: "round is a string", value: { at: 1, data: { round: "2" } } },
+  { label: "round is NaN", value: { at: 1, data: { round: NaN } } },
+  { label: "round is negative", value: { at: 1, data: { round: -3 } } },
+  { label: "round is a float", value: { at: 1, data: { round: 1.9 } } },
+]) {
+  test(`context.full: malformed payload (${bad.label}) is ignored without throwing`, async () => {
+    const { store, sys } = await withRing(4);
+    assert.doesNotThrow(() => {
+      sys.events.emit(CONTEXT_FULL, bad.value);
+    }, `malformed context.full (${bad.label}) must not throw in the listener`);
+    // A malformed/invalid round must not corrupt the ring into something larger
+    // or negative; at most it is treated as a no-op or a clamped non-negative shed.
+    const surviving = await survivingTags(store);
+    assert.ok(surviving.length <= 4, `${bad.label}: never grows the ring`);
+    assert.ok(
+      surviving.every((t, i) => i === 0 || t > surviving[i - 1]),
+      `${bad.label}: survivors stay in oldest-first order (no corruption)`,
+    );
+  });
+}
+
+test("context.full {round:1}: only the browser.results MESSAGES block shrinks; guidance untouched", async () => {
+  const { store, sys } = await withRing(4);
+  const guidanceBefore = await renderStr(guidanceBlock(store));
+  emitContextFull(sys, 1);
+  const guidanceAfter = await renderStr(guidanceBlock(store));
+  assert.equal(guidanceAfter, guidanceBefore, "the system guidance block is unaffected by shedding");
+  assert.equal((await renderMsgs(resultsBlock(store))).length, 3, "results block shed exactly one");
+});
+
+test("context.full: a FOREIGN-only ring still does not throw and stays empty", async () => {
+  // Foreign tool.results never entered the browser ring (existing contract); a
+  // context.full event then has nothing of ours to shed and must be inert.
+  const { store, sys } = await setup({});
+  emitToolResult(sys, { name: "web-search.search", ok: true, data: { results: [] } });
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "precondition: ring empty (foreign ignored)");
+  assert.doesNotThrow(() => emitContextFull(sys, 2));
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "still empty");
+});
