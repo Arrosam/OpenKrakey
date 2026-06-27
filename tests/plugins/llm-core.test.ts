@@ -738,7 +738,462 @@ test("lock release: a chat() rejection still releases the lock — a later trigg
 });
 
 // ===========================================================================
-// 13. teardown
+// 14. CONTEXT OVERFLOW (context.full) — NEW behavior
+// ===========================================================================
+//
+// Per frame llm-core composes the body via `prompt.compose`, ESTIMATES its token
+// size, and compares against a budget derived from the chosen communicator:
+//
+//   budget   = (config.contextLimitTokens ?? communicator.contextLength)
+//              − (config.maxTokens ?? 0) − safetyTokens          (safetyTokens default 200)
+//   estimate ≈ ( len(system text) + Σ len(each message's text content)
+//               + len(JSON.stringify(tool defs)) ) / charsPerToken   (charsPerToken default 4)
+//
+// When estimate > budget it emits `context.full` (a synchronous, fire-and-forget
+// Notify) so message-block plugins can shrink, then RE-COMPOSES and re-checks —
+// up to `maxReduceRounds` times (default 3). `round` increments 1,2,3,…  No matter
+// what, it ALWAYS sends exactly once (it never drops the frame on overflow).
+//
+// Detection is INERT unless a window is known: a communicator with no
+// `contextLength` and no `contextLimitTokens` override => never emits.
+// ---------------------------------------------------------------------------
+
+/** A chat communicator that also advertises a context window (tokens). */
+function chatComWithWindow(opts: {
+  name?: string;
+  contextLength?: number;
+  response?: LLMResponse;
+}): ChatStub {
+  const stub = chatCommunicator({ name: opts.name, response: opts.response });
+  // contextLength is readonly in the type; assign through a cast for the stub.
+  (stub as { contextLength?: number }).contextLength = opts.contextLength;
+  return stub;
+}
+
+/** Capture every context.full payload (newest last). */
+function collectFull(
+  events: Harness["events"],
+): Array<{ at: number; data: { estimatedTokens: number; limit: number; overBy: number; round: number } }> {
+  return collect(events, Events.CONTEXT_FULL) as Array<{
+    at: number;
+    data: { estimatedTokens: number; limit: number; overBy: number; round: number };
+  }>;
+}
+
+/** A single user message whose text content is exactly `n` chars. */
+function msgOfLen(n: number): Message {
+  return { role: "user", content: "x".repeat(n) };
+}
+
+// ---- 14a. INERT: no window known --------------------------------------------
+
+test("overflow/inert: communicator WITHOUT contextLength and no override -> NO context.full, one compose, one chat", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } }); // no contextLength
+  const h = await setupPlugin(t, { llm: library([com]) });
+  // A deliberately enormous body that WOULD overflow any sane window.
+  h.setCompose("Z".repeat(100_000), [msgOfLen(100_000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "no window => detection is inert");
+  assert.equal(h.composeCalls(), 1, "exactly one compose (no reduce loop)");
+  assert.equal(com.calls.length, 1, "current behavior preserved: exactly one chat()");
+});
+
+test("overflow/inert: a huge body still SENDS unchanged when no window is known", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  // Use explicit messages so the body lands on `system` (not the no-messages fallback).
+  const huge = "HUGE-SYSTEM".repeat(20_000);
+  h.setCompose(huge, [{ role: "user", content: "hi" }]);
+  trigger(h.events);
+  await settle();
+  assert.equal(com.calls.length, 1);
+  assert.equal(com.calls[0].system, huge, "system text forwarded verbatim, never truncated when inert");
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "hi" }]);
+});
+
+// ---- 14b. FITS: window present, body under budget ---------------------------
+
+test("overflow/fits: small body under budget -> NO context.full, one chat", async (t) => {
+  const com = chatComWithWindow({ contextLength: 8000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX", [{ role: "user", content: "hi" }]); // a handful of chars
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "comfortably under budget => no overflow event");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/fits BVA: estimate exactly AT budget (not strictly over) -> NO context.full", async (t) => {
+  // window 1000, maxTokens 0 (unset), safety 200 default => budget = 800 tokens.
+  // charsPerToken default 4 => budget = 3200 chars. Build a body of exactly 3200
+  // chars: estimate == budget, which is NOT "> budget" => no emission.
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("", [msgOfLen(3200)]); // 3200 chars / 4 = 800 == budget
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "estimate == budget is not OVER the budget");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/fits BVA: budget accounts for maxTokens reservation (body fits only because window is large enough)", async (t) => {
+  // window 2000, maxTokens 600, safety 200 => budget = 1200 tokens = 4800 chars.
+  // A 4000-char body (=1000 tokens) is under 1200 => fits.
+  const com = chatComWithWindow({ contextLength: 2000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { config: { maxTokens: 600 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(4000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0);
+  assert.equal(com.calls.length, 1);
+  assert.equal(com.calls[0].maxTokens, 600, "maxTokens still forwarded");
+});
+
+// ---- 14c. OVER budget: emits, first round metadata, still sends -------------
+
+test("overflow/over: huge body over a small window -> emits context.full and STILL chats exactly once", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  // Same huge body every compose (no reducer wired) => overflows every round.
+  h.setCompose("Z".repeat(200_000));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "at least one context.full when over budget");
+  assert.equal(com.calls.length, 1, "overflow never drops the frame: exactly one chat()");
+});
+
+test("overflow/over: first emission has round===1, limit===budget, and sensible estimate/overBy", async (t) => {
+  // window 1000, maxTokens 0, safety 200 => budget = 800 tokens.
+  // body: 8000-char user message => estimate = 2000 tokens. overBy = 1200.
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("", [msgOfLen(8000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1);
+  const first = fulls[0].data;
+  assert.equal(first.round, 1, "first emission of the frame is round 1");
+  assert.equal(first.limit, 800, "limit === budget = contextLength - maxTokens - safety");
+  assert.equal(first.estimatedTokens, 2000, "estimate = 8000 chars / 4 charsPerToken");
+  assert.equal(first.overBy, 1200, "overBy = estimate - budget");
+  assert.equal(typeof fulls[0].at, "number", "Notify carries a timestamp");
+});
+
+test("overflow/over BVA: estimate one token OVER budget still emits", async (t) => {
+  // budget 800 tokens = 3200 chars; 3204 chars => 801 tokens => overBy 1.
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("", [msgOfLen(3204)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "just-over budget triggers an emission");
+  assert.equal(fulls[0].data.round, 1);
+  assert.equal(fulls[0].data.overBy, 1, "minimal overshoot reported as overBy 1");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/over: tool defs JSON counts toward the estimate (window-only body would otherwise fit)", async (t) => {
+  // window 1000 => budget 800 tokens = 3200 chars. Body alone is 3000 chars
+  // (=750 tokens, fits), but a large tool-def JSON pushes the total over.
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.toolsRef.push({
+    name: "big",
+    description: "D".repeat(2000), // serialized JSON adds well over 200 chars
+    parameters: { type: "object" },
+  });
+  h.setCompose("", [msgOfLen(3000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "tool-def chars push the estimate over budget");
+  assert.equal(com.calls.length, 1);
+  assert.ok(Array.isArray(com.calls[0].tools), "tools still dispatched");
+});
+
+// ---- 14d. config knobs: charsPerToken / safetyTokens ------------------------
+
+test("overflow/config: charsPerToken changes the estimate (denser packing fits what a 4:1 ratio would overflow)", async (t) => {
+  // window 1000 => budget 800 tokens. A 6400-char body is 1600 tokens at 4:1
+  // (overflow) but only 800 tokens at 8:1 (== budget, fits).
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { config: { charsPerToken: 8 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(6400)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "at 8 chars/token the body fits exactly => no overflow");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/config: larger safetyTokens shrinks the budget and forces an overflow that the default would not", async (t) => {
+  // window 1000, maxTokens 0. body 3000 chars = 750 tokens.
+  // default safety 200 => budget 800 => fits. safety 400 => budget 600 => overflow.
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { config: { safetyTokens: 400 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(3000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "a larger safety margin makes the same body overflow");
+  assert.equal(fulls[0].data.limit, 600, "budget = 1000 - 0 - 400");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/config BVA: safetyTokens 0 uses the whole window minus maxTokens", async (t) => {
+  // window 1000, maxTokens 0, safety 0 => budget 1000 tokens = 4000 chars.
+  // 4000-char body == budget => fits (not strictly over).
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { config: { safetyTokens: 0 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(4000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "with zero safety the full window is usable");
+  assert.equal(com.calls.length, 1);
+});
+
+// ---- 14e. contextLimitTokens override ---------------------------------------
+
+test("overflow/override: contextLimitTokens drives detection even when communicator.contextLength is undefined", async (t) => {
+  const com = chatCommunicator({ response: { content: "ok" } }); // NO contextLength
+  // override 1000 => budget 800 tokens. 8000-char body = 2000 tokens => overflow.
+  const h = await setupPlugin(t, { config: { contextLimitTokens: 1000 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(8000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "override supplies the window when the communicator omits it");
+  assert.equal(fulls[0].data.limit, 800);
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/override: contextLimitTokens OVERRIDES a present communicator.contextLength", async (t) => {
+  // communicator says 100000 (huge) but the override pins 1000 => budget 800.
+  // 8000-char body overflows the override-derived budget.
+  const com = chatComWithWindow({ contextLength: 100000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { config: { contextLimitTokens: 1000 }, llm: library([com]) });
+  h.setCompose("", [msgOfLen(8000)]);
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "the explicit override wins over the communicator's metadata");
+  assert.equal(fulls[0].data.limit, 800, "budget computed from the override, not 100000");
+  assert.equal(com.calls.length, 1);
+});
+
+// ---- 14f. BOUNDED: no-op reducers do not loop forever -----------------------
+
+/**
+ * Register a custom prompt.compose on a harness built with noCompose:true.
+ * `bodyFor(callIndex)` returns the system text for the 1-based Nth compose call,
+ * so a test can model a reducer that shrinks (or refuses to shrink) over rounds.
+ * Returns a live counter of how many times compose ran.
+ */
+function customCompose(
+  h: Harness,
+  bodyFor: (call: number) => { text: string; messages?: Message[] },
+): { calls: () => number } {
+  let n = 0;
+  h.actions.register(Actions.PROMPT_COMPOSE, async () => {
+    n += 1;
+    const { text, messages } = bodyFor(n);
+    return { context: { text }, messages: messages ?? [] };
+  });
+  return { calls: () => n };
+}
+
+test("overflow/bounded: a reducer that never shrinks is capped at maxReduceRounds emissions and still sends once", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 2 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  // Same huge body every call => overflow persists; loop must stop at the cap.
+  const c = customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "overflow is detected");
+  assert.ok(fulls.length <= 2, `at most maxReduceRounds (2) emissions, got ${fulls.length}`);
+  assert.equal(com.calls.length, 1, "still sends exactly once (no infinite loop)");
+  assert.ok(c.calls() <= 3, "compose runs at most maxReduceRounds+1 times (initial + reductions)");
+});
+
+test("overflow/bounded BVA: maxReduceRounds=1 emits at most once for a stuck reducer", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 1 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1 && fulls.length <= 1, `exactly one emission, got ${fulls.length}`);
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/bounded: rounds increment 1..N monotonically across a frame (no reuse, no gaps)", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 3 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  const rounds = fulls.map((f) => f.data.round);
+  assert.deepEqual(
+    rounds,
+    rounds.map((_, i) => i + 1),
+    "rounds are a contiguous 1..N sequence",
+  );
+  assert.equal(com.calls.length, 1);
+});
+
+// ---- 14g. SETTLES: a shrinking reducer eventually fits ----------------------
+
+test("overflow/settles: a reducer that shrinks each round eventually fits, then chats once with the reduced body", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 5 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  // budget = 800 tokens = 3200 chars.
+  // call 1: 8000 chars (over) -> emit round 1
+  // call 2: 4000 chars (over) -> emit round 2
+  // call 3: 2000 chars (FITS) -> send
+  const sizes = [8000, 4000, 2000];
+  customCompose(h, (call) => ({ text: "", messages: [msgOfLen(sizes[Math.min(call - 1, sizes.length - 1)])] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "overflow emitted while still over budget");
+  assert.equal(fulls.length, 2, "emits once per over-budget round, stops once it fits");
+  assert.equal(com.calls.length, 1, "exactly one chat()");
+  assert.equal(
+    (com.calls[0].messages![0].content as string).length,
+    2000,
+    "the SENT body is the reduced (fitting) one, not an earlier oversized compose",
+  );
+});
+
+test("overflow/settles: settling on the first reduction emits exactly round 1 then sends", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 5 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  // call 1: over (8000 chars). call 2+: fits (1000 chars).
+  customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call === 1 ? 8000 : 1000)] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 1, "one over-budget round before it fits");
+  assert.equal(fulls[0].data.round, 1);
+  assert.equal(com.calls.length, 1);
+  assert.equal((com.calls[0].messages![0].content as string).length, 1000, "sent the reduced body");
+});
+
+// ---- 14h. negative / error-guessing ----------------------------------------
+
+test("overflow/negative: contextLength of 0 is treated as 'no window' (inert), not a zero budget", async (t) => {
+  // A 0-token window is meaningless; detection should not fire on every frame.
+  const com = chatComWithWindow({ contextLength: 0, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("anything at all");
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "contextLength 0 is inert (no usable window)");
+  assert.equal(com.calls.length, 1);
+});
+
+test("overflow/negative: an empty composed body never overflows a real window", async (t) => {
+  const com = chatComWithWindow({ contextLength: 8000, response: { content: "ok" } });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose(""); // empty
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0);
+  assert.equal(com.calls.length, 1);
+  assert.deepEqual(com.calls[0].messages, [{ role: "user", content: "" }]);
+});
+
+test("overflow/negative: NO chat-capable communicator -> no context.full (nothing to budget against)", async (t) => {
+  const h = await setupPlugin(t, { llm: library([embedOnlyCommunicator()]) });
+  h.setCompose("Z".repeat(500_000));
+  const fulls = collectFull(h.events);
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "with no communicator there is no window and no send");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+});
+
+test("overflow/negative: chat() rejection after an overflow still resolves one ok:false return (overflow does not swallow the error path)", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000 });
+  // make this communicator reject
+  com.chat = (req: LLMRequest) => {
+    com.calls.push(req);
+    return Promise.reject(new Error("boom"));
+  };
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("Z".repeat(200_000));
+  const fulls = collectFull(h.events);
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "overflow still detected before the failing send");
+  assert.equal(com.calls.length, 1, "still exactly one send attempt");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+  assert.ok((replies[0].error ?? "").includes("boom"));
+});
+
+test("overflow/state: a second frame re-runs detection from round 1 (counter is per-frame, not cumulative)", async (t) => {
+  const com = chatComWithWindow({ contextLength: 1000, response: { content: "ok" } });
+  const h = await setupPlugin(t, {
+    config: { maxReduceRounds: 2 },
+    llm: library([com]),
+    noCompose: true,
+  });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const fulls = collectFull(h.events);
+
+  trigger(h.events);
+  await settle();
+  const firstFrame = fulls.length;
+  assert.ok(firstFrame >= 1 && firstFrame <= 2);
+  assert.equal(fulls[0].data.round, 1, "frame 1 starts at round 1");
+
+  // Second, independent frame.
+  trigger(h.events);
+  await settle();
+  assert.equal(com.calls.length, 2, "two frames => two sends");
+  const secondFrameStart = fulls[firstFrame]?.data.round;
+  assert.equal(secondFrameStart, 1, "the new frame restarts the round counter at 1");
+});
+
+// ===========================================================================
+// 15. teardown
 // ===========================================================================
 
 test("teardown: after teardown a later trigger produces nothing", async (t) => {
