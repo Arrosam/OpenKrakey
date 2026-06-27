@@ -18,14 +18,25 @@
 
 A plugin is **one file** that default-exports a factory function. To add a capability you:
 
-1. Create `public_plugin/<your-id>/index.ts` with `krakeycode.write_file`.
+1. Create your plugin's `index.ts` with `krakeycode.write_file` — **in your own Agent's workspace**,
+   `agents/<your-agent-id>/plugins/<your-id>/index.ts` (see the box below), NOT the shared `public_plugin/` tree.
 2. Make its default export a `PluginFactory` returning `{ manifest, setup, teardown? }`.
 3. In `setup`, register **actions**, declare **tools**, and/or contribute **context blocks** — all
    through the per-Agent bus you are handed.
-4. Add `"<your-id>"` to an Agent's `plugins` list in its config and write a `config.<your-id>` slice.
+4. Add `"<your-id>"` to your Agent's `plugins` list in its config and write a `config.<your-id>` slice.
 5. Write edge tests in `tests/plugins/<your-id>.test.ts`.
 6. Ask your human (or the bus agent) to **restart the Agent** so the loader picks it up — you cannot
    reload your own running process.
+
+> **Where your code lives — your workspace, not `public_plugin/`.** `public_plugin/<id>/` is *shared
+> source*: every Agent that declares it loads the **same** file, and it is committed to the repo. A tool
+> you build **for yourself** belongs in **your** Agent's private folder,
+> `agents/<your-agent-id>/plugins/<your-id>/index.ts`. The loader auto-loads any plugin it finds there
+> **for that Agent only**, and a private-folder plugin **overrides** a same-id public one (§5, §8) — so
+> your tools never leak into other Agents and never touch shared source. (If your `krakeycode` tools are
+> *sandboxed* — the default — writes are confined to your data dir, so you can author and test the file
+> there, then have your human move the folder under `agents/<id>/plugins/`; you cannot write outside your
+> sandbox root.)
 
 That last point matters: **building a plugin is editing the program that runs you.** You can author and
 test it, but a human/build step loads it. Treat plugin authoring as a proposal you prepare and verify,
@@ -43,15 +54,15 @@ plugins.)
 - **An Agent is an independent instance.** Each Agent has its own `clock`, `event-system`,
   `orchestrator` (which contains the context-buffer), `loader`, and its own set of plugin instances and
   data. Agents are isolated from each other.
-- **The beat** is the unit of life. On each clock tick:
+- **The frame** is the unit of life (one frame is one tick of the clock). On each clock tick:
   1. `clock.tick` → the orchestrator emits `prompt.gather` so every plugin refreshes its context blocks;
   2. the orchestrator **composes** the blocks into a system prompt + a messages array;
-  3. it emits `llm.request`. **The beat ends here** — it does not wait.
+  3. it emits `llm.request`. **The frame ends here** — it does not wait.
   4. Later, `llm-core` finishes the round-trip and emits `llm.return` carrying the parsed response
      (including any `toolCalls`).
   5. The orchestrator **dispatches** each tool call on the actionbus (fire-and-forget, isolated), and
      emits a `tool.result` per call as it settles.
-- **The monologue rule.** The plain text the model produces each beat is a **private monologue shown to
+- **The monologue rule.** The plain text the model produces each frame is a **private monologue shown to
   no one.** To affect anything outside your own head — speak to a user, read a file, run a command — you
   must **call a tool**. This is taught to you by the `system-prompt` plugin; respect it in every plugin
   you write (a tool's description should say what it does and *where its output goes*).
@@ -229,8 +240,8 @@ interface ContextBlock {
   priority DESC and concatenated into the messages array (order *within* a group preserved). **The
   conversation is just a message block** (the `web-chat` plugin owns one).
 - Every block renders in **isolation**: if your `render` throws or returns the wrong shape, your block
-  contributes nothing — it never breaks other blocks or the beat. Still, keep `render` fast and pure; it
-  runs every beat.
+  contributes nothing — it never breaks other blocks or the frame. Still, keep `render` fast and pure; it
+  runs every frame.
 - Register with `ctx.setBlock({...})`; **remove it in `teardown`** with `ctx.removeBlock(id)`.
 
 **Priority convention (cache-friendly).** Stable, rarely-changing system blocks go on top so the prompt
@@ -262,25 +273,45 @@ const off = ctx.events.on(Events.TOOL_RESULT, (payload) => { /* ... never throw 
 unsubs.push(off);
 ```
 
-The well-known events (from `shared/actions`) — each payload specializes `Notify` / `Request` / `Reply`:
+**The three envelopes first.** Every payload on the bus wraps one of three reusable shapes (defined in
+`shared/actions`). Learn these and every event below reads itself:
 
-| Event | Constant | Payload | Meaning |
+| Envelope | Shape | When it's used |
+|---|---|---|
+| `Notify<T>` | `{ at, data }` | **One-way, fire-and-forget.** No reply is expected. Most lifecycle/broadcast events. |
+| `Request<T>` | `{ id, at, data }` | Carries a correlation **`id`**; a matching `Reply` with the same `id` will follow. |
+| `Reply<T>` | `{ id, at, ok, data?, error? }` | The answer to a `Request` (same `id`). `ok` flags success; `data` on success, `error` on failure. |
+
+`at` is always a `Date.now()` timestamp; `data` is the typed body; `id` is the only link between a `Request`
+and its `Reply`. So when the table says a payload is `Reply<LLMResponse>`, you know it has `.id`, `.at`,
+`.ok`, and `.data?: LLMResponse`.
+
+**Every well-known event (the complete set — these are ALL of `Events`):**
+
+| Event | Constant | Payload | What it means / how to use it |
 |---|---|---|---|
-| `agent.start` | `Events.AGENT_START` | `Notify<{agentId}>` | Agent started |
-| `clock.tick` | `Events.CLOCK_TICK` | `Notify<{seq}>` | a beat begins |
-| `prompt.gather` | `Events.PROMPT_GATHER` | `Notify<{seq}>` | refresh your blocks now |
-| `llm.request` | `Events.LLM_REQUEST` | `Request<{context, messages}>` | the composed prompt is going out |
-| `llm.request.sent` | `Events.LLM_REQUEST_SENT` | `Request<{request}>` | the exact assembled request (observers) |
-| `llm.return` | `Events.LLM_RETURN` | `Reply<LLMResponse>` | the model answered (with `toolCalls`) |
-| `input.message` | `Events.INPUT_MESSAGE` | `Notify<{text, channel?, …}>` | a user/channel sent input |
-| `output.message` | `Events.OUTPUT_MESSAGE` | `Notify<{text, …}>` | the model's monologue (a HOOK, not a channel send) |
-| `tool.result` | `Events.TOOL_RESULT` | `Reply<unknown> & {name}` | a dispatched tool call settled |
-| `log.entry` | `Events.LOG` | `Notify<{level, pluginId, text}>` | a mirrored console line |
+| `agent.start` | `Events.AGENT_START` | `Notify<{agentId}>` | Your Agent finished starting. One-shot init that needs the bus live. |
+| `clock.tick` | `Events.CLOCK_TICK` | `Notify<{seq}>` | A frame begins (`seq` = tick count). The orchestrator turns this into the round-trip trigger; you rarely listen directly. |
+| `prompt.gather` | `Events.PROMPT_GATHER` | `Notify<{seq}>` | "Refresh your blocks NOW" — fired right before the prompt is composed. If a block's content is computed/expensive, recompute and `setBlock` here instead of inside `render`. |
+| `llm.request` | `Events.LLM_REQUEST` | `Notify<{agentId}>` | A body-less **trigger**: the Agent wants a round-trip this frame. `agentId` is `llm-core`'s single-flight lock key. **Not** the composed prompt — there is no body. |
+| `llm.request.sent` | `Events.LLM_REQUEST_SENT` | `Request<{request}>` | The exact assembled `LLMRequest` (system + messages + tools) `llm-core` is about to POST. For observers (the inspector). Same `id` as the eventual `llm.return`. |
+| `llm.return` | `Events.LLM_RETURN` | `Reply<LLMResponse>` | The model answered. `data.content` is the monologue; `data.toolCalls` are the calls the orchestrator will dispatch. |
+| `input.message` | `Events.INPUT_MESSAGE` | `Notify<{text, from?, channel?, meta?}>` | A user/channel sent input. A channel plugin emits this (and usually wakes the frame — see §4.2). |
+| `output.message` | `Events.OUTPUT_MESSAGE` | `Notify<{text, to?, channel?, meta?}>` | The model's raw monologue, surfaced as a **HOOK** — it is NOT a channel send (delivering it would break the monologue rule). |
+| `tool.result` | `Events.TOOL_RESULT` | `Reply<unknown> & {name}` | A dispatched tool call settled (`id` = the `ToolCall` id, `name` = the action). Fold YOUR tools' results into context here (§4.1). |
+| `log.entry` | `Events.LOG` | `Notify<{level, pluginId, text}>` | A mirrored console line (`level` includes `"print"`). The inspector/channels consume it; never `ctx.log.*` from inside this handler (infinite loop). |
 
-Base envelopes: `Notify<T> = {at, data}`, `Request<T> = {id, at, data}`, `Reply<T> = {id, at, ok, data?, error?}`.
+**The well-known actions you can `invoke`** (these are *operations*, not events — call them, optionally
+guarding with `ctx.actions.has(name)`):
 
-The rhythm actions you can `invoke` (registered by the orchestrator while running): `clock.set_interval`
-and `clock.set_default_interval` (`{ms}`), and `clock.fire_now` (no params, wake the beat now).
+| Action | Constant | Params | Registered by / use |
+|---|---|---|---|
+| `clock.set_interval` | `Actions.CLOCK_SET_INTERVAL` | `{ ms }` | Orchestrator (while started). Change THIS frame's interval. |
+| `clock.set_default_interval` | `Actions.CLOCK_SET_DEFAULT_INTERVAL` | `{ ms }` | Orchestrator. Set the baseline interval future `set_interval`s revert toward. |
+| `clock.fire_now` | `Actions.CLOCK_FIRE_NOW` | none | Orchestrator. **Wake the frame immediately** — the "important" signal (§4.1). |
+| `prompt.compose` | `Actions.PROMPT_COMPOSE` | none | Orchestrator. Gather + compose the current `{ context, messages }` on demand. `llm-core` calls this right before sending; you almost never call it yourself. |
+| `core.restart` | `Actions.CORE_RESTART` | `{ delayMs? }` | Core (only when boot wired it — guard with `has`). Graceful restart: every plugin's `teardown` runs before re-exec. The `restart` plugin invokes this rather than exiting. |
+| `llm.register_tool` | *(plugin action)* | a `ToolDef` | `llm-core` (`provides: ["llm.register_tool"]`). Declare a tool (§4). |
 
 ---
 
@@ -309,10 +340,10 @@ const createDice: PluginFactory = (): Plugin => {
       });
 
       // 2) declare it to the LLM. The DESCRIPTION must say what it does AND where the
-      //    output goes (results come back on the NEXT beat — see §4.1).
+      //    output goes (results come back on the NEXT frame — see §4.1).
       const def: ToolDef = {
         name: "dice.roll",
-        description: "Roll an N-sided die. The result appears in your context on the next beat.",
+        description: "Roll an N-sided die. The result appears in your context on the next frame.",
         parameters: {
           type: "object",
           properties: { sides: { type: "number", description: "Number of sides (>=2). Default 6." } },
@@ -343,7 +374,7 @@ export default createDice;
 This is the single most important thing to get right. When the model calls your tool, the orchestrator
 invokes your action and **emits `tool.result`** — but **nothing in the kernel feeds that result back to
 the model.** If your tool produces output the model needs to see (a file's contents, a command's stdout,
-a computed value), **your plugin must fold it into context for the next beat.**
+a computed value), **your plugin must fold it into context for the next frame.**
 
 The pattern (this is exactly what `krakeycode` does):
 
@@ -361,10 +392,10 @@ const offResult = ctx.events.on(Events.TOOL_RESULT, (payload) => {
   const p = payload as any;
   if (typeof p.name !== "string" || !OWN_TOOLS.has(p.name)) return;     // only MY tools
   results = [...results, { at: p.at ?? Date.now(), name: p.name, ok: !!p.ok, data: p.data, error: p.error }].slice(-MAX);
-  if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {}); // wake the beat
+  if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {}); // wake the frame
 });
 
-// a MESSAGES block that renders recent outcomes as plain turns the model will read next beat:
+// a MESSAGES block that renders recent outcomes as plain turns the model will read next frame:
 ctx.setBlock({
   id: "dice.results",
   target: "messages",
@@ -381,32 +412,88 @@ ctx.setBlock({
 
 Key choices, and why:
 - **Filter to your own tool names** (`OWN_TOOLS`) — `tool.result` fires for every tool in the Agent.
-- **Render as plain `role:"user"` messages tagged with `name`**, *not* as `role:"tool"` messages. This
-  Agent keeps a *clean* conversation (the `web-chat` plugin records only real user turns + your explicit
-  sends — no `tool_use`/`tool_result` pairing). A `role:"tool"` message references a `toolCallId` whose
-  matching assistant `tool_use` turn isn't replayed, and providers reject an orphaned tool result. Plain
-  tagged user messages always work.
-- **`clock.fire_now`** so the Agent processes the result promptly instead of waiting for the next tick.
+- **Render as plain `role:"user"` messages tagged with `name`**, *not* as `role:"tool"` messages. This is
+  load-bearing, not a style choice. This Agent keeps a *clean* conversation: nothing records the assistant
+  `tool_use` turn (the orchestrator dispatches tool calls fire-and-forget; `web-chat` stores only real user
+  turns + your explicit sends). A `role:"tool"` message carries a `toolCallId`, and **both gateway adapters
+  map it onto a provider `tool_result`/`function_call_output` keyed by that id** — which the provider
+  **rejects** unless the matching assistant `tool_use` turn was sent in the same request. It never is, so a
+  `role:"tool"` fold is an *orphaned* result that 400s the whole frame. Plain `role:"user"` + `name` always
+  works. (Reserve `role:"tool"` for a future design that actually records and replays the `tool_use`/`tool_result`
+  pair — that is a kernel change, not something a plugin can do alone.)
+- **Decide whether to `clock.fire_now` — "important" vs "quiet".** Folding a result into a block only makes
+  the Agent *see* it on its next frame; calling `clock.fire_now` makes that next frame happen *now*. Wake the
+  frame only when the result is something you should react to promptly; stay silent otherwise and let the
+  fold ride the next natural tick. See the table below.
 - **Bound the ring** so old results don't grow the prompt without limit.
 
-### 4.2 Channels (output to a human) are tools too
+#### Important vs. quiet results — whether to wake the frame
 
-If you want to *say something* to a user, that is also a tool. A channel plugin registers a send action
-(e.g. `web-chat.send_message`), declares it as a tool, and its description states it is the only way to reach
-that user. Your monologue is never delivered. See `public_plugin/web-chat/index.ts`.
+`clock.fire_now` is the whole "interrupt me" mechanism — there is no separate priority flag on a result. The
+rule of thumb: **fire only when a human is waiting or the Agent must adjust course; stay quiet for
+fire-and-forget successes.**
+
+| Wake now (`fire_now`) — *important* | Stay quiet (fold only, no `fire_now`) |
+|---|---|
+| A user/channel message arrived (someone is waiting) | "Alarm set", "music started", "interval changed" — the Agent already knows it asked |
+| A web-search / read returned content the Agent needs to continue its task | A send the Agent doesn't need to confirm succeeded |
+| An action **failed** (send failed, command errored) — the Agent should notice and retry/adapt | A periodic/ambient update with no deadline (let the next tick pick it up) |
+
+Why this matters: a tool that fires on *every* success turns each "ok" into an extra LLM round-trip — the
+Agent wakes only to read "done", burning a frame (and tokens) with nothing to do. Conversely, never firing on
+a real failure or an inbound message leaves the Agent asleep while a human waits. Fold always; fire
+selectively. (Note: `clock.fire_now` is registered by the orchestrator only while started — guard it with
+`ctx.actions.has(Actions.CLOCK_FIRE_NOW)` as the examples do.)
+
+### 4.2 Channels — output is a tool, input is a tagged message
+
+A **channel** (web-chat, and any you build — Telegram, email, SMS) is two halves behind two seams:
+
+**Output (human ← Agent) is a tool.** To *say something* to a user you register a send action
+(e.g. `web-chat.send_message`), declare it as a tool, and its description states it is the only way to reach
+that user. Your monologue is never delivered — only what you send through the tool. See
+`public_plugin/web-chat/index.ts`.
+
+**Input (human → Agent) is a `messages` block of tagged user turns.** When a user messages your channel:
+1. emit `Events.INPUT_MESSAGE` (`Notify<{text, from?, channel?, meta?}>`) so observers see it, and
+2. `clock.fire_now` — inbound user messages are the canonical **important** signal (§4.1), and
+3. record the turn in your own history and render it into a `messages` block.
+
+Each incoming turn renders as **`role:"user"`**, with the *source* in the **`name`** field — **never** in
+`role`. `Role` is a closed set (`"system" | "user" | "assistant" | "tool"`); a per-user/per-chat identity
+like `telegram:1234` goes in `name`, which the adapters forward to the provider as the participant name:
+
+```ts
+// a Telegram channel folding one inbound message — role stays "user", identity in name
+{ role: "user", name: `telegram:${chatId}`, content: text }
+// your OWN sends back render as the assistant turn:
+{ role: "assistant", content: sentText }
+```
+
+This is exactly what `web-chat` does — it tags user turns `{ role:"user", name:"web-chat" }` and renders its
+sends as `{ role:"assistant" }`, keeping the conversation clean (no monologue, no tool mechanics). Do **not**
+reach for `role:"tool"` here: that role is only for a tool *result* answering a `toolCallId` (§4.1), not for
+a person talking to you.
 
 ---
 
 ## 5. Data & persistence
 
-`ctx.dataDir` is your directory for files/DB. **Data follows code location:**
+`ctx.dataDir` is your directory for files/DB. **Plugins are never copied** — the loader resolves a *code dir*
+and a *data dir* per plugin id, with two independent ways to go private:
+
 - A **public** plugin (`public_plugin/<id>/`) is loaded by every Agent that declares it, and they all
   share one `public_plugin/<id>/data/` — shared knowledge across Agents.
-- A **private / independent** plugin is copied into `agents/<id>/plugins/<id>/` at build time, and its
-  `dataDir` is that Agent's own `data/` — isolated, and it overrides a same-named public plugin.
+- **Private DATA, shared code** — list an id in the Agent config's `privatePlugins`. The code still loads
+  from `public_plugin/<id>/`, but `dataDir` is redirected to `agents/<id>/plugins/<id>/data/` — isolated
+  per Agent. Use this for a stock plugin whose *state* must not be shared.
+- **Private CODE (your workspace)** — drop an `index.ts` at `agents/<your-agent-id>/plugins/<id>/`. The
+  loader auto-loads it **for that Agent only**, it **overrides** a same-id `public_plugin/<id>/`, and its
+  `dataDir` is the colocated `data/`. **This is where a tool you author for yourself belongs** (§0). It
+  needs no `privatePlugins` entry — merely existing in your workspace loads it (though you still add it to
+  `plugins` for a config slice + load ordering, §8).
 
-Make a plugin private by listing its id in the Agent config's `privatePlugins`. `mkdirSync(ctx.dataDir, {
-recursive: true })` before writing; degrade gracefully if it's unwritable.
+`mkdirSync(ctx.dataDir, { recursive: true })` before writing; degrade gracefully if it's unwritable.
 
 (Note: `public_plugin/*/data/` and `agents/` are gitignored — they are runtime state, not source.)
 
@@ -438,7 +525,7 @@ These are enforced by tests and are the reason this project exists. Read `ARCHIT
 - **R2 — plugins talk ONLY through the per-Agent event-system + the L1 contracts.** A plugin **never
   imports another plugin** or core internals. Allowed imports: `contracts/*`, `shared/*`, and Node
   builtins. Inter-plugin calls go over the actionbus (e.g. you `invoke("llm.register_tool", …)`).
-- **R3 — a zero-plugin Agent completes a beat without error.** Don't make the kernel depend on you.
+- **R3 — a zero-plugin Agent completes a frame without error.** Don't make the kernel depend on you.
 - **R4 — single responsibility.** One plugin, one job.
 - **R5 — contracts (L1) are the only shared vocabulary;** changing one is versioned and deliberate.
 - **R6 — per-Agent isolation.** One Agent's plugin/data/events never leak to another. Keep state in the
