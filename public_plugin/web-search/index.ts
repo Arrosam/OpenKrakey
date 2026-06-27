@@ -49,6 +49,7 @@ interface ResultEntry {
 const createWebSearch: PluginFactory = (): Plugin => {
   let results: ResultEntry[] = [];
   let unsubs: Array<() => void> = [];
+  let pressureRound = 0;
 
   return {
     manifest: { id: "web-search", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SEARCH_SCHEMA },
@@ -263,9 +264,30 @@ const createWebSearch: PluginFactory = (): Plugin => {
         }
       });
 
+      // 6. context.full reaction — synchronous, INCREMENTAL pressure shedding:
+      //    drop the `round` OLDEST entries (front = oldest) from the CURRENT buffer
+      //    so the immediately-following re-compose is smaller. round 0 → no-op.
+      const offContextFull = ctx.events.on(Events.CONTEXT_FULL, (payload) => {
+        const raw = (payload as any)?.data?.round;
+        const round =
+          typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : 0;
+        pressureRound = round;
+        if (round > 0) {
+          const toDrop = Math.min(round, results.length);
+          if (toDrop > 0) results = results.slice(toDrop);
+        }
+      });
+
+      // Reset the pressure counter once a fresh round-trip returns.
+      const offReturn = ctx.events.on(Events.LLM_RETURN, () => {
+        pressureRound = 0;
+      });
+
       unsubs = [
         offSearch,
         offResult,
+        offContextFull,
+        offReturn,
         () => ctx.removeBlock("web-search.guidance"),
         () => ctx.removeBlock("web-search.results"),
       ];
@@ -277,6 +299,7 @@ const createWebSearch: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       results = [];
+      pressureRound = 0;
     },
   };
 };
