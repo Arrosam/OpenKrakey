@@ -58,6 +58,7 @@ export const Events = {
   OUTPUT_MESSAGE: "output.message",
   TOOL_RESULT: "tool.result",
   LOG: "log.entry",
+  CONTEXT_FULL: "context.full",
 } as const;
 
 export type ActionName = (typeof Actions)[keyof typeof Actions];
@@ -120,6 +121,14 @@ export interface EventPayloads {
    * clean user-facing line — during setup, its starting message).
    */
   "log.entry": Notify<{ level: "info" | "warn" | "error" | "print"; pluginId: string; text: string }>;
+  /**
+   * Emitted by llm-core (SYNCHRONOUSLY, fire-and-forget) when the prompt it
+   * assembled for a frame exceeds the model's context budget. Message-block
+   * plugins listen synchronously and shrink their MESSAGES blocks so the
+   * immediately-following re-compose is smaller; `round` increments with each
+   * successive emission within one frame (so reactors can shed proportionally).
+   */
+  "context.full": Notify<{ estimatedTokens: number; limit: number; overBy: number; round: number }>;
 }
 
 // Compile-time guard: every Events value has a payload entry and vice-versa.
