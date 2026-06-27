@@ -22,7 +22,7 @@ The documentation index, organized by what you are trying to do.
 
 ### Plugin authors
 
-1. [The system model](../README.md#4-system-model-the-beat) — the beat and the result loop.
+1. [The system model](../README.md#4-system-model-the-frame) — the frame and the result loop.
 2. [PLUGIN_DEV.md](PLUGIN_DEV.md) — the complete authoring guide, including the result loop,
    channels-as-tools, persistence, and the testing harness.
 3. [The invariants](../ARCHITECTURE.md#9-invariants-anti-rot--test-enforced) — the rules a plugin

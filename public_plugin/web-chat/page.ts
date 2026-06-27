@@ -3,7 +3,7 @@
  * "mission-control cockpit" design system (no build step, no framework). Served
  * verbatim at `GET /`. It fetches the agent roster, opens an SSE stream per
  * selected agent, renders the persisted transcript, and posts messages — showing
- * a `sent` tick when a message is queued and `read` once the agent's beat has
+ * a `sent` tick when a message is queued and `read` once the agent's frame has
  * processed it. Icons are INLINE SVG (no CDN); fonts (Hanken Grotesk + JetBrains
  * Mono) load via the CSS @import. When the tab is in the background, incoming
  * replies raise a browser notification (opt-in via the bell).

@@ -25,7 +25,7 @@ const COOKIE_NAME = "krakey_token";
 
 export interface AgentReg {
   agentId: string;
-  /** Deliver one browser message to THIS agent (emit input.message + wake the beat). */
+  /** Deliver one browser message to THIS agent (emit input.message + wake the frame). */
   deliver: (text: string, msgId: number) => void;
   /** Open SSE responses streaming THIS agent's output + statuses. */
   clients: Set<http.ServerResponse>;
@@ -38,7 +38,7 @@ export interface AgentReg {
   pending: number[];
   /**
    * requestId -> message ids carried by THAT request's composed context, awaiting
-   * THAT request's return. A beat ends at llm.request (returns can overlap and
+   * THAT request's return. A frame ends at llm.request (returns can overlap and
    * arrive out of order), so a message is only `read` when the return of the
    * request that actually included it arrives — not any earlier outstanding one.
    */

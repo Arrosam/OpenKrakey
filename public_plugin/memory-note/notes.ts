@@ -2,7 +2,7 @@
  * memory-note — pure helpers (no I/O, no side effects).
  *
  * The note model, a defensive config reader, the built-in guidance builder, and
- * the notebook render function. Everything here is pure so it can run every beat
+ * the notebook render function. Everything here is pure so it can run every frame
  * cheaply and NEVER throw.
  */
 

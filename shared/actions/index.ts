@@ -25,7 +25,7 @@ export const Actions = {
   CLOCK_SET_DEFAULT_INTERVAL: "clock.set_default_interval",
   CLOCK_FIRE_NOW: "clock.fire_now",
   /**
-   * Compose the current beat's prompt ON DEMAND. Registered by the orchestrator
+   * Compose the current frame's prompt ON DEMAND. Registered by the orchestrator
    * while started; takes no params and resolves the assembled
    * `{ context: ComposedContext; messages: Message[] }`. The round-trip plugin
    * (llm-core) invokes it right before it sends, so the body always reflects the
@@ -93,7 +93,7 @@ export interface EventPayloads {
   "clock.tick": Notify<{ seq: number }>;
   "prompt.gather": Notify<{ seq: number }>;
   /**
-   * A TRIGGER: the agent wants an LLM round-trip this beat. It carries NO body —
+   * A TRIGGER: the agent wants an LLM round-trip this frame. It carries NO body —
    * the orchestrator emits one per tick/immediate-wake and stays LLM-agnostic. The
    * round-trip plugin (llm-core) owns serialization: it keeps at most one request
    * in flight PER agentId, coalesces triggers that arrive while busy, and composes
@@ -105,7 +105,7 @@ export interface EventPayloads {
    * The EXACT request `llm-core` dispatches to the provider — system + messages +
    * tools + temperature/maxTokens, the assembled `LLMRequest` — surfaced so observers
    * (the inspector) can show what was actually sent. Carries the same `id` (corrId) as
-   * the beat's `llm.request`. `llm-core` emits it fire-and-forget; it depends on no one
+   * the frame's `llm.request`. `llm-core` emits it fire-and-forget; it depends on no one
    * consuming it.
    */
   "llm.request.sent": Request<{ request: LLMRequest }>;

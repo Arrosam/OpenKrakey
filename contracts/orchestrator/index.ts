@@ -2,7 +2,7 @@
  * Contract: orchestrator  ·  connects: orchestrator (impl) ↔ agent_instance, loader
  *
  * The per-Agent conductor. The context-buffer lives INSIDE it. Responsibilities:
- *  1. compose the beat from its blocks by `priority` (DESC): system-target blocks →
+ *  1. compose the frame from its blocks by `priority` (DESC): system-target blocks →
  *     the system prompt text; message-target blocks → the messages array (groups);
  *  2. expose the eventbus (via event-system) so plugins add/modify/remove blocks;
  *  3. execute LLM-parsed tool calls async/non-blocking (via the actionbus);
@@ -15,9 +15,9 @@
  *     (Actions.PROMPT_COMPOSE) on the actionbus — gather → compose → resolve
  *     `{ context, messages }`; unregistered on stop().
  *
- * Beat (EVENT-driven, fire-and-forget): a clock tick (a `clock.tick` event) makes the
+ * Frame (EVENT-driven, fire-and-forget): a clock tick (a `clock.tick` event) makes the
  * orchestrator emit `llm.request` as a body-less TRIGGER (Notify<{agentId}>) WITHOUT
- * awaiting — the beat ends at the emit. It does NOT decide when to send or guard the
+ * awaiting — the frame ends at the emit. It does NOT decide when to send or guard the
  * round-trip: the round-trip plugin (llm-core) owns serialization — at most one request
  * in flight PER agentId, coalescing triggers that arrive while busy — and, right before
  * it sends, invokes `prompt.compose` to pull a freshly-gathered body. compose splits the
@@ -29,11 +29,11 @@
  * are dispatched fire-and-forget on the actionbus. As EACH dispatched call settles, a
  * `tool.result` event is emitted (Reply: id = the ToolCall id, name = the action name;
  * ok+data on success, ok:false+error on rejection) so plugins can fold tool outcomes into
- * the next beat's context.
+ * the next frame's context.
  *
  * Degradation: compose renders each block in ISOLATION — a block whose render()
- * throws/rejects degrades to empty text for that beat (logged); it never drops
- * the other blocks or the beat. After stop(), no further beat work runs — the tick
+ * throws/rejects degrades to empty text for that frame (logged); it never drops
+ * the other blocks or the frame. After stop(), no further frame work runs — the tick
  * subscription and registered actions are torn down.
  *
  * `agent_instance` uses start/stop; `loader` wires PluginContext's block ops to
@@ -42,7 +42,7 @@
 import type { ContextBlock } from "../context";
 
 export interface Orchestrator {
-  /** Begin conducting (subscribe to clock tick, run beats). */
+  /** Begin conducting (subscribe to clock tick, run frames). */
   start(): void;
   stop(): void;
 

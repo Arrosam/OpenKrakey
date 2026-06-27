@@ -3,9 +3,9 @@
  *
  * Contributes ONE stable SYSTEM-target context block (priority 9000, just below
  * persona's 10000 identity anchor) that introduces the LLM to HOW this agent works:
- * it runs on a recurring beat; its plain reply each beat is a PRIVATE MONOLOGUE shown
+ * it runs on a recurring frame; its plain reply each frame is a PRIVATE MONOLOGUE shown
  * to no one; to affect anything outside its own head it must call a TOOL (each tool's
- * description says what it does + where its output goes); an idle beat is just thinking.
+ * description says what it does + where its output goes); an idle frame is just thinking.
  *
  * It is CHANNEL-AGNOSTIC by design — it never names a specific channel's send tool
  * (e.g. web-chat.send_message). A channel teaches its OWN send path via that tool's
@@ -24,31 +24,31 @@ const REMINDER_BLOCK_ID = "system-prompt.reminder";
 const DEFAULT_PRIORITY = 9000;
 const REMINDER_PRIORITY = 200;
 const DEFAULT_TEXT =
-  "Every beat you think, and may act. ALL of the plain text you produce — every word, " +
-  "every beat — is your PRIVATE MONOLOGUE. It is read by NO ONE: never shown to a user, " +
+  "Every frame you think, and may act. ALL of the plain text you produce — every word, " +
+  "every frame — is your PRIVATE MONOLOGUE. It is read by NO ONE: never shown to a user, " +
   "never delivered to any channel, never stored, never acted upon. It is only your own " +
   "reasoning.\n" +
   "The ONLY way to affect anything outside your own head — to be heard by anyone, to " +
   "send a message, to use any capability — is to call one of your tools. Each tool's " +
   "description says what it does and where its output goes; nothing you write outside a " +
   "tool call ever reaches anyone or has any effect.\n" +
-  "You run on a recurring HEARTBEAT — each beat is your own clock ticking, NOT a new " +
-  "request from anyone. Every beat you are shown the full history, including messages " +
+  "You run on a recurring FRAME LOOP — each frame is your own clock ticking, NOT a new " +
+  "request from anyone. Every frame you are shown the full history, including messages " +
   "and results you have ALREADY handled. Before you act, judge the current situation: " +
   "is there something genuinely NEW and unaddressed — a message you haven't answered, a " +
   "fresh tool result to use? If so, act on it. If nothing has changed since your last " +
-  "beat, just think; do not re-send a message you've already sent, re-run a tool whose " +
-  "effect already holds, or act merely because a beat occurred. Doing nothing is the " +
+  "frame, just think; do not re-send a message you've already sent, re-run a tool whose " +
+  "effect already holds, or act merely because a frame occurred. Doing nothing is the " +
   "right move when nothing is new.";
 
 // A trailing messages-target reminder, rendered LAST (lowest priority among message
 // blocks) so the recency-sensitive operating rule sits closest to the model's turn.
 // Channel-agnostic by design — it names no channel or tool, mirroring the system block.
 const REMINDER_TEXT =
-  "[Operating reminder] Your plain text this beat is a PRIVATE MONOLOGUE — to affect " +
+  "[Operating reminder] Your plain text this frame is a PRIVATE MONOLOGUE — to affect " +
   "anything (reply to anyone, use any capability) you MUST call a tool. Check the " +
   "current situation now: re-read the most recent user message and any status notes " +
-  "above, and act only on what is genuinely NEW and unaddressed this beat. If you are " +
+  "above, and act only on what is genuinely NEW and unaddressed this frame. If you are " +
   "mid-task, re-read the newest user message FIRST — it may have changed your priorities " +
   "or asked you to stop.";
 

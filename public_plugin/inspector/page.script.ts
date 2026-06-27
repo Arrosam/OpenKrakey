@@ -126,7 +126,7 @@ export const SCRIPT = `
       es: null,
       prompts: {},      // corrId -> { sent, received }
       promptOrder: [],  // corrIds in arrival order
-      beats: [],        // [{ seq, at, label, records:[] }]
+      frames: [],       // [{ seq, at, label, records:[] }]
       logs: []
     };
   }
@@ -195,7 +195,7 @@ export const SCRIPT = `
   var CAP_EVENTS = 600;   // event-stream rows (records[] and DOM .ev nodes)
   var CAP_PROMPTS = 200;  // prompt pairs (promptOrder + prompts map)
   var CAP_LOGS = 600;     // log records
-  var CAP_BEATS = 200;    // beat groups
+  var CAP_FRAMES = 200;   // frame groups
 
   // ---- panel: event stream (explicit auto-follow toggle is the master) ----
   var eventsBody = \$("events");
@@ -317,11 +317,11 @@ export const SCRIPT = `
       promptsBody.innerHTML = '<div class="empty">No prompts yet.</div>';
       return;
     }
-    // Index corrId -> beat number for a friendly correlation crumb.
-    var beatOf = {};
-    for (var bj = 0; bj < s.beats.length; bj++) {
-      var brecs = s.beats[bj].records;
-      for (var rj = 0; rj < brecs.length; rj++) if (brecs[rj].corrId) beatOf[brecs[rj].corrId] = bj;
+    // Index corrId -> frame number for a friendly correlation crumb.
+    var frameOf = {};
+    for (var bj = 0; bj < s.frames.length; bj++) {
+      var brecs = s.frames[bj].records;
+      for (var rj = 0; rj < brecs.length; rj++) if (brecs[rj].corrId) frameOf[brecs[rj].corrId] = bj;
     }
 
     for (var i = 0; i < s.promptOrder.length; i++) {
@@ -338,7 +338,7 @@ export const SCRIPT = `
       var req = (pr.sent && !sentTrunc) ? get(pr.sent.payload, ["data", "request"]) : null;
 
       var inner = '<div class="ph">corr <span class="corr">' + esc(cid) + '</span>'
-        + (beatOf[cid] != null ? ('<span class="beatno">· beat #' + beatOf[cid] + '</span>') : "")
+        + (frameOf[cid] != null ? ('<span class="frameno">· frame #' + frameOf[cid] + '</span>') : "")
         + '<span class="badge ' + bcls + '">' + badge + '</span></div>';
 
       // ---- request block (readable vs raw); truncation surfaced verbatim ----
@@ -447,28 +447,28 @@ export const SCRIPT = `
     if (!atBottom && followOn(logFollow)) logFollow.classList.remove("on");
   });
 
-  // ---- panel: per-beat timeline ----
-  var beatsBody = \$("beats");
+  // ---- panel: per-frame timeline ----
+  var framesBody = \$("frames");
   var STAGE = {
-    "tick": ["heartbeat", "s-gather"], "gather": ["gather", "s-gather"],
+    "tick": ["frame", "s-gather"], "gather": ["gather", "s-gather"],
     "prompt.sent": ["request →", "s-sent"], "prompt.received": ["← return", "s-recv"],
     "tool.result": ["tool", "s-tool"], "input": ["input", "s-gather"],
     "output": ["output", "s-output"], "conversation": ["conversation", "s-output"],
     "log": ["log", ""], "agent.start": ["start", "s-output"]
   };
-  function renderBeats(s) {
-    beatsBody.innerHTML = "";
-    if (!s.beats.length) {
-      beatsBody.innerHTML = '<div class="empty">No beats yet.</div>';
+  function renderFrames(s) {
+    framesBody.innerHTML = "";
+    if (!s.frames.length) {
+      framesBody.innerHTML = '<div class="empty">No frames yet.</div>';
       return;
     }
-    for (var i = 0; i < s.beats.length; i++) {
-      var b = s.beats[i];
+    for (var i = 0; i < s.frames.length; i++) {
+      var b = s.frames[i];
       var div = document.createElement("div");
-      div.className = "beat";
+      div.className = "frame";
       var last = b.records[b.records.length - 1];
       var dur = last ? (last.at - b.at) : 0;
-      var html = '<div class="bh"><span class="bdot"></span>beat — ' + esc(b.label || ("#" + b.seq))
+      var html = '<div class="bh"><span class="bdot"></span>frame — ' + esc(b.label || ("#" + b.seq))
         + ' <span class="bmeta">· ' + fmtTime(b.at) + ' · ' + b.records.length + ' events</span>'
         + '<span class="bdur">⏱ <b>' + dur + 'ms</b></span></div><div class="lane">';
       for (var j = 0; j < b.records.length; j++) {
@@ -482,12 +482,12 @@ export const SCRIPT = `
       }
       html += '</div>';
       div.innerHTML = html;
-      beatsBody.appendChild(div);
+      framesBody.appendChild(div);
     }
   }
 
   // ---- record routing: STATE ONLY (never touches the DOM) ----
-  // Updates records/prompts/promptOrder/logs/beats and enforces the caps.
+  // Updates records/prompts/promptOrder/logs/frames and enforces the caps.
   // Returns true if the record was new (false if it was a dedup'd duplicate).
   function applyRecord(s, rec) {
     // seq is a monotonic per-agent server counter and the snapshot is an ordered
@@ -515,16 +515,16 @@ export const SCRIPT = `
       if (s.logs.length > CAP_LOGS) s.logs.shift();
     }
 
-    // beats: a new beat opens at tick/gather; everything else joins the current
-    // beat (records before the first boundary form an implicit pre-beat).
+    // frames: a new frame opens at tick/gather; everything else joins the current
+    // frame (records before the first boundary form an implicit pre-frame).
     if (rec.kind === "tick" || rec.kind === "gather") {
-      s.beats.push({ seq: rec.seq, at: rec.at,
+      s.frames.push({ seq: rec.seq, at: rec.at,
         label: rec.kind + " " + (get(rec.payload, ["data", "seq"])), records: [rec] });
     } else {
-      if (!s.beats.length) s.beats.push({ seq: rec.seq, at: rec.at, label: "pre-beat", records: [] });
-      s.beats[s.beats.length - 1].records.push(rec);
+      if (!s.frames.length) s.frames.push({ seq: rec.seq, at: rec.at, label: "pre-frame", records: [] });
+      s.frames[s.frames.length - 1].records.push(rec);
     }
-    if (s.beats.length > CAP_BEATS) s.beats.shift();
+    if (s.frames.length > CAP_FRAMES) s.frames.shift();
 
     return true;
   }
@@ -534,11 +534,11 @@ export const SCRIPT = `
     \$("cEvents").textContent = s.records.length;
     \$("cPrompts").textContent = s.promptOrder.length;
     \$("cLogs").textContent = s.logs.length;
-    \$("cBeats").textContent = s.beats.length;
+    \$("cFrames").textContent = s.frames.length;
   }
 
   // ---- live render coalescer: bound panel re-renders to once-per-frame ----
-  var dirty = { prompts: false, logs: false, beats: false };
+  var dirty = { prompts: false, logs: false, frames: false };
   var rafHandle = 0;
   var raf = (typeof window !== "undefined" && window.requestAnimationFrame)
     ? window.requestAnimationFrame.bind(window)
@@ -553,10 +553,10 @@ export const SCRIPT = `
   function flushDirty() {
     rafHandle = 0;
     var s = state;
-    if (!s) { dirty.prompts = dirty.logs = dirty.beats = false; return; }
+    if (!s) { dirty.prompts = dirty.logs = dirty.frames = false; return; }
     if (dirty.prompts && panelVisible("prompts")) { renderPrompts(s); dirty.prompts = false; }
     if (dirty.logs && panelVisible("logs")) { renderLogs(s); dirty.logs = false; }
-    if (dirty.beats && panelVisible("beats")) { renderBeats(s); dirty.beats = false; }
+    if (dirty.frames && panelVisible("frames")) { renderFrames(s); dirty.frames = false; }
     renderCounts(s); // cheap; keep header badges fresh regardless
   }
 
@@ -570,34 +570,34 @@ export const SCRIPT = `
     renderEvents(s);
     renderPrompts(s);
     renderLogs(s);
-    renderBeats(s);
+    renderFrames(s);
     renderCounts(s);
-    dirty.prompts = dirty.logs = dirty.beats = false;
+    dirty.prompts = dirty.logs = dirty.frames = false;
   }
 
   // LIVE (SSE): one record. The event stream appends incrementally; the prompt,
-  // log and beat panels are marked dirty and coalesced into one rAF flush.
+  // log and frame panels are marked dirty and coalesced into one rAF flush.
   function ingestLive(s, rec) {
     if (!applyRecord(s, rec)) return;
     appendEventRow(rec);
     if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) dirty.prompts = true;
     if (rec.kind === "log") dirty.logs = true;
-    dirty.beats = true; // every record joins (or opens) a beat
+    dirty.frames = true; // every record joins (or opens) a frame
     scheduleFlush();
   }
 
   function resetPanels() {
     if (rafHandle && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafHandle);
     rafHandle = 0;
-    dirty.prompts = dirty.logs = dirty.beats = false;
+    dirty.prompts = dirty.logs = dirty.frames = false;
     promptsBody.innerHTML = '<div class="empty">No prompts yet.</div>';
     eventsBody.innerHTML = '<div class="empty">No events yet.</div>';
     logsBody.innerHTML = '<div class="empty">No logs yet.</div>';
-    beatsBody.innerHTML = '<div class="empty">No beats yet.</div>';
+    framesBody.innerHTML = '<div class="empty">No frames yet.</div>';
     \$("cPrompts").textContent = "0";
     \$("cEvents").textContent = "0";
     \$("cLogs").textContent = "0";
-    \$("cBeats").textContent = "0";
+    \$("cFrames").textContent = "0";
   }
 
   // ---- selection / connection ----

@@ -5,7 +5,7 @@
  * private folder, auto-load that folder which overrides same-id public, then
  * load declared public plugins), builds each plugin's PluginContext, and
  * registers it via `setup`. `teardown` tears every loaded plugin down in
- * reverse load order. The loader does NOT run the beat.
+ * reverse load order. The loader does NOT run the frame.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";

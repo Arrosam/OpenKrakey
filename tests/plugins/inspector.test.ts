@@ -781,7 +781,7 @@ test("inspector: log.entry becomes a 'log' record exposing level + pluginId, and
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
-    await sendAndWait(c, "log alice warn core:orchestrator beat-stalled", "log");
+    await sendAndWait(c, "log alice warn core:orchestrator frame-stalled", "log");
     const recs = await waitSnapshot(c, "alice", (rs) =>
       rs.some((r) => r.kind === "log" && /core:orchestrator/.test(flat(r.payload))),
     );
@@ -793,7 +793,7 @@ test("inspector: log.entry becomes a 'log' record exposing level + pluginId, and
       /core:orchestrator/,
       "the core: pluginId survives (the Logs panel must show core lines)",
     );
-    assert.match(flat(logRec.payload), /beat-stalled/, "the log text is exposed");
+    assert.match(flat(logRec.payload), /frame-stalled/, "the log text is exposed");
   } finally {
     await c.close();
   }

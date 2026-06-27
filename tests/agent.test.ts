@@ -21,7 +21,7 @@
  * Isolation: every test gets brand-new, EMPTY OS temp dirs for `publicPluginDir`
  * and `agentsDir` (created in beforeEach, removed in afterEach). Empty dirs mean
  * there is nothing to load, so the bare agent loads no plugins and never touches
- * the repo cwd or the network. A modest `intervalMs` (10s) keeps the real beat
+ * the repo cwd or the network. A modest `intervalMs` (10s) keeps the real frame
  * clock from actually firing inside a sub-second test, and EVERY started agent is
  * stopped (per-test cleanup + a top-level afterEach sweep) so no timer leaks
  * across tests and keeps the process alive.
@@ -47,7 +47,7 @@ let agentsDir: string;
 
 /**
  * Agents started during a test. The top-level afterEach stops every one of them
- * so a thrown assertion can never leak a live beat timer (which would otherwise
+ * so a thrown assertion can never leak a live frame timer (which would otherwise
  * keep the test process from exiting). Stopping is idempotent per the contract,
  * so double-stopping a per-test-cleaned agent here is harmless.
  */
@@ -512,7 +512,7 @@ test("activation/ordering: agent.start arrives BEFORE the first clock.tick", asy
 //
 // A plugin whose setup AWAITS keeps start() in flight. We call start() WITHOUT
 // awaiting, immediately stop(), then await the original start() promise: neither
-// must reject, and crucially NO live beat timer may survive.
+// must reject, and crucially NO live frame timer may survive.
 //
 // ISOLATION NOTE: this scenario runs in a CHILD process. A violating
 // implementation leaks an unstoppable re-arming timer (stop() is latched, so
@@ -584,7 +584,7 @@ try {
   assert.equal(
     result.ticks,
     0,
-    "an agent stopped during start() must NOT leave a live beat timer (no clock.tick)",
+    "an agent stopped during start() must NOT leave a live frame timer (no clock.tick)",
   );
   assert.equal(result.cycleOk, true, "a later start()/stop() pair must settle without rejecting");
 });
@@ -658,7 +658,7 @@ export default () => ({
  * A plugin that, in setup, (a) subscribes to "log.entry" and pushes every
  * entry's {level, pluginId, text} into the exported `logs` array, and (b)
  * registers a context block (via ctx.setBlock) whose render() THROWS. The
- * orchestrator renders each block in isolation during a beat; a throwing
+ * orchestrator renders each block in isolation during a frame; a throwing
  * render() is caught and logged as a WARNING by the orchestrator's (now
  * bus-bridged) logger — the deterministic, spec-level trigger for a core log.
  */
@@ -678,7 +678,7 @@ export default () => ({
       render() { throw new Error("render-boom"); },
     });
     // METHOD B: compose happens on demand, so stand in for llm-core — pull a
-    // prompt.compose each beat so the throwing block actually renders (and the
+    // prompt.compose each frame so the throwing block actually renders (and the
     // orchestrator logs the caught failure as a core:orchestrator warn).
     ctx.events.on("clock.tick", () => {
       if (ctx.actions.has("prompt.compose")) ctx.actions.invoke("prompt.compose").catch(() => {});
@@ -691,7 +691,7 @@ export default () => ({
 /**
  * A pure recorder plugin: subscribes to "log.entry" and records every entry's
  * {level, pluginId, text}. Registers NO block and logs nothing itself, so on a
- * clean beat it must observe NO `core:*` entry (negative / regression probe).
+ * clean frame it must observe NO `core:*` entry (negative / regression probe).
  */
 function logRecorderPlugin(id: string): string {
   return `
@@ -713,7 +713,7 @@ export default () => ({
 test("core-log: a throwing render() makes the orchestrator emit a log.entry tagged pluginId === 'core:orchestrator', level 'warn', non-empty text", async () => {
   writePublicPlugin("rec-core-warn", throwingRenderRecorderPlugin("rec-core-warn"));
   const agent = make(
-    // small interval so a beat actually fires and renders the throwing block
+    // small interval so a frame actually fires and renders the throwing block
     bareDef("core-warn", { intervalMs: 25, plugins: ["rec-core-warn"] }),
     baseDeps(),
   );
@@ -853,19 +853,19 @@ export default () => ({
   }
 });
 
-// ---- Cover 4: R3 not broken — a clean bare beat invents NO core:* logs
+// ---- Cover 4: R3 not broken — a clean bare frame invents NO core:* logs
 
-test("R3 + no-spurious-core: a recorder-only agent (no throwing block, nothing logging) runs clean beats and records ZERO core:* log.entry", async () => {
+test("R3 + no-spurious-core: a recorder-only agent (no throwing block, nothing logging) runs clean frames and records ZERO core:* log.entry", async () => {
   writePublicPlugin("rec-clean", logRecorderPlugin("rec-clean"));
   const agent = make(
-    // small interval so a beat or two actually fires during the window
-    bareDef("clean-beat", { intervalMs: 25, plugins: ["rec-clean"] }),
+    // small interval so a frame or two actually fires during the window
+    bareDef("clean-frame", { intervalMs: 25, plugins: ["rec-clean"] }),
     baseDeps(),
   );
 
   await assert.doesNotReject(() => agent.start(), "a recorder-only agent must start cleanly");
   const mod = await importPublicPlugin("rec-clean");
-  // Let a beat or two pass so the orchestrator definitely ran a clean beat.
+  // Let a frame or two pass so the orchestrator definitely ran a clean frame.
   await waitUntil(() => false, 200);
   await assert.doesNotReject(() => agent.stop(), "and stop cleanly");
 
@@ -875,7 +875,7 @@ test("R3 + no-spurious-core: a recorder-only agent (no throwing block, nothing l
   assert.deepEqual(
     core,
     [],
-    "the bridge must NOT invent spurious core:* log.entry on a clean beat",
+    "the bridge must NOT invent spurious core:* log.entry on a clean frame",
   );
 });
 
@@ -949,7 +949,7 @@ export default () => ({
 //
 // We make the plugin self-observing: in setup it subscribes to "log.entry" FIRST
 // (so it is guaranteed to see its own subsequent line), THEN calls ctx.log.warn.
-// The log fires during setup, so no beat is needed (large interval = no noise).
+// The log fires during setup, so no frame is needed (large interval = no noise).
 // We re-import the SAME module file (ESM URL cache) to read its exported entries.
 
 test("plugin-log dedup regression: ctx.log.warn yields EXACTLY ONE log.entry (plugin-tagged); NO core:* duplicate of the same text", async () => {
@@ -971,7 +971,7 @@ export default () => ({
 `,
   );
   const agent = make(
-    // large interval so no beat noise — the warn fires during setup
+    // large interval so no frame noise — the warn fires during setup
     bareDef("dedup-plug", { intervalMs: 10_000, plugins: ["dedup-warn"] }),
     baseDeps(),
   );
@@ -1081,7 +1081,7 @@ fs.writeFileSync(path.join(pdir, "index.ts"), ${JSON.stringify(reentrantPlugin)}
 
 const result = { crashed: false, count: -1, completed: false };
 try {
-  // Large interval: the recursion is driven by the setup-time ctx.log, not a beat.
+  // Large interval: the recursion is driven by the setup-time ctx.log, not a frame.
   const agent = createAgentInstance(
     { id: "reentrant-log", intervalMs: 10000, plugins: ["rec-reentrant"] },
     { publicPluginDir, agentsDir },

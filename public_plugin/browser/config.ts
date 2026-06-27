@@ -93,8 +93,8 @@ export function buildDefaultGuidance(cfg: BrowserConfig): string {
     "Chrome launches on demand the first time you use a tool, and is relaunched",
     "automatically if it crashes.",
     "",
-    'Tool results do not come back inline — they arrive on the NEXT beat, tagged',
-    '"browser". After you call a tool, wait for the next beat and read the',
+    'Tool results do not come back inline — they arrive on the NEXT frame, tagged',
+    '"browser". After you call a tool, wait for the next frame and read the',
     '"browser"-tagged result before deciding what to do.',
   ].join("\n");
 }

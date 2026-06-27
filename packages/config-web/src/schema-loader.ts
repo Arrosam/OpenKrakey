@@ -46,7 +46,7 @@ const PLUGIN_META: Record<string, PluginMeta> = {
   krakeycode: { id: "krakeycode", icon: "code", name: "Coding tools", tagline: "read / write files, run shell, list dirs" },
   "web-search": { id: "web-search", icon: "search", name: "Web search", tagline: "search the web — DuckDuckGo by default, or your own SearXNG" },
   browser: { id: "browser", icon: "globe", name: "Browser", tagline: "read-only Chrome control — navigate + screenshot" },
-  inspector: { id: "inspector", icon: "activity", name: "Inspector", tagline: "live debug panel for every beat", dataCarrier: true },
+  inspector: { id: "inspector", icon: "activity", name: "Inspector", tagline: "live debug panel for every frame", dataCarrier: true },
   "memory-note": {
     id: "memory-note",
     icon: "journal",
@@ -137,7 +137,7 @@ export async function assembleSchema(deps: {
   const agentFields: ConfigSchema = [
     {
       key: "intervalMs",
-      label: "Heartbeat interval",
+      label: "Frame interval",
       type: "number",
       default: 30000,
       min: 1,

@@ -32,7 +32,7 @@
  * temp dir — keeping tests independent of cwd and of the repo layout.
  *
  * Isolation: a brand-new temp dir per test (beforeEach), removed in afterEach.
- * `run` starts real agents (with their beat timers); every returned handle is
+ * `run` starts real agents (with their frame timers); every returned handle is
  * tracked and stopped in afterEach so no timer leaks across tests.
  */
 import { test, beforeEach, afterEach } from "node:test";
@@ -63,7 +63,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Stop every agent run() started so its beat timer cannot outlive the test.
+  // Stop every agent run() started so its frame timer cannot outlive the test.
   await Promise.allSettled(started.map((h) => h.stop()));
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -85,7 +85,7 @@ function stubLibrary(): CommunicatorLibrary {
   };
 }
 
-/** A bare, valid AgentDefinition: long beat, no plugins. */
+/** A bare, valid AgentDefinition: long frame, no plugins. */
 function bareDef(id: string): AgentDefinition {
   return {
     id,

@@ -11,7 +11,7 @@
 
 </div>
 
-**OpenKrakey runs autonomous AI agents on a heartbeat.** Instead of answering once and going
+**OpenKrakey runs autonomous AI agents on a frame loop.** Instead of answering once and going
 quiet, an agent wakes on a timer, looks at everything it knows, decides what to do, fires off any
 tools, and goes back to sleep — over and over. You talk to it through a local web chat.
 
@@ -78,7 +78,7 @@ krakey stop         # stops the background instance(s)
 
 `krakey run` prints a startup report and a **web-chat URL** with a one-time access token, e.g.
 `http://127.0.0.1:7718/?token=…` — open it and start talking. Each message shows a *sent* → *read*
-status as the agent reads it on its next beat.
+status as the agent reads it on its next frame.
 
 **Where things live.** Each web surface is loopback-only, access-token gated, and on its own port:
 
@@ -107,30 +107,30 @@ agent in its config.
 | **llm-core** | The LLM round-trip, and the tool registry every tool plugin registers into. | Required by all of the above. Picks the model from config (or by capability). |
 | **persona** | Its identity — the top of the system prompt. | Set the text in the agent's config. |
 | **system-prompt** | Its operating rules (the *monologue rule*, below). | Channel-agnostic; teaches the general model. |
-| **inspector** | A live, read-only dashboard of everything on the agent's bus. | Loopback + token gated. Great for watching beats, prompts, and tool results. |
+| **inspector** | A live, read-only dashboard of everything on the agent's bus. | Loopback + token gated. Great for watching frames, prompts, and tool results. |
 
 Tool calls don't answer inline — a tool's result comes back as a message on the agent's **next
-beat** (tagged with the plugin name), and the agent wakes immediately to read it.
+frame** (tagged with the plugin name), and the agent wakes immediately to read it.
 
 ## How it works
 
-Each agent advances on a **beat** (every `intervalMs` — 15 min by default):
+Each agent advances on a **frame** (every `intervalMs` — 15 min by default):
 
 1. **Gather** — every plugin refreshes the context it contributes (identity, rules, the
    conversation, recent tool results).
 2. **Compose** — the pieces are ordered into a system prompt + a message list.
 3. **Send** — the prompt goes to the configured model, with all registered tools attached. *The
-   beat ends here; it doesn't wait.*
+   frame ends here; it doesn't wait.*
 4. **Act** — when the model answers, each tool call is dispatched asynchronously; results fold
-   into a later beat.
+   into a later frame.
 
-**The monologue rule.** The plain text a model produces each beat is a *private monologue shown to
+**The monologue rule.** The plain text a model produces each frame is a *private monologue shown to
 no one.* To do anything in the world — answer you, read a file, search the web — it must call a
-**tool**. This is what keeps an idle beat cheap (just thinking) and makes every real action
+**tool**. This is what keeps an idle frame cheap (just thinking) and makes every real action
 explicit. It's taught by the `system-prompt` plugin and respected by every tool.
 
 Because tool calls are fire-and-forget, the agent **never blocks on input** — a message you send
-mid-task is simply read on the following beat. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full
+mid-task is simply read on the following frame. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full
 design.
 
 ## The CLI
@@ -198,7 +198,7 @@ Two files, both shipped as `.example.json` templates (your live copies are git-i
 
 ```jsonc
 {
-  "intervalMs": 900000,                 // beat period (15 min)
+  "intervalMs": 900000,                 // frame period (frame rate, 15 min)
   "plugins": ["llm-core", "persona", "system-prompt", "krakeycode"],
   "privatePlugins": ["web-chat"],       // ids whose data is isolated to this agent
   "config": {

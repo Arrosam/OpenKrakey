@@ -228,7 +228,7 @@ export const SCRIPT = `(function(){
     if(animate===false) row.style.animation='none';
     row.innerHTML =
       '<div class="msg-inner">'+avatar(current, connected)+
-      '<div class="bubble"><div class="bmeta">'+esc(current||'agent')+' \\u00b7 beat</div>'+esc(text)+'</div></div>'+
+      '<div class="bubble"><div class="bmeta">'+esc(current||'agent')+' \\u00b7 frame</div>'+esc(text)+'</div></div>'+
       quoteZoneHTML();
     wireBubble(row, $('.bubble', row), current||'agent', text);
     log.appendChild(row); scrollDown();
@@ -351,7 +351,7 @@ export const SCRIPT = `(function(){
     log.innerHTML =
       '<div class="empty"><span class="eic">'+icon('chat')+'</span>'+
       '<span class="et">Pick an agent to start chatting.</span>'+
-      '<span class="es">your agents wake on a heartbeat \\u2014 talk to them anytime</span></div>';
+      '<span class="es">your agents wake on a frame loop \\u2014 talk to them anytime</span></div>';
   }
 
   // ── Header (connection pill + bell). Bug fix 1: the pill reflects the live

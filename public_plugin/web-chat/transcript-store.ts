@@ -145,7 +145,7 @@ export class TranscriptStore {
   }
 
   /**
-   * Flip MANY entries to "read" in ONE persisted rewrite. A completed beat marks every
+   * Flip MANY entries to "read" in ONE persisted rewrite. A completed frame marks every
    * message it carried read at once; coalescing avoids a full-file rewrite PER message.
    * No-op (no write) when nothing actually changed.
    */

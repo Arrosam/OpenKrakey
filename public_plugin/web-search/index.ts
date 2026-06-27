@@ -27,7 +27,7 @@ const OWN_TOOLS = new Set(["web-search.search"]);
 const SEARCH_TOOL: ToolDef = {
   name: "web-search.search",
   description:
-    'Search the web. Results (titles, URLs, snippets) arrive on the NEXT beat (not inline) as a user message tagged "web-search". Use it for current events, documentation lookups, or facts outside your training data.',
+    'Search the web. Results (titles, URLs, snippets) arrive on the NEXT frame (not inline) as a user message tagged "web-search". Use it for current events, documentation lookups, or facts outside your training data.',
   parameters: {
     type: "object",
     properties: {
@@ -237,7 +237,7 @@ const createWebSearch: PluginFactory = (): Plugin => {
         },
       });
 
-      // 5. tool.result listener — records own-tool outcomes; nudges a beat. Never throws.
+      // 5. tool.result listener — records own-tool outcomes; nudges a frame. Never throws.
       const offResult = ctx.events.on(Events.TOOL_RESULT, (payload: unknown) => {
         if (payload === null || typeof payload !== "object") return;
         const q = payload as {

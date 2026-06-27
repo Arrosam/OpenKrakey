@@ -12,7 +12,7 @@
 
 > **The kernel is a domain-agnostic "time-driven + non-blocking + plugin-everything" runtime.
 > An *Agent* is an independent instance whose behavior emerges from a set of plugins running on
-> a heartbeat.** The kernel contains none of the *behavior* of LLMs, prompts, or memory — how a
+> a frame loop.** The kernel contains none of the *behavior* of LLMs, prompts, or memory — how a
 > prompt is built, which model is called, how memory works all live in plugins. It does,
 > however, know the general *data shapes* of LLM I/O, and it ships a single **LLM communication
 > gateway** (commodity, settled infrastructure; keys confined to the core).
@@ -23,7 +23,7 @@
 
 | # | Principle | Meaning |
 |---|---|---|
-| **P1** | **Time-driven · non-blocking** | Each Agent has its own heartbeat; tool calls are fired asynchronously and never block input; new messages and tool results fold into the next beat. |
+| **P1** | **Time-driven · non-blocking** | Each Agent has its own frame loop; tool calls are fired asynchronously and never block input; new messages and tool results fold into the next frame. |
 | **P2** | **Everything is a plugin** | LLM, memory, prompt/context blocks, tools, channels — all plugins. |
 | **P3** | **An Agent is an independent instance** | Each Agent owns its clock / event-system / orchestrator / loader / plugins / data, mutually isolated; many may run concurrently. |
 | **P4** | **Minimal coupling** | Modules and plugins communicate **only** through the event-system (events + actions); they never import one another's implementations. |
@@ -125,13 +125,13 @@ responsibilities:
    `clock.set_default_interval` / `clock.fire_now` on the actionbus (see `shared/actions`
    `Actions.CLOCK_*`); plugins may adjust the cadence at any time; these are unregistered on stop.
 
-> **A beat** (event-driven): `clock` emits a tick (`clock.tick`) → the orchestrator emits
+> **A frame** (event-driven; one frame is one tick of the clock): `clock` emits a tick (`clock.tick`) → the orchestrator emits
 > `prompt.gather` (plugins refresh their blocks) → compose (split by target into a system prompt
 > + a messages array) → emit `llm.request` (carrying `{context, messages}`; **does not wait** —
-> the beat ends here). The LLM plugin listens for `llm.request`, completes the round-trip, and
+> the frame ends here). The LLM plugin listens for `llm.request`, completes the round-trip, and
 > emits `llm.return` (`Reply<LLMResponse>`, with parsed `toolCalls`) → the orchestrator
 > dispatches each tool call (asynchronous, isolated). Composition is fault-isolated per block: a
-> block whose `render` fails degrades to empty text and never drags down the beat.
+> block whose `render` fails degrades to empty text and never drags down the frame.
 
 **event-system** — the **independent central bus**: an `eventbus` (`emit` / `on`) plus an
 `actionbus` (`register` / `invoke`). The clock, loader, orchestrator, and every plugin **all
@@ -155,7 +155,7 @@ adjusted by the orchestrator (`setInterval` / `fireNow`).
 
 ---
 
-## 4. Data flow of one beat (within a single Agent)
+## 4. Data flow of one frame (within a single Agent)
 
 ```
    plugin ──emit──▶ event-system (eventbus) ──▶ plugin adds/modifies/removes a context block by id
@@ -163,7 +163,7 @@ adjusted by the orchestrator (`setInterval` / `fireNow`).
      │                                          clock counts down → emit tick
      │                                                          ▼
      │     orchestrator: emit prompt.gather → compose full context → emit "llm.request" ─▶ LLM plugin
-     │                                                          │ (in flight; non-blocking; beat ends)
+     │                                                          │ (in flight; non-blocking; frame ends)
      │                                                          ▼
      │           LLM plugin finishes round-trip + parse → emit "llm.return" (Reply<LLMResponse>, toolCalls)
      └──invoke◀── event-system (actionbus) ◀── orchestrator dispatches each tool call (fired async)
@@ -171,7 +171,7 @@ adjusted by the orchestrator (`setInterval` / `fireNow`).
 
 **Temporal parallelism = non-blocking.** Tool calls run asynchronously; a new input arriving
 mid-flight, and any message the Agent explicitly sends through a channel, are recorded by the
-channel plugin into its own conversation and carried along at the **next** beat's composition.
+channel plugin into its own conversation and carried along at the **next** frame's composition.
 Each Agent runs its own loop (no cross-blocking).
 
 ---
@@ -258,7 +258,7 @@ OpenKrakey/
 The single shared vocabulary. Each is a pure-type definition plus well-known event/action name
 constants:
 
-- **clock** — including dual `default` / `current` intervals and this-beat-immediate
+- **clock** — including dual `default` / `current` intervals and this-frame-immediate
   `setInterval` / `setDefaultInterval`.
 - **event-system** — `EventBus` + `ActionBus`.
 - **context** — `ContextBlock` `{ id, priority, target?, render }`; `render` returns a `string`
@@ -286,9 +286,9 @@ envelopes.
   `Communicator`).
 - **R2** — Plugins communicate only through this Agent's event-system + the L1 contracts; they do
   not import one another, do not touch core internals, and do not cross Agents.
-- **R3** — A zero-plugin Agent completes a beat without error.
+- **R3** — A zero-plugin Agent completes a frame without error.
 - **R4** — Single responsibility: each module does only what §3 specifies (e.g. the loader does
-  not run a beat; `agent_instance` does not set up plugins).
+  not run a frame; `agent_instance` does not set up plugins).
 - **R5** — The contracts (L1) are the only shared vocabulary; a change is versioned.
 - **R6** — Per-Agent isolation: one Agent's plugins / data / events never leak into another (the
   shared data of a public plugin is the sole, explicit exception).
@@ -298,7 +298,7 @@ envelopes.
 ## 10. Roadmap
 
 - **Phase 0** — Contracts + the five per-Agent modules (clock / event-system / orchestrator
-  (with context-buffer) / loader / agent_instance) + boot; a bare Agent can spin a beat with no
+  (with context-buffer) / loader / agent_instance) + boot; a bare Agent can spin a frame with no
   plugins.
 - **Phase 1** — Example plugins (`persona`, the identity block; `system-prompt`, the operating
   model block (the monologue rule + basic usage, channel-agnostic); `llm-core`, the LLM

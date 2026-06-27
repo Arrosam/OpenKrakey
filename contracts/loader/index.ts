@@ -7,7 +7,7 @@
  * sets each plugin's dataDir, builds its PluginContext, and registers it by
  * calling `setup` (wiring actions/listeners/context blocks into the event-system
  * + orchestrator block store). `teardown` tears every loaded plugin down. The
- * loader ONLY handles plugin startup/shutdown — it does not run the beat.
+ * loader ONLY handles plugin startup/shutdown — it does not run the frame.
  *
  * Declared independents (`privatePlugins`) are NEVER code-copied: the code stays
  * in public_plugin/ (so its relative imports keep resolving — copying broke them)

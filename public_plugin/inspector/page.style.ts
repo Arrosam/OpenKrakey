@@ -9,7 +9,7 @@
  * the dot-grid + glow backdrop, a LEFT SIDEBAR shell (brand + agent roster +
  * status + dev controls), the four per-panel accent colors (mint/azure/violet/
  * gold), panel cards in a 2×2 grid that expand to a single full-screen panel,
- * segmented controls, beat lanes, log rows, the status pill, and the `.embedded`
+ * segmented controls, frame lanes, log rows, the status pill, and the `.embedded`
  * rules that hide the surface's own brand when iframed into the Console.
  *
  * The data plumbing (token gate, /snapshot, /stream SSE, seq-dedup, record
@@ -281,7 +281,7 @@ body {
 .dash:not([data-view="overview"]) .panel { display: none; }
 .dash[data-view="prompts"] .panel--prompts,
 .dash[data-view="events"]  .panel--events,
-.dash[data-view="beats"]   .panel--beats,
+.dash[data-view="frames"]  .panel--frames,
 .dash[data-view="logs"]    .panel--logs { display: flex; }
 .dash.view-enter { animation: viewIn .3s cubic-bezier(.2,.8,.2,1) both; }
 
@@ -291,7 +291,7 @@ body {
 }
 .panel--prompts { border-color: var(--mint-deep); }
 .panel--events  { border-color: var(--azure-deep); box-shadow: 0 0 0 1px var(--azure-glow); }
-.panel--beats   { border-color: rgba(157,140,255,0.35); }
+.panel--frames  { border-color: rgba(157,140,255,0.35); }
 .panel--logs    { border-color: var(--gold-deep); box-shadow: 0 0 0 1px var(--gold-glow); }
 
 .panel > header {
@@ -302,7 +302,7 @@ body {
 .panel > header .g { color: var(--mint); display: inline-flex; }
 .panel > header .g .ic { width: 18px; height: 18px; }
 .panel--events > header .g { color: var(--azure); }
-.panel--beats  > header .g { color: var(--violet); }
+.panel--frames > header .g { color: var(--violet); }
 .panel--logs   > header .g { color: var(--gold); }
 .panel > header h3 { font-size: 14.5px; font-weight: 700; letter-spacing: -0.2px; }
 .panel > header .count {
@@ -311,7 +311,7 @@ body {
   border-radius: 20px; padding: 1px 8px;
 }
 .panel--events > header .count { color: var(--azure); border-color: var(--azure-deep); background: var(--azure-glow); }
-.panel--beats  > header .count { color: var(--violet); border-color: rgba(157,140,255,0.4); background: rgba(157,140,255,0.08); }
+.panel--frames > header .count { color: var(--violet); border-color: rgba(157,140,255,0.4); background: rgba(157,140,255,0.08); }
 .panel--logs   > header .count { color: var(--gold); border-color: var(--gold-deep); background: var(--gold-glow); }
 .panel > header .hc { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
 
@@ -419,7 +419,7 @@ body {
   background: var(--panel3); border-bottom: 1px solid var(--line);
 }
 .pair .ph .corr { color: var(--mint); }
-.pair .ph .beatno { color: var(--faint); }
+.pair .ph .frameno { color: var(--faint); }
 .pair .ph .badge {
   margin-left: auto; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.5px;
   padding: 2px 9px; border-radius: 20px; text-transform: uppercase;
@@ -497,48 +497,48 @@ body {
 .log.lvl-warn  { background: rgba(255,203,107,0.03); }
 .log.lvl-error { background: rgba(255,107,107,0.04); }
 
-/* ── PER-BEAT TIMELINE ───────────────────────────────────────────────────── */
-.beat {
+/* ── PER-FRAME TIMELINE ──────────────────────────────────────────────────── */
+.frame {
   border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 12px;
   overflow: hidden; background: var(--panel2);
 }
-.beat .bh {
+.frame .bh {
   display: flex; align-items: center; gap: 9px; padding: 8px 12px;
   font-family: var(--mono); font-size: 11px; color: var(--violet);
   background: var(--panel3); border-bottom: 1px solid var(--line);
 }
-.beat .bh .bdot { width: 7px; height: 7px; border-radius: 50%; background: var(--violet); box-shadow: 0 0 8px var(--violet); flex: none; }
-.beat .bh .bmeta { color: var(--faint); }
-.beat .bh .bdur { margin-left: auto; color: var(--muted); }
-.beat .bh .bdur b { color: var(--mint); font-weight: 700; }
-.beat .lane { padding: 6px 12px 10px; position: relative; }
-.beat .step {
+.frame .bh .bdot { width: 7px; height: 7px; border-radius: 50%; background: var(--violet); box-shadow: 0 0 8px var(--violet); flex: none; }
+.frame .bh .bmeta { color: var(--faint); }
+.frame .bh .bdur { margin-left: auto; color: var(--muted); }
+.frame .bh .bdur b { color: var(--mint); font-weight: 700; }
+.frame .lane { padding: 6px 12px 10px; position: relative; }
+.frame .step {
   display: flex; align-items: baseline; gap: 10px; padding: 3px 0;
   font-family: var(--mono); font-size: 11px; position: relative; padding-left: 20px;
 }
-.beat .step::before {
+.frame .step::before {
   content: ""; position: absolute; left: 5px; top: 8px;
   width: 6px; height: 6px; border-radius: 50%; background: var(--line2);
 }
-.beat .step.s-gather::before { background: var(--sky); }
-.beat .step.s-compose::before { background: var(--sky); }
-.beat .step.s-sent::before   { background: var(--mint); box-shadow: 0 0 8px var(--mint); }
-.beat .step.s-recv::before   { background: var(--mint-bright); }
-.beat .step.s-tool::before   { background: var(--violet); box-shadow: 0 0 8px var(--violet); }
-.beat .step.s-output::before { background: var(--mint-bright); }
-.beat .lane::before {
+.frame .step.s-gather::before { background: var(--sky); }
+.frame .step.s-compose::before { background: var(--sky); }
+.frame .step.s-sent::before   { background: var(--mint); box-shadow: 0 0 8px var(--mint); }
+.frame .step.s-recv::before   { background: var(--mint-bright); }
+.frame .step.s-tool::before   { background: var(--violet); box-shadow: 0 0 8px var(--violet); }
+.frame .step.s-output::before { background: var(--mint-bright); }
+.frame .lane::before {
   content: ""; position: absolute; left: 19.5px; top: 12px; bottom: 14px;
   width: 1px; background: var(--line);
 }
-.beat .step .stage { flex: none; font-weight: 700; min-width: 78px; }
-.beat .step.s-gather .stage, .beat .step.s-compose .stage { color: var(--sky); }
-.beat .step.s-sent .stage    { color: var(--mint); }
-.beat .step.s-recv .stage    { color: var(--mint-bright); }
-.beat .step.s-tool .stage    { color: var(--violet); }
-.beat .step.s-output .stage  { color: var(--mint-bright); }
-.beat .step .sd { color: var(--muted); min-width: 0; word-break: break-word; }
-.beat .step .sd .corr { color: var(--faint); }
-.beat .step .t { margin-left: auto; flex: none; color: var(--faint); font-size: 10px; }
+.frame .step .stage { flex: none; font-weight: 700; min-width: 78px; }
+.frame .step.s-gather .stage, .frame .step.s-compose .stage { color: var(--sky); }
+.frame .step.s-sent .stage    { color: var(--mint); }
+.frame .step.s-recv .stage    { color: var(--mint-bright); }
+.frame .step.s-tool .stage    { color: var(--violet); }
+.frame .step.s-output .stage  { color: var(--mint-bright); }
+.frame .step .sd { color: var(--muted); min-width: 0; word-break: break-word; }
+.frame .step .sd .corr { color: var(--faint); }
+.frame .step .t { margin-left: auto; flex: none; color: var(--faint); font-size: 10px; }
 
 @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes viewIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
@@ -547,7 +547,7 @@ body {
 .panel .body.agent-in { animation: viewIn .28s cubic-bezier(.2,.8,.2,1) both; }
 .panel--prompts .body.agent-in { animation-delay: .00s; }
 .panel--events  .body.agent-in { animation-delay: .05s; }
-.panel--beats   .body.agent-in { animation-delay: .10s; }
+.panel--frames  .body.agent-in { animation-delay: .10s; }
 .panel--logs    .body.agent-in { animation-delay: .15s; }
 @media (prefers-reduced-motion: reduce) {
   .panel .body.agent-in { animation: none; }

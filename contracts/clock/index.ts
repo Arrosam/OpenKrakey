@@ -2,12 +2,12 @@
  * Contract: clock  ·  connects: clock (impl) ↔ orchestrator, agent_instance
  *
  * A per-Agent "dumb" timer. It holds a DEFAULT interval and a CURRENT interval:
- * each beat counts down `current`; after every activation `current` resets back
+ * each tick counts down `current`; after every activation `current` resets back
  * to `default`. It only activates (calls the single handler) — never schedules or
  * decides content. Its rhythm is controllable from outside, and changes take
- * effect on the CURRENT beat, not deferred to the next:
+ * effect on the CURRENT tick, not deferred to the next:
  *
- *  - setInterval(ms): set THIS beat's interval, effective immediately. If `ms` is
+ *  - setInterval(ms): set THIS tick's interval, effective immediately. If `ms` is
  *    <= the time already elapsed in the current countdown, it fires now; otherwise
  *    it reschedules to fire when `ms` is reached. (Resets to default after firing.)
  *  - setDefaultInterval(ms): change the baseline that `current` resets to (runtime).
@@ -28,7 +28,7 @@ export interface Clock {
   start(): void;
   stop(): void;
   /**
-   * Set the CURRENT beat's interval, effective immediately (this beat). If `ms` is
+   * Set the CURRENT tick's interval, effective immediately (this tick). If `ms` is
    * <= the time already elapsed in the current countdown, fires now; otherwise
    * reschedules to fire at `ms`. After each activation, `current` resets to default.
    * When the clock is NOT running (never started, or stopped), this only records

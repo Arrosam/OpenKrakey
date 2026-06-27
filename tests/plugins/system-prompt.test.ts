@@ -35,7 +35,7 @@ const DEFAULT_PRIORITY = 9000;
 const REMINDER_BLOCK_ID = "system-prompt.reminder";
 const REMINDER_DEFAULT_PRIORITY = 200;
 const REMINDER_TEXT =
-  "[Operating reminder] Your plain text this beat is a PRIVATE MONOLOGUE — to affect anything (reply to anyone, use any capability) you MUST call a tool. Check the current situation now: re-read the most recent user message and any status notes above, and act only on what is genuinely NEW and unaddressed this beat. If you are mid-task, re-read the newest user message FIRST — it may have changed your priorities or asked you to stop.";
+  "[Operating reminder] Your plain text this frame is a PRIVATE MONOLOGUE — to affect anything (reply to anyone, use any capability) you MUST call a tool. Check the current situation now: re-read the most recent user message and any status notes above, and act only on what is genuinely NEW and unaddressed this frame. If you are mid-task, re-read the newest user message FIRST — it may have changed your priorities or asked you to stop.";
 
 const mod: any = await import("../../public_plugin/system-prompt/index.ts").then(
   (m) => m,
@@ -154,14 +154,14 @@ test("default text EMPHASIZES the strengthened monologue model (distinctive new 
   );
 });
 
-test("default text carries the NEW heartbeat / situational-judgment paragraph (distinctive substrings)", async () => {
+test("default text carries the NEW frame-loop / situational-judgment paragraph (distinctive substrings)", async () => {
   const { block } = await setupAndGetBlock({});
   const text = await renderOf(block);
   // Paragraph 3 was REPLACED: the old "nothing worth doing / never force an action
-  // just to act" line is gone; the new paragraph teaches heartbeat-aware judgment.
+  // just to act" line is gone; the new paragraph teaches frame-loop-aware judgment.
   assert.ok(
-    text.includes("HEARTBEAT"),
-    "new paragraph 3 must introduce the recurring HEARTBEAT model",
+    text.includes("FRAME LOOP"),
+    "new paragraph 3 must introduce the recurring FRAME LOOP model",
   );
   assert.ok(
     text.includes("do not re-send a message you've already sent"),

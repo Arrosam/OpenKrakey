@@ -10,7 +10,7 @@
 /** An Agent's config (stored at agents/<id>/config.json). */
 export interface AgentDefinition {
   id: string;
-  /** Beat interval (ms). */
+  /** Frame interval (frame rate), ms. */
   intervalMs: number;
   /** Public plugin ids to load from public_plugin/ (shared). */
   plugins: string[];

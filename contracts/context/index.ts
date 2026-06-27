@@ -15,7 +15,7 @@
  * that renders to "" (including a render that throws) contributes nothing at all.
  *
  * A block may instead set `target: "messages"` to contribute a `Message[]` GROUP to
- * the beat's messages array rather than the system prompt. Message-target blocks are
+ * the frame's messages array rather than the system prompt. Message-target blocks are
  * ordered among themselves by priority DESC, but the order WITHIN a group is preserved
  * (the orchestrator never reorders a group). The conversation itself is just such a
  * block (e.g. `history` at a median priority). See `ContextBlock.target`.
@@ -33,12 +33,12 @@ export interface ContextBlock {
    */
   label?: string;
   /**
-   * Destination for this block's content when the orchestrator composes a beat.
+   * Destination for this block's content when the orchestrator composes a frame.
    * Defaults to "system".
    *  - "system":   render() returns a STRING, composed (priority DESC) into the
    *                system prompt and wrapped `<label>…</label>`.
    *  - "messages": render() returns a `Message[]` — a contiguous GROUP placed into
-   *                the beat's messages array. Message-target blocks are ordered by
+   *                the frame's messages array. Message-target blocks are ordered by
    *                priority DESC, but the order WITHIN a group is preserved; `label`
    *                does NOT apply (messages carry roles, not a wrapper). A block that
    *                renders a non-array (or []) contributes no messages.
@@ -46,12 +46,12 @@ export interface ContextBlock {
   target?: "system" | "messages";
   /**
    * System blocks return a string; message blocks return a `Message[]`. A render that
-   * throws/rejects degrades to nothing for that beat (the block, not the beat, is lost).
+   * throws/rejects degrades to nothing for that frame (the block, not the frame, is lost).
    */
   render(): string | Message[] | Promise<string | Message[]>;
 }
 
-/** The full context snapshot sent to the LLM for one beat. */
+/** The full context snapshot sent to the LLM for one frame. */
 export interface ComposedContext {
   text: string;
   meta?: Record<string, unknown>;

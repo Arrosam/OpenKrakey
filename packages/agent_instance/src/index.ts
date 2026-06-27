@@ -5,7 +5,7 @@
  * event-system, orchestrator, loader) once at construction, performs the only
  * wiring this node owns — bridging each clock activation onto the event-system as
  * a `clock.tick` event — and sequences startup/shutdown. It holds no business
- * logic: conducting the beat is the orchestrator's job and plugin startup is the
+ * logic: conducting the frame is the orchestrator's job and plugin startup is the
  * loader's. This is the one node permitted to import the concrete sibling
  * factories (composition-root exception); every other coupling stays behind a
  * contract.

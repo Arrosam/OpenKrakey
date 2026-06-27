@@ -230,7 +230,7 @@ export function parseDuckDuckGoLite(
 
 /**
  * Build the SYSTEM guidance string when the operator hasn't supplied a custom one.
- * Mentions the `web-search.search` tool, that results arrive on the NEXT beat as a
+ * Mentions the `web-search.search` tool, that results arrive on the NEXT frame as a
  * user message tagged "web-search", the endpoint strategy, the maxResults cap, the
  * DuckDuckGo fallback, and the honest caveat about public instances.
  */
@@ -250,7 +250,7 @@ export function buildDefaultGuidance(cfg: WebSearchConfig): string {
 
   return [
     `You can search the web with the tool web-search.search (argument: query).`,
-    `Results do NOT come back inline: titles, URLs, and snippets arrive on the NEXT beat as a user message tagged "web-search". Call the tool, then read its results next beat.`,
+    `Results do NOT come back inline: titles, URLs, and snippets arrive on the NEXT frame as a user message tagged "web-search". Call the tool, then read its results next frame.`,
     endpointStrategy,
     `At most ${cfg.maxResults} results are returned per query.`,
     `Note: public SearXNG instances may rate-limit or disable the JSON API, so a search can fail. For reliable web search, run a local SearXNG or set instanceUrl in this plugin's config.`,

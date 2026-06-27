@@ -485,7 +485,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       },
       inspector: {
         icon: "activity", label: "Inspector",
-        desc: "Watch every heartbeat as it happens — prompts, the event stream, tool dispatch and gather/compose lanes.",
+        desc: "Watch every frame as it happens — prompts, the event stream, tool dispatch and gather/compose lanes.",
         stats: ["live", "events", "read-only"],
         src: URLS.inspector,
         note: "Inspector isn't running. Start a Krakey agent with <code>krakey start</code>, then Retry.",
@@ -560,7 +560,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
           `<div class="he-strip">` +
             statEl("sliders", "Config", "settings & onboarding") +
             statEl("chat", "Chat", "browser chat") +
-            statEl("activity", "Inspector", "live heartbeats") +
+            statEl("activity", "Inspector", "live frames") +
           `</div>` +
         `</div>` +
         `<button class="he-cta-btn" data-quick-setup>` +
@@ -599,7 +599,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       const acts = [
         ["sliders", `Open <b>Config</b> to set up your AI services and agents`, "config", "start here"],
         ["chat", `Open <b>Chat</b> to talk to your agents from the browser`, "chat", "needs a running agent"],
-        ["activity", `Open <b>Inspector</b> to watch heartbeats live`, "inspector", "needs a running agent"],
+        ["activity", `Open <b>Inspector</b> to watch frames live`, "inspector", "needs a running agent"],
         ["server", `Surfaces run separately — see the console README`, "console", "docs"],
       ];
       const list = el("div", "activity stagger");

@@ -3,8 +3,8 @@
  *
  * Two tools (memory-note.remember / memory-note.forget) record and drop notes;
  * they persist per-agent and the WHOLE notebook is re-rendered into context every
- * beat (the <memory-note> section) so the agent keeps it in mind. Writes are
- * synchronous within the beat and the notes block is the feedback — there is no
+ * frame (the <memory-note> section) so the agent keeps it in mind. Writes are
+ * synchronous within the frame and the notes block is the feedback — there is no
  * tool.result loop and no clock.fire_now.
  *
  * Allowed imports only: ../../contracts/*, ../../shared/*, Node builtins, and own
@@ -121,7 +121,7 @@ const createMemoryNote: PluginFactory = (): Plugin => {
         description:
           "Drop a note from your private long-term notebook by its id (e.g. 'g3'). The notebook " +
           "is always shown to you in the <memory-note> context section — this tool does not return " +
-          "content inline; the note simply disappears from that section next beat.",
+          "content inline; the note simply disappears from that section next frame.",
         parameters: {
           type: "object",
           properties: {

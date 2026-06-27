@@ -3,10 +3,10 @@
  *
  * It imports NO concrete node, only the injected `events`/`clock` and contract
  * TYPES. It holds NO LLM behavior — and, by design, makes NO decision about WHEN to
- * send. Each beat it emits a body-less TRIGGER; it composes the prompt only when
+ * send. Each frame it emits a body-less TRIGGER; it composes the prompt only when
  * ASKED; and it dispatches the tool calls that come back.
  *
- * Beat (driven by clock ticks bridged onto the eventbus as CLOCK_TICK):
+ * Frame (driven by clock ticks bridged onto the eventbus as CLOCK_TICK):
  *   tick / immediate wake → emit LLM_REQUEST { agentId }   ← a trigger, no body
  *
  * The round-trip plugin (llm-core) owns serialization: it keeps at most one request
@@ -35,7 +35,7 @@ import { consoleLogger, tagged } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
 
 export function createOrchestrator(deps: {
-  /** This Agent's id — stamped on the per-beat trigger as the llm-core lock key. */
+  /** This Agent's id — stamped on the per-frame trigger as the llm-core lock key. */
   agentId: string;
   events: EventSystem;
   clock: Clock;
@@ -44,14 +44,14 @@ export function createOrchestrator(deps: {
   // ---- internal state ----
   const blocks = new Map<string, ContextBlock>(); // the context-buffer
   let running = false;
-  let seq = 0; // beat counter (PROMPT_GATHER seq), bumped on each compose
+  let seq = 0; // frame counter (PROMPT_GATHER seq), bumped on each compose
   let tickUnsub: Unsub | null = null;
   let returnUnsub: Unsub | null = null;
   let actionUnsubs: Unsub[] = []; // CLOCK_* + PROMPT_COMPOSE registrations (while started)
   const log = tagged(deps.log ?? consoleLogger, "[orchestrator]");
 
   // ---- context composition ----
-  // Split the buffer by TARGET and compose BOTH halves of the beat's request:
+  // Split the buffer by TARGET and compose BOTH halves of the frame's request:
   //  • system blocks (target unset/"system"): priority DESC, each rendered to a string
   //    and wrapped `<label>…</label>` (label = block.label ?? block.id), joined by a
   //    blank line → the system prompt text;
@@ -61,7 +61,7 @@ export function createOrchestrator(deps: {
   // Sort is stable, so equal priorities keep insertion order. Every block renders in
   // ISOLATION: a render that throws/rejects (or yields the wrong shape — a non-string
   // system render, a non-array message render) contributes nothing — never dropping the
-  // other blocks or the beat.
+  // other blocks or the frame.
   async function compose(): Promise<{ context: ComposedContext; messages: Message[] }> {
     const all = [...blocks.values()];
     const byPriority = (a: ContextBlock, b: ContextBlock): number => b.priority - a.priority;
@@ -107,7 +107,7 @@ export function createOrchestrator(deps: {
     };
   }
 
-  // ---- the beat ----
+  // ---- the frame ----
   /** A tick (or immediate wake) just signals "think now" — a body-less trigger
    *  stamped with this Agent's id. llm-core serializes per agentId and pulls the
    *  body via PROMPT_COMPOSE when it is ready to send. */
@@ -139,7 +139,7 @@ export function createOrchestrator(deps: {
     for (const tc of calls) {
       // Fire-and-forget: each then/catch is independent, so one failing tool does
       // not affect the others. As each settles, emit TOOL_RESULT (id = the ToolCall
-      // id, name = the action name) so plugins can fold the outcome into the next beat.
+      // id, name = the action name) so plugins can fold the outcome into the next frame.
       deps.events.actions
         .invoke(tc.name, tc.arguments)
         .then((data) => {

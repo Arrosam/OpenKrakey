@@ -3,7 +3,7 @@ import type { Clock } from "../../../contracts/clock";
 /**
  * Per-Agent "dumb" timer with dual intervals (default + current).
  *
- * Each beat counts down `currentIntervalMs`; after every activation `current`
+ * Each tick counts down `currentIntervalMs`; after every activation `current`
  * resets back to `defaultIntervalMs`. Arming uses a recursive setTimeout so each
  * (re-)arm captures the value current at arm time. The tick is NOT bridged to any
  * event-system here — that wiring lives in agent_instance.

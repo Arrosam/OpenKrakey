@@ -4,7 +4,7 @@
  * Gives a Krakey Agent READ + NAVIGATE control of a Krakey-managed Chrome over
  * raw Chrome DevTools Protocol. Registers five actions + their llm tool defs,
  * publishes a guidance block (system) and a results block (messages), and turns
- * each own tool.result into a "browser"-tagged message on the next beat.
+ * each own tool.result into a "browser"-tagged message on the next frame.
  *
  * ALL mutable state lives in the factory closure / the ChromeClient instance
  * (R6 per-Agent isolation). The module level holds only immutable consts.
@@ -39,7 +39,7 @@ const NAVIGATE_TOOL: ToolDef = {
   name: "browser.navigate",
   description:
     "Navigate the read/navigate-only browser's active tab to an absolute URL. " +
-    'The result arrives on the next beat, tagged "browser".',
+    'The result arrives on the next frame, tagged "browser".',
   parameters: {
     type: "object",
     properties: { url: { type: "string", description: "Absolute URL" } },
@@ -51,7 +51,7 @@ const READ_PAGE_TOOL: ToolDef = {
   name: "browser.read_page",
   description:
     "Read the active tab's current page (read/navigate-only). " +
-    'The result arrives on the next beat, tagged "browser".',
+    'The result arrives on the next frame, tagged "browser".',
   parameters: {
     type: "object",
     properties: {
@@ -65,7 +65,7 @@ const LIST_TABS_TOOL: ToolDef = {
   name: "browser.list_tabs",
   description:
     "List the open browser tabs (read/navigate-only). " +
-    'The result arrives on the next beat, tagged "browser".',
+    'The result arrives on the next frame, tagged "browser".',
   parameters: { type: "object", properties: {}, required: [] },
 };
 
@@ -73,7 +73,7 @@ const ACTIVATE_TAB_TOOL: ToolDef = {
   name: "browser.activate_tab",
   description:
     "Make a given tab the active one (read/navigate-only). " +
-    'The result arrives on the next beat, tagged "browser".',
+    'The result arrives on the next frame, tagged "browser".',
   parameters: {
     type: "object",
     properties: { tabId: { type: "string" } },
@@ -85,7 +85,7 @@ const SCREENSHOT_TOOL: ToolDef = {
   name: "browser.screenshot",
   description:
     "Capture a PNG screenshot of the active tab (read/navigate-only). " +
-    'The result arrives on the next beat, tagged "browser".',
+    'The result arrives on the next frame, tagged "browser".',
   parameters: {
     type: "object",
     properties: { filename: { type: "string" } },

@@ -250,7 +250,7 @@ test("setup: declares exactly ONE ToolDef to llm.register_tool, named web-search
   assert.equal(tools[0].name, SEARCH);
 });
 
-test("ToolDef: description is a non-empty string mentioning the next-beat 'web-search' delivery", async () => {
+test("ToolDef: description is a non-empty string mentioning the next-frame 'web-search' delivery", async () => {
   const { tools } = await setup({});
   const desc = String(tools[0].description ?? "");
   assert.ok(desc.length > 0, "description must be non-empty");
@@ -853,7 +853,7 @@ test("result loop: does NOT invoke clock.fire_now for a FOREIGN result", async (
   });
   emitToolResult(sys, { name: "web-chat.send_message", ok: true, data: { delivered: true } });
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(fired, 0, "a foreign tool result must not trigger a beat");
+  assert.equal(fired, 0, "a foreign tool result must not trigger a frame");
 });
 
 test("result loop: does NOT throw when clock.fire_now is not registered", async () => {

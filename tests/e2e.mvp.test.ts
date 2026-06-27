@@ -8,7 +8,7 @@
  *
  *   POST /api/agents/e2e-agent/message {text:"hello krakey"}
  *     -> web-chat: input.message Notify (channel "web") + clock.fire_now
- *     -> clock.tick -> orchestrator beat -> prompt.gather -> compose (persona -> <persona>) -> llm.request
+ *     -> clock.tick -> orchestrator frame -> prompt.gather -> compose (persona -> <persona>) -> llm.request
  *     -> llm-core: chat({ system:<persona+web-chat.guidance>, messages:<web-chat's chat-history block>, tools })
  *     -> stub server: BEFORE the user msg lands it returns plain content "E2E-MONOLOGUE"
  *        (a monologue — llm-core still emits output.message, but web-chat does NOT render it);
@@ -49,7 +49,7 @@ const REPO_ROOT = path.resolve(".");
 
 // ---------------------------------------------------------------------------
 // Stub OpenAI chat-completions server: returns plain "E2E-MONOLOGUE" content (a private
-// monologue) on every beat EXCEPT the 2nd post-input one, which returns a web-chat.send_message
+// monologue) on every frame EXCEPT the 2nd post-input one, which returns a web-chat.send_message
 // tool_call carrying "E2E-FINAL-REPLY" — the only output that should reach the browser.
 // ---------------------------------------------------------------------------
 
@@ -62,9 +62,9 @@ interface StubServer {
 async function startStubServer(): Promise<StubServer> {
   const requests: any[] = [];
   // The agent SPEAKS (via the chat tool) exactly once. Gating on conversation STATE
-  // (below) instead of a beat counter keeps the stub robust to beat timing — the
-  // orchestrator now serializes beats (one LLM round-trip in flight at a time), but
-  // the stub stays agnostic to exactly when each beat lands.
+  // (below) instead of a frame counter keeps the stub robust to frame timing — the
+  // orchestrator now serializes frames (one LLM round-trip in flight at a time), but
+  // the stub stays agnostic to exactly when each frame lands.
   let replied = false;
 
   const server = http.createServer((req, res) => {
@@ -85,21 +85,21 @@ async function startStubServer(): Promise<StubServer> {
       requests.push(body);
 
       // Deterministic loop that proves the MONOLOGUE behavior, gated on conversation
-      // STATE (field-targeted, so robust to out-of-order beats and not coupled to a
+      // STATE (field-targeted, so robust to out-of-order frames and not coupled to a
       // substring of the whole serialized body):
       //   • the agent "thinks out loud" — a plain content return ("E2E-MONOLOGUE") that
       //     web-chat must NEVER stream to the browser;
       //   • once it has seen "hello krakey" AND already produced a monologue turn that
       //     FOLLOWS that user message, it SPEAKS exactly once via web-chat.send_message — so
-      //     the first post-input beat is always a monologue (the e2e/6 guard) and the
+      //     the first post-input frame is always a monologue (the e2e/6 guard) and the
       //     next speaks. This is the only thing that should reach the browser;
       //   • afterwards it keeps thinking, so the tool round-trip folds back into a later
       //     request (observed by e2e/2 + e2e/4) without sending anything new.
       const msgs: any[] = Array.isArray(body.messages) ? body.messages : [];
       // History is gone; web owns the conversation and does NOT record the monologue,
       // so we can't gate on "a recorded monologue turn follows the user message". Gate
-      // on simply having SEEN the user message: pre-input timer beats monologue (never
-      // delivered — the e2e/6 guard), and the first beat that sees "hello krakey" speaks.
+      // on simply having SEEN the user message: pre-input timer frames monologue (never
+      // delivered — the e2e/6 guard), and the first frame that sees "hello krakey" speaks.
       const sawUser = msgs.some(
         (m) => m?.role === "user" && typeof m.content === "string" && m.content.includes("hello krakey"),
       );
@@ -357,7 +357,7 @@ async function runE2E(): Promise<E2EResult> {
       // a clean assistant turn carrying the reply text. That folded request is exactly
       // what e2e/4 observes; polling the request log is deterministic where a fixed sleep
       // would be flaky on a slow box (and wasteful on a fast one). The SSE stream is
-      // already closed, so the extra monologue beats are not seen by e2e/5 or e2e/6.
+      // already closed, so the extra monologue frames are not seen by e2e/5 or e2e/6.
       const foldDeadline = Date.now() + 6_000;
       const folded = (): boolean =>
         server.requests.some((b) =>
@@ -450,11 +450,11 @@ test("e2e/1: the agent boots cleanly (no BOOT_ERROR) and the web server binds a 
 // Assertion 2 — the loop turns over: the stub server saw >= 2 chat requests.
 // ===========================================================================
 
-test("e2e/2: the stub LLM server received >= 2 chat requests (the beat loop turned over)", () => {
+test("e2e/2: the stub LLM server received >= 2 chat requests (the frame loop turned over)", () => {
   const r = result();
   assert.ok(
     r.requests.length >= 2,
-    "expected >= 2 chat requests (beat -> tool call -> beat); got " + r.requests.length,
+    "expected >= 2 chat requests (frame -> tool call -> frame); got " + r.requests.length,
   );
 });
 

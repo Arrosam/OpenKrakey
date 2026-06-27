@@ -5,7 +5,7 @@
  * (read_file, write_file, edit_file, bash, list_dir) registered with the LLM,
  * plus two context blocks: a SYSTEM guidance block that teaches the model how
  * the tools behave, and a MESSAGES results block that surfaces recent tool
- * outcomes on the next beat.
+ * outcomes on the next frame.
  *
  * Tool results do NOT come back inline — the orchestrator emits `tool.result`
  * after a call settles; this plugin records the outcome in a bounded ring and
@@ -43,7 +43,7 @@ function toolDefs(): ToolDef[] {
     {
       name: "krakeycode.read_file",
       description:
-        "Read a file from disk. Returns its content on the NEXT beat (not inline), as a " +
+        "Read a file from disk. Returns its content on the NEXT frame (not inline), as a " +
         'user message tagged "krakeycode". Set encoding to "base64" for binary; defaults ' +
         "to utf8. Content is capped at maxBytes (and the configured read cap); truncation is " +
         "reported. In sandbox mode the path is confined to the configured root. Reading a " +
@@ -61,7 +61,7 @@ function toolDefs(): ToolDef[] {
     {
       name: "krakeycode.write_file",
       description:
-        "Write a file. Result returns on the NEXT beat (not inline). Set append:true to " +
+        "Write a file. Result returns on the NEXT frame (not inline). Set append:true to " +
         "append instead of overwrite, createDirs:true to create missing parent directories, " +
         'and encoding "base64" to decode base64 content (default utf8). Gated by allowWrite ' +
         "— when disabled this tool throws. In sandbox mode the path is confined to the root.",
@@ -81,7 +81,7 @@ function toolDefs(): ToolDef[] {
       name: "krakeycode.edit_file",
       description:
         "Replace an exact text snippet in an EXISTING file (the file must already exist). " +
-        "Result returns on the NEXT beat (not inline). oldText must be UNIQUE in the file " +
+        "Result returns on the NEXT frame (not inline). oldText must be UNIQUE in the file " +
         "unless you pass replaceAll:true; otherwise the edit is rejected so you can add more " +
         "surrounding context. Matching is literal (no regex). Gated by allowWrite — when " +
         "disabled this tool throws. In sandbox mode the path is confined to the root.",
@@ -100,7 +100,7 @@ function toolDefs(): ToolDef[] {
       name: "krakeycode.bash",
       description:
         "Run a shell command. The result (exitCode, stdout, stderr, timedOut, durationMs) " +
-        "returns on the NEXT beat (not inline). A non-zero exit is NOT an error — you get the " +
+        "returns on the NEXT frame (not inline). A non-zero exit is NOT an error — you get the " +
         "code. Output is capped per stream and the command is hard-killed on timeout " +
         "(timedOut:true, exitCode:-1). Gated by allowCommands — when disabled this tool throws. " +
         "In sandbox mode commands run in the root and are filtered by the allowlist." +
@@ -118,7 +118,7 @@ function toolDefs(): ToolDef[] {
     {
       name: "krakeycode.list_dir",
       description:
-        "List a directory tree. Entries return on the NEXT beat (not inline). depth controls " +
+        "List a directory tree. Entries return on the NEXT frame (not inline). depth controls " +
         "recursion (1 = immediate children, 0 = unlimited; default 1). In sandbox mode the path " +
         "is confined to the root. Listing a missing/unreadable directory fails.",
       parameters: {
@@ -332,9 +332,9 @@ function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
     "\n" +
     `Read/output are capped (reads up to ${cfg.maxReadBytes} bytes, command output up to ${cfg.maxOutputBytes} bytes per stream).\n` +
     "\n" +
-    "IMPORTANT: tool results do NOT come back in the same beat. After a tool call " +
-    "settles, its result appears on the NEXT beat as a user message tagged " +
-    '"krakeycode". Plan for that one-beat delay.\n' +
+    "IMPORTANT: tool results do NOT come back in the same frame. After a tool call " +
+    "settles, its result appears on the NEXT frame as a user message tagged " +
+    '"krakeycode". Plan for that one-frame delay.\n' +
     "\n" +
     `Before building or extending a plugin, read the plugin-authoring guide at ` +
     `"${PLUGIN_DEV_GUIDE}" via krakeycode.read_file.`

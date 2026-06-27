@@ -41,7 +41,7 @@ test("markRead persists 'read' to disk immediately — survives a reload WITHOUT
   s.append({ role: "user", text: "hi", id: 1, status: "sent", at: 1 });
   s.append({ role: "agent", text: "hello", at: 2 });
   await settle(); // REAL timing: the "sent" append flushes to disk FIRST...
-  s.markRead(1); // ...then, beats later, the read flips.
+  s.markRead(1); // ...then, frames later, the read flips.
   await settle(); // let the write-through flush
   // Reload from disk exactly as a fresh boot would — NO compactSync was called.
   const reloaded = await TranscriptStore.load(p);

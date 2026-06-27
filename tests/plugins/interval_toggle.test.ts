@@ -9,7 +9,7 @@ import type { ToolDef } from "../../contracts/llm";
 // Edge tests for the `interval_toggle` plugin — self-pacing tools that drive the
 // per-Agent clock over the action bus:
 //   interval.set  { intervalMs }          -> set_default_interval + set_interval
-//   interval.hold { intervalMs, beats }   -> hold for N clock.tick beats, then
+//   interval.hold { intervalMs, frames }  -> hold for N clock.tick frames, then
 //                                            revert to the base via set_default.
 // ---------------------------------------------------------------------------
 
@@ -88,27 +88,27 @@ test("interval.set: rejects a non-positive / missing interval", async () => {
   await assert.rejects(sys.actions.invoke(SET, {}));
 });
 
-test("interval.hold: applies the held interval now and reverts to base after `beats` ticks", async () => {
+test("interval.hold: applies the held interval now and reverts to base after `frames` ticks", async () => {
   const { sys, setDefaultCalls } = await setup({});
   await sys.actions.invoke(SET, { intervalMs: 15000 }); // base = 15000
-  await sys.actions.invoke(HOLD, { intervalMs: 28800000, beats: 2 });
+  await sys.actions.invoke(HOLD, { intervalMs: 28800000, frames: 2 });
   // applied immediately
   assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 28800000, "hold sets the rhythm to 8h now");
   tick(sys); await settle();
-  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 28800000, "still held after 1st beat");
+  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 28800000, "still held after 1st frame");
   tick(sys); await settle();
-  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 15000, "reverted to base (15000) after 2nd beat");
+  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 15000, "reverted to base (15000) after 2nd frame");
   const len = setDefaultCalls.length;
   tick(sys); await settle();
   assert.equal(setDefaultCalls.length, len, "no further reverts once the hold elapsed");
 });
 
-test("interval.hold: beats defaults to 1 (reverts after a single beat)", async () => {
+test("interval.hold: frames defaults to 1 (reverts after a single frame)", async () => {
   const { sys, setDefaultCalls } = await setup({ baseIntervalMs: 60000 });
   await sys.actions.invoke(HOLD, { intervalMs: 5000 });
   assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 5000, "held at 5000 now");
   tick(sys); await settle();
-  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 60000, "reverts to config base 60000 after 1 beat");
+  assert.equal(setDefaultCalls[setDefaultCalls.length - 1], 60000, "reverts to config base 60000 after 1 frame");
 });
 
 test("teardown: removes the guidance block and unregisters both tools", async () => {

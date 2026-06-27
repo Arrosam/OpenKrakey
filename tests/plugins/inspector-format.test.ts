@@ -724,7 +724,7 @@ test("normalize: payload.data not an object (string) -> d={} -> fallback empty",
 // chooseSent(current, incoming) — authoritative "sent" record selection
 // ===========================================================================
 //
-// The inspector pairs two "prompt.sent" records per beat by corrId: the
+// The inspector pairs two "prompt.sent" records per frame by corrId: the
 // orchestrator's plain `llm.request` ({ data: { context, messages } }, NO
 // tools) and llm-core's `llm.request.sent` ({ data: { request: <LLMRequest> } },
 // WITH tools). They can arrive in EITHER order. chooseSent decides which record

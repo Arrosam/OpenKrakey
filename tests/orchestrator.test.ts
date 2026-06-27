@@ -13,7 +13,7 @@ import type { Message } from "../contracts/llm";
 // ---------------------------------------------------------------------------
 //
 // BLACK-BOX edge tests against the `orchestrator` contract and its event-driven
-// beat. We drive and observe only the public surface:
+// frame. We drive and observe only the public surface:
 //   * the block store (setBlock/getBlock/removeBlock/listBlocks)
 //   * start()/stop()
 //   * the bus: emit CLOCK_TICK (→ a body-less LLM_REQUEST trigger), invoke the
@@ -26,10 +26,10 @@ import type { Message } from "../contracts/llm";
 // So compose behaviour is exercised by INVOKING prompt.compose, not by reading an
 // LLM_REQUEST body.
 //
-// A REAL event-system carries the bus. The clock is a stub: the beat is driven by
+// A REAL event-system carries the bus. The clock is a stub: the frame is driven by
 // the CLOCK_TICK *event*, not the clock object.
 
-/** Minimal no-op clock. The beat is driven via the CLOCK_TICK event, not this. */
+/** Minimal no-op clock. The frame is driven via the CLOCK_TICK event, not this. */
 function stubClock(): Clock {
   return {
     start() {},
@@ -76,7 +76,7 @@ function rejectingRender(message: string): () => Promise<string> {
   };
 }
 
-/** The composed beat body, pulled ON DEMAND via the PROMPT_COMPOSE action. */
+/** The composed frame body, pulled ON DEMAND via the PROMPT_COMPOSE action. */
 interface Composed {
   context: { text: string };
   messages: Message[];
@@ -214,7 +214,7 @@ test("block store: empty-string id is a usable, distinct key", (t) => {
 // Behavior 2 — a tick emits a TRIGGER (no body, no gather)
 // ===========================================================================
 
-test("beat: after start(), one CLOCK_TICK emits exactly one LLM_REQUEST trigger carrying {agentId}", async (t) => {
+test("frame: after start(), one CLOCK_TICK emits exactly one LLM_REQUEST trigger carrying {agentId}", async (t) => {
   const { orc, events } = freshOrc(t);
   const triggers: Array<{ at?: unknown; data?: { agentId?: unknown } }> = [];
   events.on(Events.LLM_REQUEST, (p) => triggers.push(p as never));
@@ -228,7 +228,7 @@ test("beat: after start(), one CLOCK_TICK emits exactly one LLM_REQUEST trigger 
   assert.equal(triggers[0].data!.agentId, "a1", "the trigger stamps this Agent's id (the lock key)");
 });
 
-test("beat: the LLM_REQUEST trigger carries NO composed body (it is body-less)", async (t) => {
+test("frame: the LLM_REQUEST trigger carries NO composed body (it is body-less)", async (t) => {
   const { orc, events } = freshOrc(t);
   let payload: { data?: Record<string, unknown> } | undefined;
   events.on(Events.LLM_REQUEST, (p) => {
@@ -244,7 +244,7 @@ test("beat: the LLM_REQUEST trigger carries NO composed body (it is body-less)",
   assert.equal("messages" in (payload!.data ?? {}), false, "no messages on the trigger");
 });
 
-test("beat: a tick emits NO PROMPT_GATHER (compose happens on demand, not on tick)", async (t) => {
+test("frame: a tick emits NO PROMPT_GATHER (compose happens on demand, not on tick)", async (t) => {
   const { orc, events } = freshOrc(t);
   let gather = 0;
   events.on(Events.PROMPT_GATHER, () => gather++);
@@ -256,7 +256,7 @@ test("beat: a tick emits NO PROMPT_GATHER (compose happens on demand, not on tic
   assert.equal(gather, 0, "a tick alone must not gather/compose — it only triggers");
 });
 
-test("beat: a tick BEFORE start() produces no LLM_REQUEST (not subscribed yet)", async (t) => {
+test("frame: a tick BEFORE start() produces no LLM_REQUEST (not subscribed yet)", async (t) => {
   const { events } = freshOrc(t);
   let count = 0;
   events.on(Events.LLM_REQUEST, () => count++);
@@ -618,7 +618,7 @@ test("dispatch: multiple toolCalls each invoke their corresponding action", asyn
   assert.equal(calls.length, 2);
 });
 
-test("dispatch: a tool call naming an UNregistered action does not throw the beat", async (t) => {
+test("dispatch: a tool call naming an UNregistered action does not throw the frame", async (t) => {
   const { orc, events } = freshOrc(t);
   orc.start();
   assert.doesNotThrow(() =>
@@ -783,7 +783,7 @@ test("lifecycle: stop() is idempotent and safe to call when never started", (t) 
   assert.doesNotThrow(() => orc.stop());
 });
 
-test("lifecycle: stop() then start() resumes beats (re-subscription works)", async (t) => {
+test("lifecycle: stop() then start() resumes frames (re-subscription works)", async (t) => {
   const { orc, events } = freshOrc(t);
   let count = 0;
   events.on(Events.LLM_REQUEST, () => count++);
@@ -964,7 +964,7 @@ test("dispatch: after a malformed return, the NEXT tick still emits LLM_REQUEST 
     data: { content: "", toolCalls: [{ id: "g", name: "tool.good", arguments: {} }] },
   });
   await settle();
-  assert.equal(count, 1, "a malformed return must not break the subsequent beat");
+  assert.equal(count, 1, "a malformed return must not break the subsequent frame");
   assert.equal(goodCalls, 1, "dispatch continues to work after a malformed return");
 });
 

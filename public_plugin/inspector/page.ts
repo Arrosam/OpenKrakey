@@ -6,7 +6,7 @@
  * the registered agents (GET /api/agents), and for the selected agent backfills
  * from /snapshot then live-streams /stream over SSE. Records are deduped by
  * `seq` and routed into four panels: Prompts, Event stream, Logs, and a
- * Per-beat timeline. No external CDN is required (other than the optional Google
+ * Per-frame timeline. No external CDN is required (other than the optional Google
  * Fonts import in the CSS).
  *
  * Shell layout is the "mission-control cockpit" re-skin (ported from the approved
@@ -27,7 +27,7 @@ import { SCRIPT } from "./page.script";
 
 // ── Inline SVG icon set (config-web stroke style: currentColor, 24×24, 1.7) ──
 // Used for the static shell below. The SCRIPT carries the same set for the rows
-// it renders dynamically (event stream / beats).
+// it renders dynamically (event stream / frames).
 const I = {
   stars: `<path d="M12 3c.4 3.6 1.4 4.6 5 5-3.6.4-4.6 1.4-5 5-.4-3.6-1.4-4.6-5-5 3.6-.4 4.6-1.4 5-5z"/><path d="M18.5 13.5c.2 1.7.6 2.1 2 2.3-1.4.2-1.8.6-2 2.3-.2-1.7-.6-2.1-2-2.3 1.4-.2 1.8-.6 2-2.3z"/>`,
   robot: `<rect x="4" y="8" width="16" height="12" rx="2.5"/><path d="M12 8V4.6"/><circle cx="12" cy="3.4" r="1.2"/><circle cx="9.2" cy="13.5" r="1.3"/><circle cx="14.8" cy="13.5" r="1.3"/><path d="M9.5 17h5"/><path d="M2 12.5v3M22 12.5v3"/>`,
@@ -133,12 +133,12 @@ export const PAGE = `<!doctype html>
         <div class="body" id="events"><div class="empty">No events yet.</div></div>
       </section>
 
-      <section class="panel panel--beats" data-view="beats">
+      <section class="panel panel--frames" data-view="frames">
         <header>
-          <span class="g">${icon("layers")}</span><h3>Per-beat timeline</h3><span class="count" id="cBeats">0</span>
+          <span class="g">${icon("layers")}</span><h3>Per-frame timeline</h3><span class="count" id="cFrames">0</span>
           <div class="hc">${pexp()}</div>
         </header>
-        <div class="body" id="beats"><div class="empty">No beats yet.</div></div>
+        <div class="body" id="frames"><div class="empty">No frames yet.</div></div>
       </section>
 
       <section class="panel panel--logs" data-view="logs">

@@ -381,7 +381,7 @@ export async function runInteractiveLoop(
           message: `${label} — pick a field`,
           choices: [
             {
-              name: `Heartbeat interval: ${draft.intervalMs} ms — how often the agent acts unprompted`,
+              name: `Frame interval: ${draft.intervalMs} ms — how often the agent acts unprompted`,
               value: "intervalMs",
             },
             {
@@ -409,7 +409,7 @@ export async function runInteractiveLoop(
       if (field === "intervalMs") {
         const raw = await ask(() =>
           input({
-            message: "heartbeat interval in milliseconds (60000 = 1 minute)",
+            message: "frame interval in milliseconds (60000 = 1 minute)",
             default: String(draft.intervalMs),
             validate: (r) =>
               parsePositiveInt(r) !== undefined
@@ -1065,7 +1065,7 @@ export async function runInteractiveLoop(
     }
 
     // createAgent copies the Default Setting; seed a sensible one if absent
-    // (every available public plugin, 30 s heartbeat). A corrupt default aborts.
+    // (every available public plugin, 30 s frame interval). A corrupt default aborts.
     try {
       await cli.readDefault();
     } catch (err) {

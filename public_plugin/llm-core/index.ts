@@ -1,7 +1,7 @@
 /**
  * Plugin: llm-core — the LLM round-trip, and the per-Agent send LOCK.
  *
- * The orchestrator no longer composes on tick or guards the round-trip. Each beat it
+ * The orchestrator no longer composes on tick or guards the round-trip. Each frame it
  * emits a body-less TRIGGER (`llm.request` = Notify<{agentId}>). llm-core owns
  * serialization:
  *
@@ -65,14 +65,14 @@ function readConfig(raw: unknown): LLMCoreConfig {
 }
 
 /** Per-agentId send lock: at most one in flight; a trigger while busy coalesces. */
-interface BeatState {
+interface FrameState {
   inFlight: boolean;
   triggered: boolean;
 }
 
 const createLLMCore: PluginFactory = (): Plugin => {
   // --- per-Agent state (factory closure = one instance per Agent) -----------
-  const states = new Map<string, BeatState>(); // keyed by the trigger's agentId
+  const states = new Map<string, FrameState>(); // keyed by the trigger's agentId
   let seq = 0; // monotonic corrId for each real dispatch (sent ↔ return)
   let unsubRequest: Unsub | undefined;
   let ctx: PluginContext | undefined;
@@ -86,7 +86,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
   /**
    * The tools to attach to a chat request — read live from the `tool-manager`
    * plugin via `llm.list_tools`. Best-effort: a missing/erroring registry just
-   * yields no tools, never failing the beat.
+   * yields no tools, never failing the frame.
    */
   async function listTools(): Promise<ToolDef[]> {
     if (!ctx!.actions.has("llm.list_tools")) return [];
@@ -129,7 +129,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
     };
 
     // Surface the EXACT request being dispatched so observers (the inspector) can show
-    // what was actually sent — fire-and-forget, same corrId as this beat's llm.return.
+    // what was actually sent — fire-and-forget, same corrId as this frame's llm.return.
     const sent: Request<{ request: LLMRequest }> = { id, at: Date.now(), data: { request: chatReq } };
     ctx!.events.emit(Events.LLM_REQUEST_SENT, sent);
 
@@ -151,7 +151,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
   /** Compose ON DEMAND, then run one round-trip. No-op (logged) if nothing to compose. */
   async function sendOnce(): Promise<void> {
     if (!ctx!.actions.has(Actions.PROMPT_COMPOSE)) {
-      ctx!.log.warn("llm-core: prompt.compose is unavailable — cannot compose this beat");
+      ctx!.log.warn("llm-core: prompt.compose is unavailable — cannot compose this frame");
       return;
     }
     let composed: { context?: ComposedContext; messages?: Message[] };
@@ -180,7 +180,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
    * coalescing a burst into a single extra round-trip. Always clears `inFlight` at the
    * end (even on an error), so the lock can never wedge.
    */
-  async function runLoop(st: BeatState): Promise<void> {
+  async function runLoop(st: FrameState): Promise<void> {
     try {
       do {
         st.triggered = false;

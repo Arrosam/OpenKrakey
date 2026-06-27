@@ -2,13 +2,13 @@
  * Plugin: web-chat — the browser chat channel.
  *
  * A sibling of any other channel behind the same INPUT event seam: a typed browser
- * message becomes `input.message` (and wakes the beat via `clock.fire_now`). OUTPUT is
+ * message becomes `input.message` (and wakes the frame via `clock.fire_now`). OUTPUT is
  * explicit — the agent speaks to this channel ONLY by calling the `web-chat.send_message`
  * tool; the orchestrator dispatches that tool call to this plugin's action, which
  * persists the text and streams it to the browser over SSE. The LLM's raw return
  * (`output.message`) is a private monologue this channel does NOT render. Per message
  * it reports a delivery status — `sent` when the message is appended to the event
- * queue, `read` once the agent's beat has processed it (signalled by `llm.return`).
+ * queue, `read` once the agent's frame has processed it (signalled by `llm.return`).
  *
  * process resource ownership (one process owns one terminal, one port): one
  * `node:http` server per process, owned by a MODULE-LEVEL hub (./hub) shared +
@@ -190,7 +190,7 @@ const createWeb: PluginFactory = (): Plugin => {
 
       // Stream an agent message to THIS agent's browser clients (persist + broadcast).
       // Named distinctly from r.deliver (the opposite-direction INPUT path: emit
-      // input.message + wake the beat) so the two can't be confused in a later edit.
+      // input.message + wake the frame) so the two can't be confused in a later edit.
       const streamAgentMessage = (text: string): void => {
         r.store.append({ role: "agent", text, at: Date.now() });
         broadcast(r, { type: "output", text });
@@ -250,7 +250,7 @@ const createWeb: PluginFactory = (): Plugin => {
       // block). render() maps the live transcript to clean wire turns — a user message →
       // {role:"user"} tagged with the channel via `name`, an agent send → {role:"assistant"}
       // — so the model sees the dialogue without the monologue or tool mechanics. Reads
-      // r.store live each beat; registered once.
+      // r.store live each frame; registered once.
       ctx.setBlock({
         id: CONVERSATION_BLOCK_ID,
         target: "messages",
@@ -301,7 +301,7 @@ const createWeb: PluginFactory = (): Plugin => {
         r.pending = [];
       });
 
-      // A request's return means the beat that carried its messages completed →
+      // A request's return means the frame that carried its messages completed →
       // flip exactly those messages to "read" (not any still-pending ones).
       const offReturn = events.on(Events.LLM_RETURN, (payload) => {
         const reqId = (payload as Reply<LLMResponse> | undefined)?.id;
@@ -312,7 +312,7 @@ const createWeb: PluginFactory = (): Plugin => {
         for (const id of done) broadcast(r, { type: "status", id, status: "read" });
         // Flip the in-memory transcript so a reconnect/replay shows "read", and persist
         // (write-through, so the flips survive a non-graceful exit). markReadMany
-        // coalesces all of THIS beat's flips into a SINGLE rewrite instead of one per id.
+        // coalesces all of THIS frame's flips into a SINGLE rewrite instead of one per id.
         r.store.markReadMany(done);
       });
 

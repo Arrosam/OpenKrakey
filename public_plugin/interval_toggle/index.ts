@@ -2,14 +2,14 @@
  * Plugin: interval_toggle — lets a Krakey Agent pace ITSELF.
  *
  * Two tools, registered with the LLM:
- *   - interval.set  { intervalMs }          — change the stable heartbeat (persists).
- *   - interval.hold { intervalMs, beats }   — run at intervalMs for the next `beats`
- *                                             wake-ups, then auto-revert to the base.
+ *   - interval.set  { intervalMs }          — change the stable frame rate (persists).
+ *   - interval.hold { intervalMs, frames }  — run at intervalMs for the next `frames`
+ *                                             frames, then auto-revert to the base.
  *
  * Both drive the per-Agent clock over the action bus (clock.set_interval /
  * clock.set_default_interval, payload { ms }). A hold counts down on each
  * `clock.tick`; the revert uses set_default_interval (which the clock re-reads on
- * every activation — set_interval would be clobbered by the per-beat reset). All
+ * every activation — set_interval would be clobbered by the per-frame reset). All
  * mutable state lives in the factory closure (R6); the plugin imports only the
  * plugin/llm contracts and the shared action vocabulary (R2).
  */
@@ -23,12 +23,12 @@ const DEFAULT_BASE_MS = 900000;
 const SET_TOOL: ToolDef = {
   name: "interval.set",
   description:
-    "Set your OWN stable heartbeat — how often you wake unprompted. Takes effect immediately and " +
+    "Set your OWN stable frame rate — how often you wake unprompted. Takes effect immediately and " +
     "stays until you change it again. Shorten it while actively working a task; lengthen it when idle. " +
     "intervalMs is in milliseconds (10000 = 10s, 900000 = 15min).",
   parameters: {
     type: "object",
-    properties: { intervalMs: { type: "number", description: "New heartbeat interval in milliseconds (must be > 0)." } },
+    properties: { intervalMs: { type: "number", description: "New frame-rate interval in milliseconds (must be > 0)." } },
     required: ["intervalMs"],
   },
 };
@@ -36,14 +36,14 @@ const SET_TOOL: ToolDef = {
 const HOLD_TOOL: ToolDef = {
   name: "interval.hold",
   description:
-    "Temporarily change your heartbeat for the NEXT `beats` wake-ups, then automatically revert to your " +
-    "base interval. Use it to wait: e.g. hold 28800000 (8h) for 2 beats to pause for the user, or hold " +
-    "10000 (10s) for 5 beats to work quickly then settle back. intervalMs is in milliseconds.",
+    "Temporarily change your frame rate for the NEXT `frames` frames, then automatically revert to your " +
+    "base interval. Use it to wait: e.g. hold 28800000 (8h) for 2 frames to pause for the user, or hold " +
+    "10000 (10s) for 5 frames to work quickly then settle back. intervalMs is in milliseconds.",
   parameters: {
     type: "object",
     properties: {
       intervalMs: { type: "number", description: "Interval to hold, in milliseconds (> 0)." },
-      beats: { type: "number", description: "How many wake-ups to hold it for (>= 1). Default 1." },
+      frames: { type: "number", description: "How many frames to hold it for (>= 1). Default 1." },
     },
     required: ["intervalMs"],
   },
@@ -92,18 +92,18 @@ const createIntervalToggle: PluginFactory = (): Plugin => {
         return { ok: true, intervalMs: ms, mode: "stable" };
       });
 
-      // interval.hold — run at `ms` for `beats` wake-ups, then revert to baseMs.
+      // interval.hold — run at `ms` for `frames` frames, then revert to baseMs.
       const offHold = ctx.actions.register("interval.hold", async (params: unknown) => {
         const ms = readMs(params);
-        const o = (params ?? {}) as { beats?: unknown };
-        const beats = typeof o.beats === "number" && o.beats >= 1 ? Math.floor(o.beats) : 1;
-        remaining = beats;
+        const o = (params ?? {}) as { frames?: unknown };
+        const frames = typeof o.frames === "number" && o.frames >= 1 ? Math.floor(o.frames) : 1;
+        remaining = frames;
         await setDefault(ms);
         await setCurrent(ms);
-        return { ok: true, intervalMs: ms, beats, revertsToMs: baseMs };
+        return { ok: true, intervalMs: ms, frames, revertsToMs: baseMs };
       });
 
-      // Count a hold down on each beat; revert the rhythm when it elapses. Uses
+      // Count a hold down on each frame; revert the rhythm when it elapses. Uses
       // set_default_interval so the clock's per-activation reset adopts baseMs.
       const offTick = ctx.events.on(Events.CLOCK_TICK, () => {
         if (remaining <= 0) return;
@@ -117,9 +117,9 @@ const createIntervalToggle: PluginFactory = (): Plugin => {
       const guidanceText =
         typeof cfg.guidance === "string"
           ? cfg.guidance
-          : "<interval.guidance> You control your own heartbeat. Call interval.set to change your stable " +
+          : "<interval.guidance> You control your own frame rate. Call interval.set to change your stable " +
             "wake interval (shorten it while actively working a task, lengthen it when idle). Call " +
-            "interval.hold to change it for just the next N wake-ups and then auto-revert (e.g. hold a long " +
+            "interval.hold to change it for just the next N frames and then auto-revert (e.g. hold a long " +
             "interval to wait for the user, or a short one to work quickly). Intervals are in milliseconds. </interval.guidance>";
       const priority = typeof cfg.guidancePriority === "number" ? cfg.guidancePriority : 6000;
       ctx.setBlock({ id: "interval.guidance", target: "system", priority, render: () => guidanceText });

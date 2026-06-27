@@ -3,7 +3,7 @@
  *
  * Contributes ONE high-priority context block (stable-prefix convention, 10000+)
  * whose text comes from the Agent's config. It always renders at the top of the
- * composed context so the prompt prefix stays byte-stable across beats — the
+ * composed context so the prompt prefix stays byte-stable across frames — the
  * thing prompt caching keys on. That is the whole job: no events, no actions.
  *
  * The default export is a PluginFactory — the loader calls it once per Agent,

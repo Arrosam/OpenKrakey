@@ -215,7 +215,7 @@ test("results block: resultsPriority overrides the default", async () => {
   assert.equal(resultsBlock(store).priority, 777);
 });
 
-test("guidance text (via block render): names all 5 tools, says read/navigate-only + 'browser' next-beat", async () => {
+test("guidance text (via block render): names all 5 tools, says read/navigate-only + 'browser' next-frame", async () => {
   const { store } = await setup({});
   const text = await renderStr(guidanceBlock(store));
   for (const t of ALL_TOOLS) {
@@ -225,7 +225,7 @@ test("guidance text (via block render): names all 5 tools, says read/navigate-on
   assert.match(text, /\bnavigate\b/i, "guidance must contain the word 'navigate'");
   assert.ok(!/\bclick\b/i.test(text), "guidance must NOT advertise click");
   assert.ok(!/\btype\b/i.test(text), "guidance must NOT advertise type");
-  assert.match(text, /browser/, "guidance must mention the 'browser' result tag / next beat");
+  assert.match(text, /browser/, "guidance must mention the 'browser' result tag / next frame");
 });
 
 test("block render(): guidance + results never throw on an empty plugin", async () => {
@@ -430,7 +430,7 @@ test("result loop: does NOT invoke clock.fire_now for a FOREIGN result", async (
   const { sys, fireNow } = await setup({}, { withClock: true });
   emitToolResult(sys, { name: "web-search.search", ok: true, data: { results: [] } });
   await new Promise((r) => setTimeout(r, 20));
-  assert.equal(fireNow.count, 0, "a foreign tool result must not trigger a beat");
+  assert.equal(fireNow.count, 0, "a foreign tool result must not trigger a frame");
 });
 
 test("result loop: does NOT throw when clock.fire_now is not registered", async () => {
@@ -643,7 +643,7 @@ for (const wrong of [
 // 9. config.ts — buildDefaultGuidance  (positive)
 // ===========================================================================
 
-test("buildDefaultGuidance: mentions all 5 tools, read/navigate-only, next-beat 'browser'", () => {
+test("buildDefaultGuidance: mentions all 5 tools, read/navigate-only, next-frame 'browser'", () => {
   const m = cfgMod();
   const cfg = m.readConfig({});
   const text = String(m.buildDefaultGuidance(cfg));
@@ -654,7 +654,7 @@ test("buildDefaultGuidance: mentions all 5 tools, read/navigate-only, next-beat 
   assert.match(text, /\bnavigate\b/i, "guidance contains 'navigate'");
   assert.ok(!/\bclick\b/i.test(text), "guidance must NOT advertise click");
   assert.ok(!/\btype\b/i.test(text), "guidance must NOT advertise type");
-  assert.match(text, /next beat/i, "guidance mentions results arrive on the next beat");
+  assert.match(text, /next frame/i, "guidance mentions results arrive on the next frame");
   assert.match(text, /browser/, "guidance mentions the 'browser' tag");
 });
 

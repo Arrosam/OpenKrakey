@@ -88,7 +88,7 @@ test.after(() => {
 // and fire_now (FIRED:<id>), and runs a stdin command loop:
 //   out <id> <text>   -> invoke web-chat.send_message{text} (the agent's explicit send) on <id>'s bus
 //   raw <id> <text>   -> emit a bare output.message{text} (the monologue hook; web ignores it)
-//   req <id> <reqId>  -> emit llm.request.sent{id:reqId} on <id>'s bus (a dispatched beat request)
+//   req <id> <reqId>  -> emit llm.request.sent{id:reqId} on <id>'s bus (a dispatched frame request)
 //   ret <id> <reqId>  -> emit llm.return{id:reqId} on <id>'s bus (that request's return)
 //   down <id>         -> teardown that agent's instance (TORE_DOWN:<id>)
 //   quit              -> teardown all + exit
@@ -549,10 +549,10 @@ test("web-chat: POST /api/agents/:id/message emits input.message + fire_now on T
     const payload = JSON.parse(got!.slice("GOT_INPUT:alice:".length));
     assert.equal(payload.data.text, "hello alice", "text delivered verbatim");
     assert.equal(payload.data.channel, "web", "channel tagged 'web'");
-    assert.ok(c.lines.includes("FIRED:alice"), "the message woke alice's beat (fire_now)");
+    assert.ok(c.lines.includes("FIRED:alice"), "the message woke alice's frame (fire_now)");
 
     assert.ok(!c.lines.some((l) => l.startsWith("GOT_INPUT:bob:")), "bob's bus must NOT receive alice's message (no fan-out)");
-    assert.ok(!c.lines.includes("FIRED:bob"), "bob's beat must not fire for a message addressed to alice");
+    assert.ok(!c.lines.includes("FIRED:bob"), "bob's frame must not fire for a message addressed to alice");
   } finally {
     await c.close();
   }
@@ -1076,7 +1076,7 @@ test("web-chat: config `guidance` + `guidancePriority` override the default guid
 // Scenario 4 — sent/read lifecycle: POST -> "sent"; llm.return -> "read"
 // ===========================================================================
 
-test("web-chat: a message is 'sent' on POST then flips to 'read' when the beat completes (llm.return)", async () => {
+test("web-chat: a message is 'sent' on POST then flips to 'read' when the frame completes (llm.return)", async () => {
   const c = await startChild(["alice"]);
   try {
     assertUp(c);
@@ -1097,7 +1097,7 @@ test("web-chat: a message is 'sent' on POST then flips to 'read' when the beat c
     assert.ok(!a.events.some((x) => x.type === "status" && x.id === id && x.status === "read"),
       "the message must not be 'read' before the agent processes it");
 
-    // The beat that folded the message in: its request carries the message, then
+    // The frame that folded the message in: its request carries the message, then
     // that request returns.
     c.send("req alice R1");
     c.send("ret alice R1");
@@ -1111,7 +1111,7 @@ test("web-chat: a message is 'sent' on POST then flips to 'read' when the beat c
 
 test("web-chat: read is tied to the request that carried the message — a stale earlier return does NOT mark it read", async () => {
   // The race: a timer-driven request is already outstanding when the browser posts
-  // a message (orchestrator beats end at llm.request, so returns can overlap and
+  // a message (orchestrator frames end at llm.request, so returns can overlap and
   // arrive out of order). The EARLIER request's return — composed before the
   // message existed — must NOT mark the new message read.
   const c = await startChild(["alice"]);
@@ -1538,7 +1538,7 @@ test("web-chat: multiple messages replay in strict chronological order [user m1,
 // event above: each replayed message is
 //     { role:"user"|"agent", text:string, id?:number, status?:string }
 // so a persisted USER message carries BOTH its numeric `id` and its `status`
-// ("sent" until read, "read" after the beat that carried it completes).
+// ("sent" until read, "read" after the frame that carried it completes).
 //
 // FIX M-9 — `read` status must be PERSISTED:
 //   Today the llm.return handler broadcasts { status:"read" } to live clients but
@@ -1576,7 +1576,7 @@ test("web-chat: read status survives a clean restart (a read message replays as 
   // One FIXED root shared by both child processes (per-agent subdirs live under it).
   const fixed = fs.mkdtempSync(path.join(TMP, "read-persist-"));
 
-  // --- child #1: post a message, drive its beat to completion so it is marked
+  // --- child #1: post a message, drive its frame to completion so it is marked
   // read LIVE, confirm the live "read" status, then quit (teardown persists). ---
   const c1 = await startChild(["alice"], { dataDir: fixed });
   try {
@@ -1600,7 +1600,7 @@ test("web-chat: read status survives a clean restart (a read message replays as 
       "the message is acked 'sent' live",
     );
 
-    // ...then the beat that carried it (its llm.request) returns -> flips to "read".
+    // ...then the frame that carried it (its llm.request) returns -> flips to "read".
     c1.send("req alice R1");
     c1.send("ret alice R1");
     assert.ok(

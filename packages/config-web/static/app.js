@@ -571,7 +571,7 @@ views.overview = (main) => {
   const cards = [
     { v: "wizard", g: "stars", t: "Guided setup", d: "Connect a service and stand up your first agent — covering every plugin & tool.", meta: ["onboarding"] },
     { v: "services", g: "server", t: "AI services", d: "LLM providers, endpoints & API keys. Provider type drives the rest of the form.", meta: [`${serviceNames().length} service`] },
-    { v: "agents", g: "robot", t: "Agents", d: "Per-agent heartbeat, plugins and every plugin's own settings.", meta: [`${Object.keys(state.agents).length} agents`] },
+    { v: "agents", g: "robot", t: "Agents", d: "Per-agent frame loop, plugins and every plugin's own settings.", meta: [`${Object.keys(state.agents).length} agents`] },
     { v: "default", g: "sliders", t: "Default settings", d: "The template each new agent copies. Same editor, no id.", meta: ["template"] },
   ];
   for (const c of cards) {
@@ -703,7 +703,7 @@ function editService(name) {
 /* Agents list */
 views.agents = (main) => {
   topbar(main, ["OpenKrakey", "Agents"], 'Your <span class="accent">agents</span>',
-    "Each agent is a personal folder under agents/. Heartbeat, plugins, and every plugin's own settings.",
+    "Each agent is a personal folder under agents/. Frame loop, plugins, and every plugin's own settings.",
     [btn('<span class="k">+</span> New agent', "primary", () => createAgent())]);
   const list = el("div", "grid stagger");
   for (const id of Object.keys(state.agents)) {
@@ -789,7 +789,7 @@ function naAgent(panel) {
   const body = el("div", "wz-body");
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
+    { key: "intervalMs", label: "Frame interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -804,12 +804,12 @@ function naAgent(panel) {
 
 function naLLM(panel) {
   panel.innerHTML = `<span class="star">${icon("stars")}</span><h2>Which AI service?</h2>` +
-    `<p class="lede">Pick the LLM this agent talks to through <b>llm-core</b> — or <b>No LLM</b> for an agent that runs its heartbeat with no brain (llm-core stays off). Valid either way.</p>`;
+    `<p class="lede">Pick the LLM this agent talks to through <b>llm-core</b> — or <b>No LLM</b> for an agent that runs its frame loop with no brain (llm-core stays off). Valid either way.</p>`;
   const body = el("div", "wz-body");
   const host = el("div", "pick");
   const opts = [
     ...serviceNames().map((n) => ({ mode: "service", value: n, title: n, sub: state.services[n] && state.services[n].provider ? `provider · ${state.services[n].provider}` : "configured AI service", ic: "server" })),
-    { mode: "none", value: "", title: "No LLM", sub: "no llm-core — heartbeat only", ic: "x" },
+    { mode: "none", value: "", title: "No LLM", sub: "no llm-core — frame loop only", ic: "x" },
   ];
   const draw = () => {
     host.innerHTML = "";
@@ -870,7 +870,7 @@ function naReview(panel) {
     `<div class="taglist" style="margin-top:2px">` +
     (nwz.plugins.length
       ? nwz.plugins.map((p) => { const m = PLUGINS.find((x) => x.id === p); return `<span class="tag">${m ? `<span class="tag-ic">${icon(m.icon)}</span>` : ""}${esc(m ? m.name : p)}</span>`; }).join("")
-      : `<span class="os">No plugins — a bare agent (still completes a beat).</span>`) + `</div>`;
+      : `<span class="os">No plugins — a bare agent (still completes a frame).</span>`) + `</div>`;
   body.appendChild(cap);
   panel.appendChild(body);
 
@@ -1003,14 +1003,14 @@ const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
   plugins: ["llm-core", "tool-manager", "persona", "system-prompt", "web-chat", "krakeycode"],
-  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. You run on a heartbeat — each beat you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful.", intervalMs: 30000 },
+  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. You run on a frame loop — each frame you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful.", intervalMs: 30000 },
 };
 
 views.wizard = (main) => {
   wz.step = 0;
   wz.service.provider = (PROVIDERS[0] || {}).id || "anthropic";
   // Seed the agent defaults from the live Default Setting so the wizard FOLLOWS
-  // it (heartbeat, plugin set, persona) rather than stale hardcoded values.
+  // it (frame loop, plugin set, persona) rather than stale hardcoded values.
   const ds = state.defaultSetting || {};
   if (typeof ds.intervalMs === "number") wz.agent.intervalMs = ds.intervalMs;
   if (ds.config && ds.config.persona && typeof ds.config.persona.text === "string") {
@@ -1044,13 +1044,13 @@ function drawWizard(main) {
 function wzWelcome(panel) {
   panel.innerHTML = `<div class="welcome-art">${icon("stars", "wa-ic")}<span>KRAKEY Config</span></div>` +
     `<h2>Let's wake up an agent.</h2>` +
-    `<p class="lede">OpenKrakey runs on a <b>heartbeat</b>: every few seconds your agent wakes, composes its whole context, calls the LLM, and acts. This sets up one in two steps — an AI service, then the agent itself.</p>`;
+    `<p class="lede">OpenKrakey runs on a <b>frame loop</b>: every few seconds your agent wakes, composes its whole context, calls the LLM, and acts. This sets up one in two steps — an AI service, then the agent itself.</p>`;
   const feat = el("div", "feat");
   [
     ["cpu", "Any provider", "Anthropic, OpenAI-compatible, local — your key stays in core."],
     ["chat", "Browser chat", "Talk to your agent from a web page out of the box."],
     ["code", "Real tools", "Coding tools, web search and browser control, opt-in."],
-    ["activity", "Observable", "An inspector panel shows every beat as it happens."],
+    ["activity", "Observable", "An inspector panel shows every frame as it happens."],
   ].forEach(([g, t, d]) => {
     const fi = el("div", "fi");
     fi.innerHTML = `<span class="g">${icon(g)}</span><div><div class="ft">${t}</div><div class="fd">${d}</div></div>`;
@@ -1116,7 +1116,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
+    { key: "intervalMs", label: "Frame interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);

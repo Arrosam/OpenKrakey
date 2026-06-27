@@ -68,7 +68,7 @@
     "orchestrator": {
       "zone": "core",
       "path": "packages/orchestrator",
-      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven beat: gather (plugins refresh blocks) → compose → llm.request{context,messages}. compose splits blocks by target: system blocks → system prompt text (priority DESC, wrapped <label>), message blocks → messages array (groups concatenated by priority DESC, within-group order kept; the conversation is one such block). Dispatch tool calls from llm.return.",
+      "description": "Per-Agent conductor; CONTAINS the context-buffer. Event-driven frame: gather (plugins refresh blocks) → compose → llm.request{context,messages}. compose splits blocks by target: system blocks → system prompt text (priority DESC, wrapped <label>), message blocks → messages array (groups concatenated by priority DESC, within-group order kept; the conversation is one such block). Dispatch tool calls from llm.return.",
       "depends_on_contracts": [
         "event-system",
         "clock",
@@ -243,7 +243,7 @@
     "inspector": {
       "zone": "plugins",
       "path": "public_plugin/inspector",
-      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-beat by request id. Emits nothing — never perturbs the observed agent.",
+      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-frame by request id. Emits nothing — never perturbs the observed agent.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -259,7 +259,7 @@
     "krakeycode": {
       "zone": "plugins",
       "path": "public_plugin/krakeycode",
-      "description": "Coding-agent toolkit: gives a Krakey Agent real computer-use tools — krakeycode.read_file / write_file / edit_file (exact-substring replace) / bash (shell via cp.spawn; SIGKILL timeout; byte-capped output) / list_dir — declared as ToolDefs via llm.register_tool. Dual-mode security (local default | sandbox: root-confined + optional command allowlist; command timeout cap in both). Contributes a krakeycode.guidance SYSTEM block (priority 7000) describing the tools + current mode + pointing Krakey at the docs/PLUGIN_DEV.md authoring guide, and a krakeycode.results MESSAGES block (priority 4000) that folds tool.result outcomes back into the conversation on the next beat (plain user/name:krakeycode turns, not tool-role pairing) and nudges clock.fire_now.",
+      "description": "Coding-agent toolkit: gives a Krakey Agent real computer-use tools — krakeycode.read_file / write_file / edit_file (exact-substring replace) / bash (shell via cp.spawn; SIGKILL timeout; byte-capped output) / list_dir — declared as ToolDefs via llm.register_tool. Dual-mode security (local default | sandbox: root-confined + optional command allowlist; command timeout cap in both). Contributes a krakeycode.guidance SYSTEM block (priority 7000) describing the tools + current mode + pointing Krakey at the docs/PLUGIN_DEV.md authoring guide, and a krakeycode.results MESSAGES block (priority 4000) that folds tool.result outcomes back into the conversation on the next frame (plain user/name:krakeycode turns, not tool-role pairing) and nudges clock.fire_now.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -273,7 +273,7 @@
     "web-search": {
       "zone": "plugins",
       "path": "public_plugin/web-search",
-      "description": "Web-search tool: gives a Krakey Agent a `web-search.search` tool (registered via llm.register_tool) that fetches results over native fetch with an AbortController timeout. Backend waterfall: an explicit config `instanceUrl` (a SearXNG instance) is authoritative when set; otherwise a local SearXNG (http://localhost:8080) is tried FIRST, then optional public SearXNG instances (publicInstances, default EMPTY — public SearXNG JSON is unreliable), then a keyless DuckDuckGo Lite fallback (useDuckDuckGoFallback, default true; HTML scraped) — the first backend returning results wins, all-fail throws. NEVER spawns containers; no persistence. Contributes a `web-search.guidance` SYSTEM block (priority 6000) and a `web-search.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:web-search turns; on failure it tells the agent to surface the error to the user) and nudging clock.fire_now.",
+      "description": "Web-search tool: gives a Krakey Agent a `web-search.search` tool (registered via llm.register_tool) that fetches results over native fetch with an AbortController timeout. Backend waterfall: an explicit config `instanceUrl` (a SearXNG instance) is authoritative when set; otherwise a local SearXNG (http://localhost:8080) is tried FIRST, then optional public SearXNG instances (publicInstances, default EMPTY — public SearXNG JSON is unreliable), then a keyless DuckDuckGo Lite fallback (useDuckDuckGoFallback, default true; HTML scraped) — the first backend returning results wins, all-fail throws. NEVER spawns containers; no persistence. Contributes a `web-search.guidance` SYSTEM block (priority 6000) and a `web-search.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next frame (plain user/name:web-search turns; on failure it tells the agent to surface the error to the user) and nudging clock.fire_now.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -287,7 +287,7 @@
     "browser": {
       "zone": "plugins",
       "path": "public_plugin/browser",
-      "description": "Browser-control tool: gives a Krakey Agent READ+NAVIGATE control of a Krakey-MANAGED Chrome via raw Chrome DevTools Protocol over Node's global WebSocket (ZERO deps). Chrome is spawned via child_process with --remote-debugging-port + a dedicated --user-data-dir profile under dataDir, launched LAZILY on the first tool call, reused, relaunched on crash, killed on teardown. Tools (registered via llm.register_tool): browser.navigate, browser.read_page (text|html, char-capped), browser.list_tabs (no auto-launch), browser.activate_tab, browser.screenshot (PNG written to dataDir/screenshots, returns path — the LLM envelope is text-only). NO click/type/eval. One CDP WebSocket multiplexes commands by id with per-command timeouts + flat sessions. Contributes a `browser.guidance` SYSTEM block (priority 5500) and a `browser.results` MESSAGES block (priority 3000) folding tool.result outcomes back as plain user/name:browser turns on the next beat + nudging clock.fire_now. Mirrors the searxng/krakeycode tool-plugin shape.",
+      "description": "Browser-control tool: gives a Krakey Agent READ+NAVIGATE control of a Krakey-MANAGED Chrome via raw Chrome DevTools Protocol over Node's global WebSocket (ZERO deps). Chrome is spawned via child_process with --remote-debugging-port + a dedicated --user-data-dir profile under dataDir, launched LAZILY on the first tool call, reused, relaunched on crash, killed on teardown. Tools (registered via llm.register_tool): browser.navigate, browser.read_page (text|html, char-capped), browser.list_tabs (no auto-launch), browser.activate_tab, browser.screenshot (PNG written to dataDir/screenshots, returns path — the LLM envelope is text-only). NO click/type/eval. One CDP WebSocket multiplexes commands by id with per-command timeouts + flat sessions. Contributes a `browser.guidance` SYSTEM block (priority 5500) and a `browser.results` MESSAGES block (priority 3000) folding tool.result outcomes back as plain user/name:browser turns on the next frame + nudging clock.fire_now. Mirrors the searxng/krakeycode tool-plugin shape.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -301,7 +301,7 @@
     "memory-note": {
       "zone": "plugins",
       "path": "public_plugin/memory-note",
-      "description": "Krakey's private long-term notebook: gives a Krakey Agent `memory-note.remember` (save a note with a kind — goal|keep-in-mind|thought|finding — and an importance 1-5) and `memory-note.forget` (drop a note by id), declared as ToolDefs via llm.register_tool. The whole notebook is re-rendered into context EVERY beat as a `memory-note` SYSTEM block (priority 8500, grouped by kind, importance DESC) so the agent keeps it in mind; a config-overridable `memory-note.guidance` SYSTEM block (priority 6700) teaches the tools. Data-carrying, so private-by-default (per-agent notes.json under dataDir, bounded by maxNotes with LEAST-IMPORTANT eviction when full). No results block / no clock.fire_now — writes are synchronous and the notes block is itself the feedback.",
+      "description": "Krakey's private long-term notebook: gives a Krakey Agent `memory-note.remember` (save a note with a kind — goal|keep-in-mind|thought|finding — and an importance 1-5) and `memory-note.forget` (drop a note by id), declared as ToolDefs via llm.register_tool. The whole notebook is re-rendered into context EVERY frame as a `memory-note` SYSTEM block (priority 8500, grouped by kind, importance DESC) so the agent keeps it in mind; a config-overridable `memory-note.guidance` SYSTEM block (priority 6700) teaches the tools. Data-carrying, so private-by-default (per-agent notes.json under dataDir, bounded by maxNotes with LEAST-IMPORTANT eviction when full). No results block / no clock.fire_now — writes are synchronous and the notes block is itself the feedback.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -328,7 +328,7 @@
     "interval_toggle": {
       "zone": "plugins",
       "path": "public_plugin/interval_toggle",
-      "description": "Self-pacing tools: interval.set (change the stable heartbeat) + interval.hold (run a different interval for the next N beats, then auto-revert to the base). Drives the per-Agent clock over the action bus (clock.set_interval / clock.set_default_interval, payload { ms }); counts a hold down on clock.tick and reverts via set_default_interval (set_interval is clobbered by the clock's per-beat reset). Contributes an interval.guidance SYSTEM block.",
+      "description": "Self-pacing tools: interval.set (change the stable frame rate) + interval.hold (run a different interval for the next N frames, then auto-revert to the base). Drives the per-Agent clock over the action bus (clock.set_interval / clock.set_default_interval, payload { ms }); counts a hold down on clock.tick and reverts via set_default_interval (set_interval is clobbered by the clock's per-frame reset). Contributes an interval.guidance SYSTEM block.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
