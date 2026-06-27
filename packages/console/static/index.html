@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenKrakey · Krakey Console</title>
-  <meta name="description" content="The unified Krakey Console: a persistent top nav-bar + a Dashboard landing that switches between the three surfaces (Config, Chat, Inspector), each embedded by URL." />
+  <meta name="description" content="The unified Krakey Console: a persistent top nav-bar + a Dashboard landing that switches between the three services (Config, Chat, Inspector), each embedded by URL." />
   <!--__SURFACES__-->
   <style>
 /* ============================================================================
@@ -176,10 +176,12 @@ body {
 .topnav .foot .status { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
 .topnav .foot .status .dot {
   width: 8px; height: 8px; border-radius: 50%; flex: none;
-  background: var(--mint); box-shadow: 0 0 10px var(--mint);
-  animation: pulse 2.4s ease-in-out infinite;
+  background: var(--faint); box-shadow: none;
+  transition: background .2s, box-shadow .2s;
 }
-.topnav .foot p { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.3; white-space: nowrap; }
+.topnav .foot .status .dot.up { background: var(--mint); box-shadow: 0 0 10px var(--mint); animation: pulse 2.4s ease-in-out infinite; }
+.topnav .foot .status .dot.partial { background: var(--amber); box-shadow: 0 0 10px var(--amber); animation: pulse 2.4s ease-in-out infinite; }
+.topnav .foot .status .dot.down { background: var(--faint); box-shadow: none; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* ── Main column — full width, below the top nav-bar ───────────────────────*/
@@ -401,7 +403,6 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
     width: auto; padding: 0; border-right: 0; align-self: center;
   }
   .brand .tag { display: none; }
-  .topnav .foot p { display: none; }
   .main.is-dashboard { padding: 28px 22px 70px; }
   .grid.cols-3 { grid-template-columns: 1fr; }
   .hero { flex-direction: column; gap: 22px; }
@@ -512,6 +513,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       } catch {
         reachable[key] = false;
       }
+      paintConsoleStatus();
       return reachable[key];
     }
 
@@ -536,8 +538,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
           <button data-nav="inspector"><span class="ico">${icon("activity")}</span> Inspector <span class="count">live</span></button>
         </div>
         <div class="foot">
-          <div class="status"><span class="dot"></span> console online</div>
-          <p>one shell · three surfaces</p>
+          <div class="status"><span class="dot"></span> <span id="cstatus-text">checking…</span></div>
         </div>
       </nav>
       <main class="main" id="main"></main>`;
@@ -575,7 +576,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       if (quickBtn) quickBtn.onclick = quickSetup;
 
       // surface cards — each shows a per-surface connected/not-connected dot
-      main.appendChild(el("div", "group-label", "Open a surface"));
+      main.appendChild(el("div", "group-label", "Open a service"));
       const grid = el("div", "grid cols-3 stagger");
       for (const key of ["config", "chat", "inspector"]) {
         const s = SURFACES[key];
@@ -600,7 +601,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
         ["sliders", `Open <b>Config</b> to set up your AI services and agents`, "config", "start here"],
         ["chat", `Open <b>Chat</b> to talk to your agents from the browser`, "chat", "needs a running agent"],
         ["activity", `Open <b>Inspector</b> to watch frames live`, "inspector", "needs a running agent"],
-        ["server", `Surfaces run separately — see the console README`, "console", "docs"],
+        ["server", `Services run separately — see the console README`, "console", "docs"],
       ];
       const list = el("div", "activity stagger");
       for (const [ic, text, src, when] of acts) {
@@ -650,6 +651,25 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       badge.innerHTML = `<span class="sdot ${cls}"></span>${lbl}`;
     }
 
+    /* Reflect the live services' aggregate reachability in the top-bar status.
+       The console page only loads when the console itself is up, so the only
+       meaningful, VARIABLE signal is how many of the three services answer. */
+    function paintConsoleStatus() {
+      const dot = $(".topnav .foot .status .dot", app);
+      const txt = $("#cstatus-text", app);
+      if (!dot || !txt) return;
+      const vals = ["config", "chat", "inspector"].map((k) => reachable[k]);
+      const up = vals.filter((v) => v === true).length;
+      const known = vals.filter((v) => v !== null).length;
+      let cls = "", label;
+      if (known === 0) label = "checking…";
+      else if (up === 3) { cls = "up"; label = "all services online"; }
+      else if (up === 0) { cls = "down"; label = "services offline"; }
+      else { cls = "partial"; label = up + "/3 services"; }
+      dot.className = "dot" + (cls ? " " + cls : "");
+      txt.textContent = label;
+    }
+
     /* ── Surface view (reachable → kept-alive iframe; down → "Not connected") ─
        Each surface host holds BOTH an iframe and a "Not connected" panel; we
        show whichever the latest probe warrants. Iframes are kept ALIVE across
@@ -664,7 +684,7 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       host.dataset.surface = key;
 
       const frame = el("iframe", "surf-frame");
-      frame.title = s.label + " surface";
+      frame.title = s.label + " service";
       frame.style.display = "none"; // hidden until a probe says the server is up
       frame.dataset.src = s.src; // lazy — real src set once reachable
       host.appendChild(frame);
