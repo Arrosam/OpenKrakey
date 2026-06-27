@@ -52,6 +52,14 @@ interface LLMCoreConfig {
   communicator?: string;
   temperature?: number;
   maxTokens?: number;
+  /** Override the model's context-window size (tokens) used for the overflow budget. */
+  contextLimitTokens?: number;
+  /** Rough chars-per-token ratio for the prompt-size estimate (default 4). */
+  charsPerToken?: number;
+  /** Max prompt-shrink rounds per frame when overflowing the budget (default 3). */
+  maxReduceRounds?: number;
+  /** Tokens held back from the window as headroom when computing the budget (default 200). */
+  safetyTokens?: number;
 }
 
 /** Safe view of `ctx.config` — only the keys of the right runtime type survive. */
@@ -61,7 +69,40 @@ function readConfig(raw: unknown): LLMCoreConfig {
   if (typeof c.communicator === "string") out.communicator = c.communicator;
   if (typeof c.temperature === "number") out.temperature = c.temperature;
   if (typeof c.maxTokens === "number") out.maxTokens = c.maxTokens;
+  if (typeof c.contextLimitTokens === "number" && c.contextLimitTokens > 0)
+    out.contextLimitTokens = c.contextLimitTokens;
+  if (typeof c.charsPerToken === "number" && c.charsPerToken > 0)
+    out.charsPerToken = c.charsPerToken;
+  if (typeof c.maxReduceRounds === "number" && c.maxReduceRounds >= 0)
+    out.maxReduceRounds = c.maxReduceRounds;
+  if (typeof c.safetyTokens === "number" && c.safetyTokens >= 0)
+    out.safetyTokens = c.safetyTokens;
   return out;
+}
+
+/**
+ * Rough token estimate of an about-to-be-sent body: the composed context text +
+ * each message's text content (string content and `text` ContentParts; non-text
+ * parts ignored) + the serialized tool definitions, divided by `charsPerToken`.
+ */
+function estimateTokens(
+  context: ComposedContext,
+  turns: Message[],
+  toolDefs: ToolDef[],
+  charsPerToken: number,
+): number {
+  let chars = context.text.length;
+  for (const m of turns) {
+    if (typeof m.content === "string") {
+      chars += m.content.length;
+    } else if (Array.isArray(m.content)) {
+      for (const part of m.content) {
+        if (part.type === "text") chars += part.text.length;
+      }
+    }
+  }
+  if (toolDefs.length > 0) chars += JSON.stringify(toolDefs).length;
+  return Math.ceil(chars / charsPerToken);
 }
 
 /** Per-agentId send lock: at most one in flight; a trigger while busy coalesces. */
@@ -98,11 +139,16 @@ const createLLMCore: PluginFactory = (): Plugin => {
     }
   }
 
-  /** One full round-trip for an already-composed body, under corrId `id`. */
-  async function roundTrip(id: string, context: ComposedContext, turns: Message[]): Promise<void> {
-    const communicator: Communicator | undefined = config.communicator
+  /** Resolve the configured communicator (or the first chat-capable one). */
+  function resolveCommunicator(): Communicator | undefined {
+    return config.communicator
       ? ctx!.llm.get(config.communicator)
       : ctx!.llm.get(ctx!.llm.withCapability("chat")[0]);
+  }
+
+  /** One full round-trip for an already-composed body, under corrId `id`. */
+  async function roundTrip(id: string, context: ComposedContext, turns: Message[]): Promise<void> {
+    const communicator: Communicator | undefined = resolveCommunicator();
 
     if (!communicator || typeof communicator.chat !== "function") {
       const error = config.communicator
@@ -154,22 +200,73 @@ const createLLMCore: PluginFactory = (): Plugin => {
       ctx!.log.warn("llm-core: prompt.compose is unavailable — cannot compose this frame");
       return;
     }
-    let composed: { context?: ComposedContext; messages?: Message[] };
-    try {
-      composed = (await ctx!.actions.invoke(Actions.PROMPT_COMPOSE)) as {
-        context?: ComposedContext;
-        messages?: Message[];
-      };
-    } catch (err) {
-      ctx!.log.warn("llm-core: prompt.compose failed: " + String(err));
-      return;
+
+    // Resolve the communicator up front (same lookup roundTrip uses) so we can read its
+    // declared context length for the overflow budget.
+    const communicator = resolveCommunicator();
+
+    // The budget is the model's context window minus reserved output tokens minus a
+    // safety margin. `contextLength <= 0` (or absent) is inert → no budget, no loop.
+    const cl = config.contextLimitTokens ?? communicator?.contextLength;
+    const budget =
+      typeof cl === "number" && cl > 0
+        ? cl - (config.maxTokens ?? 0) - (config.safetyTokens ?? 200)
+        : undefined;
+
+    const compose = async (): Promise<{ context: ComposedContext; turns: Message[] } | undefined> => {
+      let composed: { context?: ComposedContext; messages?: Message[] };
+      try {
+        composed = (await ctx!.actions.invoke(Actions.PROMPT_COMPOSE)) as {
+          context?: ComposedContext;
+          messages?: Message[];
+        };
+      } catch (err) {
+        ctx!.log.warn("llm-core: prompt.compose failed: " + String(err));
+        return undefined;
+      }
+      const context = composed?.context;
+      if (!context || typeof context.text !== "string") {
+        ctx!.log.warn("llm-core: prompt.compose returned no usable context");
+        return undefined;
+      }
+      const turns: Message[] = Array.isArray(composed.messages) ? composed.messages : [];
+      return { context, turns };
+    };
+
+    const initial = await compose();
+    if (!initial) return;
+    let { context, turns } = initial;
+
+    const maxReduceRounds = config.maxReduceRounds ?? 3;
+    // SKIP the overflow loop entirely when there's no budget or shrinking is disabled —
+    // CURRENT BEHAVIOR: no event, single compose, single chat.
+    if (budget !== undefined && maxReduceRounds !== 0) {
+      const charsPerToken = config.charsPerToken ?? 4;
+      const toolDefs = await listTools(); // fetch ONCE — tool defs are stable this frame
+      let lastEstimate: number | undefined;
+      for (let round = 1; round <= maxReduceRounds; round++) {
+        const est = estimateTokens(context, turns, toolDefs, charsPerToken);
+        if (est <= budget) break; // fits — STRICT overflow is est > budget
+        if (est === lastEstimate) break; // no progress — reactors can't shrink further
+        lastEstimate = est;
+        const notify: Notify<{ estimatedTokens: number; limit: number; overBy: number; round: number }> = {
+          at: Date.now(),
+          data: { estimatedTokens: est, limit: budget, overBy: est - budget, round },
+        };
+        ctx!.events.emit(Events.CONTEXT_FULL, notify);
+        const next = await compose();
+        if (!next) return;
+        ({ context, turns } = next);
+      }
+      const finalEst = estimateTokens(context, turns, toolDefs, charsPerToken);
+      if (finalEst > budget) {
+        ctx!.log.warn(
+          `llm-core: prompt still over budget after ${maxReduceRounds} shrink round(s) ` +
+            `(~${finalEst} > ${budget} tokens) — sending best-effort`,
+        );
+      }
     }
-    const context = composed?.context;
-    if (!context || typeof context.text !== "string") {
-      ctx!.log.warn("llm-core: prompt.compose returned no usable context");
-      return;
-    }
-    const turns: Message[] = Array.isArray(composed.messages) ? composed.messages : [];
+
     if (!ctx) return; // torn down while composing — emit nothing
     await roundTrip(String(++seq), context, turns);
   }
