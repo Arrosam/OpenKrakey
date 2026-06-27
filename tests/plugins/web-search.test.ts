@@ -1071,3 +1071,288 @@ test("helpers.truncateSnippet: boundary — at/under cap unchanged, over cap get
   assert.ok(over.length <= 4, "over the cap is truncated to ~cap (+ ellipsis)");
   assert.match(over, /…$/, "over-cap result ends with an ellipsis");
 });
+
+// ===========================================================================
+// 17. context-pressure shedding  (Events.CONTEXT_FULL -> drop oldest entries)
+// ===========================================================================
+//
+// NEW behavior. When llm-core finds the assembled prompt over the model's
+// context budget it emits `context.full` SYNCHRONOUSLY (fire-and-forget) so
+// MESSAGES-block plugins shrink BEFORE the immediately-following re-compose.
+//
+// Contract (shared/actions EventPayloads["context.full"]):
+//   payload = Notify<{ estimatedTokens; limit; overBy; round }>
+//           = { at: number, data: { estimatedTokens, limit, overBy, round } }
+//   `round` increments with each successive emission within one frame so
+//   reactors can shed PROPORTIONALLY.
+//
+// Spec for web-search specifically:
+//   - on `context.full {round:R}` it SYNCHRONOUSLY drops the R OLDEST entries
+//     from its `web-search.results` ring (oldest-first); render() then returns
+//     fewer messages. `round:0` is a no-op.
+//   - on `Events.LLM_RETURN` the shed-pressure RESETS for the next frame.
+//
+// These tests populate the ring through the SAME `tool.result` mechanism the
+// section-12 tests use, capture the `web-search.results` MESSAGES block, and
+// read `render()`. Each entry carries a UNIQUE query tag (q0,q1,…) so "dropped"
+// (tag absent from EVERY rendered message) is distinguishable from a mere
+// budget degrade-to-header (section 13), which keeps the tag in a header line.
+// Char budgets are kept slack and snippets tiny so ONLY pressure can shrink the
+// ring here.
+
+// Emit a `context.full` event matching the Notify<T> envelope ({ at, data }).
+function emitContextFull(
+  sys: ReturnType<typeof createEventSystem>,
+  round: number,
+  over: { estimatedTokens?: number; limit?: number; overBy?: number } = {},
+) {
+  sys.events.emit(Events.CONTEXT_FULL, {
+    at: Date.now(),
+    data: {
+      estimatedTokens: over.estimatedTokens ?? 9000,
+      limit: over.limit ?? 8000,
+      overBy: over.overBy ?? 1000,
+      round,
+    },
+  });
+}
+
+// Emit an `llm.return` event (Reply<LLMResponse>) — only the envelope matters
+// for the reset signal; the body can be a minimal stand-in.
+function emitLlmReturn(sys: ReturnType<typeof createEventSystem>) {
+  sys.events.emit(Events.LLM_RETURN, {
+    id: "llm-" + Date.now(),
+    at: Date.now(),
+    ok: true,
+    data: { message: { role: "assistant", content: "" } },
+  });
+}
+
+// Populate the ring with N own ok:true results, each tagged q0..q(N-1) (oldest
+// first). Slack budgets + tiny snippets so neither maxResults nor char-budget
+// degradation interferes — only context.full pressure can shrink it.
+async function setupWithEntries(n: number) {
+  const { store, sys, p } = await setup({
+    maxResults: Math.max(n, 1),
+    maxResultChars: 100000,
+    maxResultsTotalChars: 10000000,
+    maxSnippetChars: 4000,
+  });
+  for (let i = 0; i < n; i++) {
+    emitToolResult(sys, {
+      name: SEARCH,
+      ok: true,
+      data: {
+        endpoint: "http://localhost:8080",
+        query: `q${i}`,
+        results: [{ title: `T${i}`, url: `https://a/${i}`, snippet: `s${i}` }],
+      },
+    });
+  }
+  return { store, sys, p };
+}
+
+// Which q-tags survive in the rendered block (a tag absent from EVERY message
+// means that entry was DROPPED, not merely degraded to a header).
+async function survivingTags(store: Map<string, ContextBlock>, n: number): Promise<number[]> {
+  const msgs = await renderMsgs(resultsBlock(store));
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (new RegExp(`\\bq${i}\\b`).test(joined)) out.push(i);
+  }
+  return out;
+}
+
+// ---- 17a. positive — pressure drops the oldest, render reflects it ----
+
+test("ctx-pressure (positive): baseline — N entries all render before any pressure", async () => {
+  const N = 4;
+  const { store } = await setupWithEntries(N);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N, "all N entries present before any context.full");
+  assert.deepEqual(await survivingTags(store, N), [0, 1, 2, 3], "every tag q0..q3 present");
+});
+
+test("ctx-pressure (positive): round:1 drops the SINGLE oldest entry (q0), render shrinks by one", async () => {
+  const N = 4;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N - 1, "exactly one entry shed after round:1");
+  const tags = await survivingTags(store, N);
+  assert.ok(!tags.includes(0), "the OLDEST entry (q0) is dropped");
+  assert.deepEqual(tags, [1, 2, 3], "q1..q3 survive in order");
+});
+
+test("ctx-pressure (positive): reaction is SYNCHRONOUS — render right after emit already shrank", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 1); // no await/tick between emit and render
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N - 1, "the drop landed synchronously within emit()");
+});
+
+// ---- 17b. boundary value analysis on `round` ----
+
+test("ctx-pressure (BVA): round:0 is a NO-OP — nothing is dropped", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 0);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N, "round:0 drops nothing");
+  assert.deepEqual(await survivingTags(store, N), [0, 1, 2], "all tags intact after round:0");
+});
+
+test("ctx-pressure (BVA): round:2 drops the TWO oldest (oldest-first)", async () => {
+  const N = 4;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 2);
+  const tags = await survivingTags(store, N);
+  assert.equal((await renderMsgs(resultsBlock(store))).length, N - 2, "two entries shed at round:2");
+  assert.ok(!tags.includes(0) && !tags.includes(1), "q0 and q1 (the two oldest) are gone");
+  assert.deepEqual(tags, [2, 3], "q2,q3 survive");
+});
+
+test("ctx-pressure (BVA): round === buffer size drops everything -> empty block", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, N);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "round == size empties the ring");
+});
+
+test("ctx-pressure (BVA): round GREATER than buffer size clamps to empty (no throw, no negatives)", async () => {
+  const N = 2;
+  const { store, sys } = await setupWithEntries(N);
+  assert.doesNotThrow(() => emitContextFull(sys, N + 5), "over-large round must not throw");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "an over-large round empties the ring rather than going negative");
+});
+
+test("ctx-pressure (BVA): round:1 on an EMPTY ring is a harmless no-op", async () => {
+  const { store, sys } = await setup({}); // nothing recorded
+  assert.doesNotThrow(() => emitContextFull(sys, 1), "pressure on an empty ring must not throw");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "still empty");
+});
+
+test("ctx-pressure (BVA): round:1 on a SINGLE-entry ring empties it", async () => {
+  const { store, sys } = await setupWithEntries(1);
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(msgs, [], "the lone entry is the oldest and is dropped");
+});
+
+// ---- 17c. state-transition — successive rounds, reset, re-pressure ----
+
+test("ctx-transition: successive rounds within a frame shed PROPORTIONALLY (1 then 2 -> three gone total)", async () => {
+  // Spec: `round` increments per emission within ONE frame; the plugin sheds the
+  // R oldest each time, so a round:1 then round:2 leaves the 3 oldest gone.
+  const N = 5;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 1); // shed oldest 1 -> q0 gone
+  emitContextFull(sys, 2); // shed oldest 2 -> q1,q2 gone
+  const tags = await survivingTags(store, N);
+  assert.deepEqual(tags, [3, 4], "q0,q1,q2 shed across the two escalating rounds");
+});
+
+test("ctx-transition: LLM_RETURN RESETS pressure — entries recorded after it are NOT pre-shed", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 2); // drop q0,q1 -> only q2 left
+  assert.deepEqual(await survivingTags(store, N), [2], "two oldest shed this frame");
+
+  emitLlmReturn(sys); // frame ends; pressure resets
+
+  // A fresh frame records a new entry; it must appear in full (no carried-over shed).
+  emitToolResult(sys, {
+    name: SEARCH,
+    ok: true,
+    data: {
+      endpoint: "http://localhost:8080",
+      query: "qNEW",
+      results: [{ title: "TNEW", url: "https://a/new", snippet: "snew" }],
+    },
+  });
+  const msgs = await renderMsgs(resultsBlock(store));
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  assert.match(joined, /\bqNEW\b/, "the post-reset entry renders");
+  // q2 (recorded before the reset, never shed) is still in the ring too.
+  assert.match(joined, /\bq2\b/, "the unshed survivor is retained across the reset");
+});
+
+test("ctx-transition: after LLM_RETURN, a NEW round:1 sheds the current oldest again (pressure re-armed)", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N); // q0,q1,q2
+  emitContextFull(sys, 1); // q0 gone
+  emitLlmReturn(sys); // reset for next frame
+  emitContextFull(sys, 1); // next frame's pressure: drop the new oldest (q1)
+  const tags = await survivingTags(store, N);
+  assert.ok(!tags.includes(0) && !tags.includes(1), "q0 (frame1) and q1 (frame2) both shed");
+  assert.deepEqual(tags, [2], "only the newest survivor remains");
+});
+
+test("ctx-transition: an entry dropped by pressure does NOT reappear on the next render (persistent within frame)", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  emitContextFull(sys, 1);
+  const first = await survivingTags(store, N);
+  const second = await survivingTags(store, N); // render again, no new events
+  assert.deepEqual(first, [1, 2], "q0 shed on first render");
+  assert.deepEqual(second, first, "the shed is persistent — q0 stays gone across renders");
+});
+
+// ---- 17d. negative / robustness ----
+
+test("ctx-pressure (negative): a foreign agent's later results are unaffected — only OWN ring shrinks", async () => {
+  // A foreign tool.result must never have entered the ring (section 12); pressure
+  // therefore operates only on web-search's OWN entries. Interleave a foreign
+  // result and assert the ring count tracks ONLY the own entries minus the shed.
+  const { store, sys } = await setup({
+    maxResults: 5,
+    maxResultChars: 100000,
+    maxResultsTotalChars: 10000000,
+  });
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("own0") });
+  emitToolResult(sys, { name: "krakeycode.read_file", ok: true, data: { content: "x" } });
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("own1") });
+  assert.equal((await renderMsgs(resultsBlock(store))).length, 2, "two own entries; foreign ignored");
+  emitContextFull(sys, 1);
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, 1, "exactly one own entry shed");
+  assert.match(String(msgs[0].content), /own1/, "the surviving own entry is the newer one");
+});
+
+test("ctx-pressure (negative): the guidance (system) block is untouched by context.full", async () => {
+  const { store, sys } = await setupWithEntries(3);
+  const before = await renderStr(guidanceBlock(store));
+  emitContextFull(sys, 2);
+  const after = await renderStr(guidanceBlock(store));
+  assert.equal(after, before, "context.full must not alter the system guidance block");
+});
+
+test("ctx-pressure (negative): a NEGATIVE round is treated as a no-op (no throw, nothing dropped)", async () => {
+  const N = 3;
+  const { store, sys } = await setupWithEntries(N);
+  assert.doesNotThrow(() => emitContextFull(sys, -1 as number), "a negative round must not throw");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N, "a negative round drops nothing (treated like round:0)");
+});
+
+test("ctx-pressure (negative): a malformed payload (missing data) does not throw or corrupt the ring", async () => {
+  const N = 2;
+  const { store, sys } = await setupWithEntries(N);
+  assert.doesNotThrow(() => sys.events.emit(Events.CONTEXT_FULL, {} as unknown),
+    "a payload with no data field must be tolerated");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N, "a malformed context.full leaves the ring intact");
+});
+
+test("ctx-pressure (negative): LLM_RETURN with no preceding pressure is a harmless no-op", async () => {
+  const N = 2;
+  const { store, sys } = await setupWithEntries(N);
+  assert.doesNotThrow(() => emitLlmReturn(sys), "a bare reset must not throw");
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, N, "reset without pressure leaves the ring untouched");
+});
