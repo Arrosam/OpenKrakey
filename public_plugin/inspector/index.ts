@@ -41,6 +41,8 @@ const KIND: { [eventName: string]: string } = {
   [Events.AGENT_START]: "agent.start",
   [Events.CLOCK_TICK]: "tick",
   [Events.PROMPT_GATHER]: "gather",
+  // NOTE: `llm.request` is now a body-less TRIGGER (Notify<{agentId}>, no corrId).
+  // The ACTUAL dispatched prompt is `llm.request.sent` (corrId=id, full request).
   [Events.LLM_REQUEST]: "prompt.sent",
   [Events.LLM_REQUEST_SENT]: "prompt.sent",
   [Events.LLM_RETURN]: "prompt.received",

@@ -26,15 +26,18 @@
       "description": "Phase-1 MVP plugins under public_plugin/ — the essential set that makes a bare agent converse, remember, and use tools, exercising every core function. Each implements the L1 plugin contract and talks ONLY via the per-Agent event-system.",
       "nodes": [
         "llm-core",
+        "tool-manager",
         "persona",
         "system-prompt",
         "web-chat",
         "inspector",
         "krakeycode",
-        "searxng",
+        "web-search",
         "browser",
         "memory-note",
-        "history"
+        "history",
+        "interval_toggle",
+        "restart"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -173,7 +176,7 @@
     "llm-core": {
       "zone": "plugins",
       "path": "public_plugin/llm-core",
-      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content — the monologue HOOK for observers, NOT a channel send). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Provides the llm.register_tool action other plugins call to declare ToolDefs.",
+      "description": "The LLM round-trip plugin: llm.request (carrying context + messages) -> communicator chat (key-less ctx.llm) -> llm.return (+ output.message for non-empty content — the monologue HOOK for observers, NOT a channel send). Reads the conversation from the event's messages (no conversation.get); emits llm.request.sent (the exact assembled request — system+messages+tools+params) for observers. Reads the registered tools from the tool-manager plugin via the llm.list_tools action when assembling each request (the llm.register_tool registry moved to tool-manager); requires:[llm.list_tools].",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -183,6 +186,19 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/llm-core.md"
+    },
+    "tool-manager": {
+      "zone": "plugins",
+      "path": "public_plugin/tool-manager",
+      "description": "The per-Agent tool registry, extracted from llm-core so the round-trip and the tool plugins stay decoupled (neither imports the other). Owns the llm.register_tool action (same name tool plugins already call — add/replace a ToolDef by name, validated) and exposes llm.list_tools -> ToolDef[] (a fresh snapshot). provides:[llm.register_tool] so the loader sequences it before every tool plugin; llm-core requires:[llm.list_tools]. Holds no LLM/model behaviour; all state in the factory closure (one registry per Agent, R6).",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/tool-manager.md"
     },
     "persona": {
       "zone": "plugins",
@@ -254,10 +270,10 @@
       "status": "done",
       "overview": "overviews/nodes/krakeycode.md"
     },
-    "searxng": {
+    "web-search": {
       "zone": "plugins",
-      "path": "public_plugin/searxng",
-      "description": "Web-search tool: gives a Krakey Agent a `searxng.search` tool (registered via llm.register_tool) that queries a SearXNG instance's JSON API (GET /search?format=json) over native fetch with an AbortController timeout. Open-box endpoint resolution: an explicit config `instanceUrl` is authoritative (remote OR local); otherwise a local instance (http://localhost:8080) is tried FIRST, then a built-in pool of public JSON-capable SearXNG instances (overridable via publicInstances, gateable via usePublicFallback) — the first endpoint returning valid JSON with results wins, failures fall through, all-fail throws. NEVER spawns containers; no persistence. Contributes a `searxng.guidance` SYSTEM block (priority 6000) describing the tool + the next-beat delay + endpoint strategy, and a `searxng.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:searxng turns, query in the header, newest-first total-char budget) and nudging clock.fire_now.",
+      "path": "public_plugin/web-search",
+      "description": "Web-search tool: gives a Krakey Agent a `web-search.search` tool (registered via llm.register_tool) that fetches results over native fetch with an AbortController timeout. Backend waterfall: an explicit config `instanceUrl` (a SearXNG instance) is authoritative when set; otherwise a local SearXNG (http://localhost:8080) is tried FIRST, then optional public SearXNG instances (publicInstances, default EMPTY — public SearXNG JSON is unreliable), then a keyless DuckDuckGo Lite fallback (useDuckDuckGoFallback, default true; HTML scraped) — the first backend returning results wins, all-fail throws. NEVER spawns containers; no persistence. Contributes a `web-search.guidance` SYSTEM block (priority 6000) and a `web-search.results` MESSAGES block (priority 3500) folding recent search outcomes back into the conversation on the next beat (plain user/name:web-search turns; on failure it tells the agent to surface the error to the user) and nudging clock.fire_now.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -266,7 +282,7 @@
       ],
       "implements_contracts": [],
       "status": "done",
-      "overview": "overviews/nodes/searxng.md"
+      "overview": "overviews/nodes/web-search.md"
     },
     "browser": {
       "zone": "plugins",
@@ -308,6 +324,34 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/history.md"
+    },
+    "interval_toggle": {
+      "zone": "plugins",
+      "path": "public_plugin/interval_toggle",
+      "description": "Self-pacing tools: interval.set (change the stable heartbeat) + interval.hold (run a different interval for the next N beats, then auto-revert to the base). Drives the per-Agent clock over the action bus (clock.set_interval / clock.set_default_interval, payload { ms }); counts a hold down on clock.tick and reverts via set_default_interval (set_interval is clobbered by the clock's per-beat reset). Contributes an interval.guidance SYSTEM block.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/interval_toggle.md"
+    },
+    "restart": {
+      "zone": "plugins",
+      "path": "public_plugin/restart",
+      "description": "Self-restart tool: restart.now re-execs the runtime so newly-written plugins / changed config (read only at startup) are applied. Spawns a detached replacement that waits delayMs (frees ports first), re-runs the launch command (node + execArgv + boot entry), then exits this process; dryRun reports the plan without restarting. Powerful — NOT in the default loadout. Contributes a restart.guidance SYSTEM block.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/restart.md"
     }
   },
   "contracts": {

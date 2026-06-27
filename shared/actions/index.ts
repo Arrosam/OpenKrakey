@@ -10,8 +10,7 @@
  *    channel ops) and inter-plugin calls. Those names are plugin-specific and are
  *    registered at setup, so they are NOT enumerated here.
  */
-import type { ComposedContext } from "../../contracts/context";
-import type { LLMRequest, LLMResponse, Message } from "../../contracts/llm";
+import type { LLMRequest, LLMResponse } from "../../contracts/llm";
 
 /**
  * Well-known actions invoked on the actionbus. (LLM access is NOT an action —
@@ -25,6 +24,26 @@ export const Actions = {
   CLOCK_SET_INTERVAL: "clock.set_interval",
   CLOCK_SET_DEFAULT_INTERVAL: "clock.set_default_interval",
   CLOCK_FIRE_NOW: "clock.fire_now",
+  /**
+   * Compose the current beat's prompt ON DEMAND. Registered by the orchestrator
+   * while started; takes no params and resolves the assembled
+   * `{ context: ComposedContext; messages: Message[] }`. The round-trip plugin
+   * (llm-core) invokes it right before it sends, so the body always reflects the
+   * latest blocks (it gathers first). Keeps the orchestrator LLM-agnostic — it
+   * never decides WHEN to send; it only composes when asked.
+   */
+  PROMPT_COMPOSE: "prompt.compose",
+  /**
+   * Request a GRACEFUL restart of the whole runtime. Registered by the core
+   * composition root (agent_instance, fed a `requestRestart` callback by boot)
+   * while an Agent is started — present only when boot wired the callback. Params:
+   * `{ delayMs?: number }`. The handler stops every Agent (running each plugin's
+   * teardown, so best-effort state like the web-chat transcript is flushed) BEFORE
+   * re-execing the process — unlike a raw `process.exit`, which skips teardown. The
+   * `restart` plugin invokes it (guarded by `has`) instead of exiting itself, so it
+   * never owns process lifecycle. Core registers it; no plugin can `provide` it.
+   */
+  CORE_RESTART: "core.restart",
 } as const;
 
 /** Well-known generic events emitted on the eventbus to activate plugins. */
@@ -73,7 +92,15 @@ export interface EventPayloads {
   "agent.start": Notify<{ agentId: string }>;
   "clock.tick": Notify<{ seq: number }>;
   "prompt.gather": Notify<{ seq: number }>;
-  "llm.request": Request<{ context: ComposedContext; messages: Message[] }>;
+  /**
+   * A TRIGGER: the agent wants an LLM round-trip this beat. It carries NO body —
+   * the orchestrator emits one per tick/immediate-wake and stays LLM-agnostic. The
+   * round-trip plugin (llm-core) owns serialization: it keeps at most one request
+   * in flight PER agentId, coalesces triggers that arrive while busy, and composes
+   * the body on demand via `prompt.compose` right before it sends. `agentId` is the
+   * lock key.
+   */
+  "llm.request": Notify<{ agentId: string }>;
   /**
    * The EXACT request `llm-core` dispatches to the provider — system + messages +
    * tools + temperature/maxTokens, the assembled `LLMRequest` — surfaced so observers

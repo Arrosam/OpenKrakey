@@ -1,32 +1,33 @@
 /**
- * searxng plugin — BUS SIDE.
+ * web-search plugin — BUS SIDE.
  *
  * Default export is a PluginFactory the loader calls ONCE PER AGENT. All mutable
  * state (the `results` ring, `unsubs`) lives in the factory closure (R6); the only
  * module-level values are immutable consts. Imports are restricted (R2) to the
- * plugin/llm contracts, the shared/actions vocabulary, and the sibling ./searxng.
+ * plugin/llm contracts, the shared/actions vocabulary, and the sibling ./search.
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events } from "../../shared/actions";
-import { SEARXNG_SCHEMA } from "./config-schema";
+import { WEB_SEARCH_SCHEMA } from "./config-schema";
 import {
   buildDefaultGuidance,
   buildSearchUrl,
   normalizeResults,
+  parseDuckDuckGoLite,
   pushResult,
   readConfig,
   resolveEndpoints,
   type NormalizedResult,
-} from "./searxng";
+} from "./search";
 
 /** Tool names this plugin owns — used to filter tool.result events. */
-const OWN_TOOLS = new Set(["searxng.search"]);
+const OWN_TOOLS = new Set(["web-search.search"]);
 
 const SEARCH_TOOL: ToolDef = {
-  name: "searxng.search",
+  name: "web-search.search",
   description:
-    'Search the web via a SearXNG instance. Results (titles, URLs, snippets) arrive on the NEXT beat (not inline) as a user message tagged "searxng". Use it for current events, documentation lookups, or facts outside your training data.',
+    'Search the web. Results (titles, URLs, snippets) arrive on the NEXT beat (not inline) as a user message tagged "web-search". Use it for current events, documentation lookups, or facts outside your training data.',
   parameters: {
     type: "object",
     properties: {
@@ -45,21 +46,21 @@ interface ResultEntry {
   error?: string;
 }
 
-const createSearxng: PluginFactory = (): Plugin => {
+const createWebSearch: PluginFactory = (): Plugin => {
   let results: ResultEntry[] = [];
   let unsubs: Array<() => void> = [];
 
   return {
-    manifest: { id: "searxng", version: "0.1.0", requires: ["llm.register_tool"], configSchema: SEARXNG_SCHEMA },
+    manifest: { id: "web-search", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SEARCH_SCHEMA },
 
     async setup(ctx: PluginContext): Promise<void> {
       const cfg = readConfig(ctx.config);
 
-      // 1. The searxng.search action — validates, then a serial endpoint waterfall.
-      const offSearch = ctx.actions.register("searxng.search", async (params: unknown) => {
+      // 1. The web-search.search action — validates, then a serial endpoint waterfall.
+      const offSearch = ctx.actions.register("web-search.search", async (params: unknown) => {
         const p = (params ?? {}) as Record<string, unknown>;
         if (typeof p.query !== "string" || p.query.trim().length === 0) {
-          throw new Error("searxng.search: 'query' must be a non-empty string");
+          throw new Error("web-search.search: 'query' must be a non-empty string");
         }
         const query = p.query.trim();
         const pageno =
@@ -111,8 +112,42 @@ const createSearxng: PluginFactory = (): Plugin => {
           }
         }
 
+        // DuckDuckGo Lite keyless fallback — only when no SearXNG instance is pinned.
+        if (cfg.useDuckDuckGoFallback && cfg.instanceUrl === null) {
+          tried.push("duckduckgo-lite");
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
+          try {
+            const res = await globalThis.fetch(
+              "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query),
+              {
+                headers: {
+                  "user-agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+                  accept: "text/html",
+                },
+                signal: controller.signal,
+              },
+            );
+            clearTimeout(timer);
+            if (res.ok) {
+              const html = await res.text();
+              const results = parseDuckDuckGoLite(html, cfg.maxResults, cfg.maxSnippetChars);
+              if (results.length > 0) {
+                return { endpoint: "duckduckgo", query, results };
+              }
+              lastError = "empty results from duckduckgo-lite";
+            } else {
+              lastError = `HTTP ${res.status} from duckduckgo-lite`;
+            }
+          } catch (err) {
+            clearTimeout(timer);
+            lastError = String(err);
+          }
+        }
+
         throw new Error(
-          `searxng.search: all endpoints failed (tried: ${tried.join(", ")}); last error: ${lastError}`,
+          `web-search.search: all endpoints failed (tried: ${tried.join(", ")}); last error: ${lastError}`,
         );
       });
 
@@ -120,14 +155,14 @@ const createSearxng: PluginFactory = (): Plugin => {
       try {
         await ctx.actions.invoke("llm.register_tool", SEARCH_TOOL);
       } catch (err) {
-        ctx.log.warn(`searxng: failed to register tool: ${String(err)}`);
+        ctx.log.warn(`web-search: failed to register tool: ${String(err)}`);
       }
 
       // 3. Guidance block (system).
       const guidanceText = cfg.guidance !== null ? cfg.guidance : buildDefaultGuidance(cfg);
       ctx.setBlock({
-        id: "searxng.guidance",
-        label: "searxng.guidance",
+        id: "web-search.guidance",
+        label: "web-search.guidance",
         target: "system",
         priority: cfg.guidancePriority,
         render: () => guidanceText,
@@ -136,7 +171,7 @@ const createSearxng: PluginFactory = (): Plugin => {
       // 4. Results block (messages) — renders recorded outcomes newest-first,
       //    bounded by a total char budget. Pure and never throws.
       ctx.setBlock({
-        id: "searxng.results",
+        id: "web-search.results",
         target: "messages",
         priority: cfg.resultsPriority,
         render: (): Message[] => {
@@ -149,7 +184,7 @@ const createSearxng: PluginFactory = (): Plugin => {
               : "";
           };
           const headerOf = (r: ResultEntry): string =>
-            `[searxng result | searxng.search | ${r.ok ? "ok" : "error"} | query: ${queryOf(r)} | ${new Date(r.at).toISOString()}]`;
+            `[web-search result | web-search.search | ${r.ok ? "ok" : "error"} | query: ${queryOf(r)} | ${new Date(r.at).toISOString()}]`;
 
           const bodyOf = (r: ResultEntry): string => {
             let body: string;
@@ -163,7 +198,10 @@ const createSearxng: PluginFactory = (): Plugin => {
                 body = JSON.stringify(r.data);
               }
             } else {
-              body = `Error: ${r.error ?? "unknown"}`;
+              body =
+                "Error: " +
+                (r.error ?? "unknown") +
+                "\n[web-search FAILED — no backend returned results. Tell the user the search failed; if it keeps failing, they should set a working SearXNG instanceUrl in the web-search config. Do not silently retry the same query.]";
             }
             if (body.length > cfg.maxResultChars) {
               const truncated = body.length - cfg.maxResultChars;
@@ -192,7 +230,7 @@ const createSearxng: PluginFactory = (): Plugin => {
             (r, i) =>
               ({
                 role: "user",
-                name: "searxng",
+                name: "web-search",
                 content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
               }) as Message,
           );
@@ -228,11 +266,11 @@ const createSearxng: PluginFactory = (): Plugin => {
       unsubs = [
         offSearch,
         offResult,
-        () => ctx.removeBlock("searxng.guidance"),
-        () => ctx.removeBlock("searxng.results"),
+        () => ctx.removeBlock("web-search.guidance"),
+        () => ctx.removeBlock("web-search.results"),
       ];
 
-      ctx.print("searxng: web-search tool ready");
+      ctx.print("web-search: web-search tool ready");
     },
 
     teardown(): void {
@@ -243,4 +281,4 @@ const createSearxng: PluginFactory = (): Plugin => {
   };
 };
 
-export default createSearxng;
+export default createWebSearch;

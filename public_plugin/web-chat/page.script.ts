@@ -241,10 +241,12 @@ export const SCRIPT = `(function(){
     var tickIco = read ? icon('checkAll','tk-ic') : icon('check','tk-ic');
     var tkLabel = read ? 'read' : 'sent';
     var idAttr = (id===''||id==null) ? '' : ' data-msg="'+esc(String(id))+'"';
-    wrap.innerHTML = quoteZoneHTML() +
-      '<div class="msg-inner"><div class="bubble">'+esc(text)+'</div>'+
+    wrap.innerHTML =
+      '<div class="me-row">'+ quoteZoneHTML() +
+        '<div class="bubble">'+esc(text)+'</div>'+
+      '</div>'+
       '<div class="'+tickCls+'"'+idAttr+'>'+tickIco+
-      '<span class="tk-tx">'+tkLabel+'</span></div></div>';
+      '<span class="tk-tx">'+tkLabel+'</span></div>';
     wireBubble(wrap, $('.bubble', wrap), 'you', text);
     log.appendChild(wrap); scrollDown();
     if(id!=='' && id!=null) msgs[id]=wrap;

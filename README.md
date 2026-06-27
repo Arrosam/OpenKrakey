@@ -51,12 +51,12 @@ the npm scripts (`npm start` · `npm run config:web` · `npm run console`) or th
 
 **3 — Connect a provider and create your first agent.** The guided wizard does the whole setup —
 pick a provider, paste an API key (or reference an env var like `${ANTHROPIC_API_KEY}`), choose a
-model, and name the agent:
+model, and name the agent. **The browser Console is the recommended way in:**
 
 ```bash
-krakey setup        # arrow-key wizard in the terminal
-# …or do it in your browser:
-krakey dashboard    # the unified Console → http://127.0.0.1:7716
+krakey dashboard    # recommended — the unified Console → http://127.0.0.1:7716
+# …or stay in the terminal:
+krakey setup        # the same setup as an arrow-key wizard
 ```
 
 Prefer editing files? The wizard just writes JSON you can also hand-edit — copy the templates and
@@ -94,14 +94,15 @@ The Console frames the other three — run config-web and at least one agent for
 ## What your agent can do
 
 Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set
-below; `web-chat` and `browser` are loaded as **private** (per-agent) plugins. Add or remove them
-per agent in its config.
+below; `web-chat` is loaded as a **private** (per-agent) plugin. `browser` is **off by default** —
+it drives your own Chrome, so turn it on per agent when you want it. Add or remove any of them per
+agent in its config.
 
 | Plugin | Gives the agent | Notes |
 |---|---|---|
 | **web-chat** | A chat window to talk with you — the agent replies by calling `web-chat.send_message`. | Binds to loopback only and is access-token gated. Keeps its own transcript with sent/read status. |
 | **krakeycode** | Files and shell: `read_file`, `write_file`, `edit_file`, `bash`, `list_dir`. | `local` mode (real paths) or `sandbox` mode (confined to a root + command allowlist). |
-| **searxng** | Web search: `searxng.search`. | Uses your SearXNG instance if set, else a local one, else built-in **public** instances — see [SECURITY.md](SECURITY.md). |
+| **web-search** | Web search: `web-search.search`. | Keyless **DuckDuckGo** by default; or point `instanceUrl` at your own **SearXNG** — see [SECURITY.md](SECURITY.md). |
 | **browser** | Read-only Chrome: `navigate`, `read_page`, `list_tabs`, `activate_tab`, `screenshot`. | Drives Chrome over the DevTools Protocol with **zero dependencies**. Never clicks, types, or runs scripts. |
 | **llm-core** | The LLM round-trip, and the tool registry every tool plugin registers into. | Required by all of the above. Picks the model from config (or by capability). |
 | **persona** | Its identity — the top of the system prompt. | Set the text in the agent's config. |

@@ -7,6 +7,7 @@ import { createEventSystem } from "../../packages/event-system/src";
 import { Actions, Events } from "../../shared/actions";
 import type { ContextBlock } from "../../contracts/context";
 import type { Message, ToolDef } from "../../contracts/llm";
+import { readConfig } from "../../public_plugin/krakeycode/sandbox";
 
 // ---------------------------------------------------------------------------
 // BLACK-BOX edge tests for the NEW `krakeycode` plugin — a coding-tool channel
@@ -108,11 +109,22 @@ function makeCtx(config: unknown, opts: { dataDir?: string } = {}) {
   return { ctx, store, sys, tools, dataDir };
 }
 
-async function setup(config: unknown, opts: { dataDir?: string } = {}) {
+// The shipped default is now sandbox-confined + shell OFF. These existing edge
+// tests were written against the OLD default (mode "local", shell on), so `setup`
+// makes that legacy intent EXPLICIT by injecting it (explicit overrides still
+// win). `setupRaw` passes config through untouched, to exercise the NEW safe
+// defaults below.
+const LEGACY_LOCAL = { mode: "local", allowCommands: true };
+async function setupRaw(config: unknown, opts: { dataDir?: string } = {}) {
   const p = plugin();
   const h = makeCtx(config, opts);
   await p.setup(h.ctx);
   return { p, ...h };
+}
+async function setup(config: unknown, opts: { dataDir?: string } = {}) {
+  const merged =
+    config && typeof config === "object" ? { ...LEGACY_LOCAL, ...(config as object) } : LEGACY_LOCAL;
+  return setupRaw(merged, opts);
 }
 
 function guidanceBlock(store: Map<string, ContextBlock>): ContextBlock {
@@ -166,6 +178,55 @@ test("manifest: requires includes 'llm.register_tool'", () => {
     p.manifest.requires.includes("llm.register_tool"),
     "requires must include llm.register_tool",
   );
+});
+
+// ===========================================================================
+// 1b. SAFE DEFAULTS — shipped default is sandbox-confined + shell OFF
+// ===========================================================================
+
+test("safe default: readConfig({}) → mode 'sandbox', allowCommands false, allowWrite true, root = dataDir", () => {
+  const dataDir = tmpDir();
+  const cfg = readConfig({}, dataDir);
+  assert.equal(cfg.mode, "sandbox", "default mode must be sandbox");
+  assert.equal(cfg.allowCommands, false, "shell must be OFF by default");
+  assert.equal(cfg.allowWrite, true, "writes (within the workspace) stay on by default");
+  assert.equal(path.resolve(cfg.root), path.resolve(dataDir), "sandbox root defaults to the workspace");
+});
+
+test("safe default: explicit overrides still win (mode 'local', allowCommands true)", () => {
+  const cfg = readConfig({ mode: "local", allowCommands: true }, tmpDir());
+  assert.equal(cfg.mode, "local");
+  assert.equal(cfg.allowCommands, true);
+});
+
+test("safe default (plugin): bash is rejected with an empty config (shell off)", async () => {
+  const { sys } = await setupRaw({}, { dataDir: tmpDir() });
+  await assert.rejects(
+    sys.actions.invoke(BASH, { command: `"${NODE}" -e "process.stdout.write('x')"` }),
+    "bash must be disabled by default",
+  );
+});
+
+test("safe default (plugin): writes confined to the workspace — inside ok, outside rejected", async () => {
+  const dataDir = tmpDir();
+  const { sys } = await setupRaw({}, { dataDir });
+  const inside = path.join(dataDir, "note.txt");
+  const ok: any = await sys.actions.invoke(WRITE, { path: inside, content: "hi" });
+  assert.equal(ok.created, true);
+  assert.equal(fs.readFileSync(inside, "utf8"), "hi");
+  const outside = path.join(tmpDir(), "escape.txt");
+  await assert.rejects(
+    sys.actions.invoke(WRITE, { path: outside, content: "nope" }),
+    "writing outside the workspace must be rejected by default",
+  );
+  assert.equal(fs.existsSync(outside), false, "no file written outside the workspace");
+});
+
+test("safe default (plugin): guidance states sandbox + the widen-permissions hint", async () => {
+  const { store } = await setupRaw({});
+  const text = await renderStr(guidanceBlock(store));
+  assert.match(text, /\bsandbox\b/, "default guidance states sandbox mode");
+  assert.match(text, /allowCommands|mode "local"|widen/i, "guidance hints how to widen permissions");
 });
 
 // ===========================================================================

@@ -22,6 +22,21 @@ import type { ContextBlock } from "../../contracts/context";
 const BLOCK_ID = "system-prompt";
 const DEFAULT_PRIORITY = 9000;
 
+// ---------------------------------------------------------------------------
+// SECOND block: a trailing, lowest-priority MESSAGE-target block that restates
+// the operating rule at the END of the prompt (recency). Added in the SAME
+// setup() alongside the unchanged system block above.
+//   id:       "system-prompt.reminder"
+//   target:   "messages" (lands in the messages array, not the system text)
+//   priority: 200 default (well below every other message block -> renders LAST)
+//   render(): Message[] with exactly ONE { role:"user", name:"operating-reminder", content: REMINDER_TEXT }
+// REMINDER_TEXT is pinned EXACTLY below.
+// ---------------------------------------------------------------------------
+const REMINDER_BLOCK_ID = "system-prompt.reminder";
+const REMINDER_DEFAULT_PRIORITY = 200;
+const REMINDER_TEXT =
+  "[Operating reminder] Your plain text this beat is a PRIVATE MONOLOGUE — to affect anything (reply to anyone, use any capability) you MUST call a tool. Check the current situation now: re-read the most recent user message and any status notes above, and act only on what is genuinely NEW and unaddressed this beat. If you are mid-task, re-read the newest user message FIRST — it may have changed your priorities or asked you to stop.";
+
 const mod: any = await import("../../public_plugin/system-prompt/index.ts").then(
   (m) => m,
   () => null,
@@ -70,6 +85,22 @@ async function setupAndGetBlock(config: unknown) {
 }
 const renderOf = async (b: ContextBlock): Promise<string> => await b.render() as string;
 
+// Run setup() once and return BOTH registered blocks from the shared store.
+async function setupAndGetReminderBlock(config: unknown) {
+  const p = plugin();
+  const { ctx, store, sys } = makeCtx(config);
+  await p.setup(ctx);
+  const block = store.get(REMINDER_BLOCK_ID);
+  assert.ok(block, "setup must register a second block under id 'system-prompt.reminder'");
+  return { p, store, sys, block: block as ContextBlock };
+}
+// A messages-target block renders a Message[]; this helper renders + asserts shape.
+const renderMessages = async (b: ContextBlock): Promise<any[]> => {
+  const out = await b.render();
+  assert.ok(Array.isArray(out), "a messages-target block must render an array of messages");
+  return out as any[];
+};
+
 test("manifest is { id:'system-prompt', version:'0.1.0' }", () => {
   const p = plugin();
   assert.equal(p.manifest.id, "system-prompt");
@@ -94,8 +125,10 @@ test("default text teaches the monologue/operating model, CHANNEL-AGNOSTIC (no c
   const text = (await renderOf(block)).toLowerCase();
   assert.match(text, /monologue/, "must state the reply-is-a-monologue rule");
   assert.match(text, /\btool/, "must tell the model to call a tool to act");
-  assert.ok(!text.includes("web-chat.send_message"), "must NOT name a specific channel tool (channel-agnostic)");
+  // Channel-agnostic: never name a specific channel or its send tool.
+  assert.ok(!text.includes("web-chat"), "must NOT name the web-chat channel (channel-agnostic)");
   assert.ok(!text.includes("web chat"), "must NOT reference a specific channel");
+  assert.ok(!text.includes("send_message"), "must NOT name a specific channel send tool (channel-agnostic)");
 });
 
 test("default text EMPHASIZES the strengthened monologue model (distinctive new substrings)", async () => {
@@ -118,6 +151,35 @@ test("default text EMPHASIZES the strengthened monologue model (distinctive new 
   assert.ok(
     text.includes("call one of your tools"),
     "must state the only way to act is to call one of your tools",
+  );
+});
+
+test("default text carries the NEW heartbeat / situational-judgment paragraph (distinctive substrings)", async () => {
+  const { block } = await setupAndGetBlock({});
+  const text = await renderOf(block);
+  // Paragraph 3 was REPLACED: the old "nothing worth doing / never force an action
+  // just to act" line is gone; the new paragraph teaches heartbeat-aware judgment.
+  assert.ok(
+    text.includes("HEARTBEAT"),
+    "new paragraph 3 must introduce the recurring HEARTBEAT model",
+  );
+  assert.ok(
+    text.includes("do not re-send a message you've already sent"),
+    "new paragraph 3 must warn against re-sending an already-sent message",
+  );
+  assert.ok(
+    text.includes("Doing nothing is the right move when nothing is new"),
+    "new paragraph 3 must end on the doing-nothing-is-right rule",
+  );
+
+  // The OLD paragraph-3 wording must be GONE (guards against a stale default).
+  assert.ok(
+    !text.includes("nothing worth doing"),
+    "old paragraph-3 wording 'nothing worth doing' must be removed",
+  );
+  assert.ok(
+    !text.includes("never force an action just to act"),
+    "old paragraph-3 wording 'never force an action just to act' must be removed",
   );
 });
 
@@ -179,16 +241,75 @@ test("config null/undefined -> defaults", async () => {
   assert.equal((await setupAndGetBlock(undefined)).block.priority, DEFAULT_PRIORITY);
 });
 
-test("registers exactly one block and NO actions (pure context block)", async () => {
+test("registers exactly two context blocks and NO actions (pure context blocks)", async () => {
   const { store, sys } = await setupAndGetBlock({});
-  assert.equal(store.size, 1);
+  // The system block (@9000) PLUS the trailing reminder block (@200).
+  assert.equal(store.size, 2);
+  assert.ok(store.get(BLOCK_ID), "the system block must be registered");
+  assert.ok(store.get(REMINDER_BLOCK_ID), "the reminder block must be registered");
   assert.deepEqual(sys.actions.list(), [], "must not register actions");
 });
 
-test("teardown() removes the block", async () => {
+// ---------------------------------------------------------------------------
+// SECOND block: "system-prompt.reminder" — trailing, lowest-priority MESSAGE
+// block restating the operating rule at the END of the prompt (recency).
+// ---------------------------------------------------------------------------
+
+test("setup({}) registers a SECOND block 'system-prompt.reminder' targeting 'messages' at default priority 200", async () => {
+  const { block } = await setupAndGetReminderBlock({});
+  assert.equal(block.id, REMINDER_BLOCK_ID);
+  assert.equal((block as any).target, "messages", "reminder must target the messages array");
+  assert.equal(
+    block.priority,
+    REMINDER_DEFAULT_PRIORITY,
+    "reminder default priority must be 200 (well below every other message block)",
+  );
+});
+
+test("reminder render() returns ONE user message named 'operating-reminder' whose content === REMINDER_TEXT (exact)", async () => {
+  const { block } = await setupAndGetReminderBlock({});
+  const msgs = await renderMessages(block);
+  assert.equal(msgs.length, 1, "reminder must render exactly ONE message");
+  const [m] = msgs;
+  assert.equal(m.role, "user", "the reminder message role must be 'user'");
+  assert.equal(m.name, "operating-reminder", "the reminder message name must be 'operating-reminder'");
+  assert.equal(m.content, REMINDER_TEXT, "the reminder message content must equal REMINDER_TEXT verbatim");
+});
+
+test("reminder is CHANNEL-AGNOSTIC (no 'web-chat', 'web chat', or 'send_message')", async () => {
+  const { block } = await setupAndGetReminderBlock({});
+  const msgs = await renderMessages(block);
+  const content: string = msgs[0].content;
+  const lower = content.toLowerCase();
+  assert.ok(!lower.includes("web-chat"), "must NOT name the web-chat channel (channel-agnostic)");
+  assert.ok(!lower.includes("web chat"), "must NOT reference a specific channel");
+  assert.ok(!lower.includes("send_message"), "must NOT name a specific channel send tool (channel-agnostic)");
+});
+
+test("reminder carries the distinctive operating-rule substrings", async () => {
+  const { block } = await setupAndGetReminderBlock({});
+  const msgs = await renderMessages(block);
+  const content: string = msgs[0].content;
+  assert.ok(
+    content.includes("PRIVATE MONOLOGUE"),
+    "reminder must restate the private-monologue rule",
+  );
+  assert.ok(
+    content.includes("re-read the newest user message"),
+    "reminder must tell the model to re-read the newest user message",
+  );
+  assert.ok(
+    content.includes("MUST call a tool"),
+    "reminder must state you MUST call a tool to act",
+  );
+});
+
+test("teardown() removes BOTH the system block and the reminder block", async () => {
   const { p, store } = await setupAndGetBlock({});
   assert.equal(typeof p.teardown, "function");
+  assert.equal(store.size, 2, "both blocks present before teardown");
   await p.teardown();
   assert.equal(store.get(BLOCK_ID), undefined);
+  assert.equal(store.get(REMINDER_BLOCK_ID), undefined, "teardown must also remove the reminder block");
   assert.equal(store.size, 0);
 });

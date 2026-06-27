@@ -276,12 +276,17 @@ test("config default conversationMaxTurns=60 caps the web-chat.conversation bloc
 
     const rendered = (await (block as ContextBlock).render()) as Message[];
     assert.ok(Array.isArray(rendered), "web-chat.conversation render() must return a Message[]");
+    // The conversation TURNS are windowed to <= 60; a single trailing situational
+    // status marker (name:"web-chat.status") may be appended BEYOND that turn budget.
+    const turns = rendered.filter((m) => m.name !== "web-chat.status");
+    const markers = rendered.filter((m) => m.name === "web-chat.status");
     assert.ok(
-      rendered.length <= 60,
-      `web-chat.conversation must be windowed to <= 60 (default conversationMaxTurns) but got ${rendered.length} from ${SEEDED} seeded`,
+      turns.length <= 60,
+      `web-chat.conversation must window TURNS to <= 60 (default conversationMaxTurns) but got ${turns.length} from ${SEEDED} seeded`,
     );
+    assert.ok(markers.length <= 1, "at most one trailing status marker is appended");
     // Sanity: it should still contain the most recent turns mapped correctly.
-    assert.ok(rendered.length > 0, "with 80 seeded entries the conversation must not be empty");
+    assert.ok(turns.length > 0, "with 80 seeded entries the conversation must not be empty");
     for (const m of rendered) {
       assert.ok(m.role === "assistant" || m.role === "user", "each turn maps to assistant|user");
     }

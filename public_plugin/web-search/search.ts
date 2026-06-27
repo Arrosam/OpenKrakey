@@ -1,16 +1,17 @@
 /**
- * searxng — PURE HELPERS (no bus, no fetch, no I/O except reading the cfg object).
+ * web-search — PURE HELPERS (no bus, no fetch, no I/O except reading the cfg object).
  *
  * All functions here are deterministic and side-effect free so they can be unit
  * tested in isolation. The bus-side wiring (actions, blocks, the fetch call) lives
  * in ./index.ts.
  */
 
-export interface SearxngConfig {
+export interface WebSearchConfig {
   instanceUrl: string | null; // if set -> ONLY endpoint (no fallback)
   localUrl: string; // default "http://localhost:8080"
   publicInstances: string[]; // default pool below
   usePublicFallback: boolean; // default true
+  useDuckDuckGoFallback: boolean; // default true
   language: string; // default "auto"
   categories: string; // default "general"
   safesearch: number; // 0|1|2, default 0
@@ -31,22 +32,17 @@ export interface NormalizedResult {
 }
 
 /** Immutable default public-instance pool. */
-export const DEFAULT_PUBLIC_INSTANCES: readonly string[] = [
-  "https://searx.be",
-  "https://search.inetol.net",
-  "https://paulgo.io",
-  "https://searx.tiekoetter.com",
-];
+export const DEFAULT_PUBLIC_INSTANCES: readonly string[] = [];
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
 }
 
 /**
- * Read and validate `ctx.config` (unknown) into a fully-defaulted SearxngConfig.
+ * Read and validate `ctx.config` (unknown) into a fully-defaulted WebSearchConfig.
  * A non-object `raw` is treated as `{}`; every field falls back to its default.
  */
-export function readConfig(raw: unknown): SearxngConfig {
+export function readConfig(raw: unknown): WebSearchConfig {
   const o: Record<string, unknown> =
     raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
 
@@ -58,6 +54,7 @@ export function readConfig(raw: unknown): SearxngConfig {
     : [...DEFAULT_PUBLIC_INSTANCES];
 
   const usePublicFallback = o.usePublicFallback === false ? false : true;
+  const useDuckDuckGoFallback = o.useDuckDuckGoFallback === false ? false : true;
 
   const language = isNonEmptyString(o.language) ? o.language : "auto";
   const categories = isNonEmptyString(o.categories) ? o.categories : "general";
@@ -86,6 +83,7 @@ export function readConfig(raw: unknown): SearxngConfig {
     localUrl,
     publicInstances,
     usePublicFallback,
+    useDuckDuckGoFallback,
     language,
     categories,
     safesearch,
@@ -103,9 +101,10 @@ export function readConfig(raw: unknown): SearxngConfig {
 /**
  * The ordered list of base URLs to try. If `instanceUrl` is set it is the ONLY
  * endpoint (no fallback); otherwise local-first, then the public pool when
- * `usePublicFallback`.
+ * `usePublicFallback`. SearXNG endpoints only — the DuckDuckGo fallback is wired
+ * separately in ./index.ts.
  */
-export function resolveEndpoints(cfg: SearxngConfig): string[] {
+export function resolveEndpoints(cfg: WebSearchConfig): string[] {
   if (cfg.instanceUrl !== null) return [cfg.instanceUrl];
   return [cfg.localUrl, ...(cfg.usePublicFallback ? cfg.publicInstances : [])];
 }
@@ -151,7 +150,7 @@ export function normalizeResults(
   maxSnippetChars: number,
 ): NormalizedResult[] {
   if (json === null || typeof json !== "object" || !Array.isArray((json as { results?: unknown }).results)) {
-    throw new Error("searxng: response has no results array");
+    throw new Error("web-search: response has no results array");
   }
   const items = (json as { results: unknown[] }).results.slice(0, maxResults);
   return items.map((raw): NormalizedResult => {
@@ -163,13 +162,79 @@ export function normalizeResults(
   });
 }
 
+/** Strip HTML tags and decode the common entities, returning collapsed plain text. */
+function stripTagsAndDecode(html: string): string {
+  const noTags = html.replace(/<[^>]*>/g, "");
+  const decoded = noTags
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_m, code: string) => String.fromCharCode(Number(code)));
+  return decoded.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parse a DuckDuckGo Lite (https://lite.duckduckgo.com/lite/) HTML response into
+ * NormalizedResult[]. Each `<a … class='result-link'>` carries the redirect href
+ * whose `uddg` query-param is the (URI-encoded) real URL; the anchor's inner text
+ * is the title; the FOLLOWING `<td class='result-snippet'>` inner text is the
+ * snippet (empty string when absent). Results are paired in document order and
+ * capped to `maxResults`; snippets are truncated to `maxSnippetChars`.
+ */
+export function parseDuckDuckGoLite(
+  html: string,
+  maxResults: number,
+  maxSnippetChars: number,
+): NormalizedResult[] {
+  const results: NormalizedResult[] = [];
+  // Match each result-link anchor and the snippet cell that follows it (if any),
+  // before the next result-link anchor.
+  const linkRe = /<a\b[^>]*\bclass='result-link'[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+
+  while ((m = linkRe.exec(html)) !== null && results.length < maxResults) {
+    const anchor = m[0];
+    const innerHtml = m[1];
+
+    const hrefMatch = /href=(?:"([^"]*)"|'([^']*)')/i.exec(anchor);
+    const href = hrefMatch ? (hrefMatch[1] ?? hrefMatch[2] ?? "") : "";
+    let url = "";
+    const uddgMatch = /[?&]uddg=([^&'"]*)/.exec(href);
+    if (uddgMatch) {
+      try {
+        url = decodeURIComponent(uddgMatch[1]);
+      } catch {
+        url = "";
+      }
+    }
+
+    const title = stripTagsAndDecode(innerHtml);
+
+    // The snippet is the next result-snippet cell before the following result-link.
+    const rest = html.slice(linkRe.lastIndex);
+    const nextLinkIdx = rest.search(/<a\b[^>]*\bclass='result-link'/i);
+    const window = nextLinkIdx === -1 ? rest : rest.slice(0, nextLinkIdx);
+    const snippetMatch = /<td\b[^>]*\bclass='result-snippet'[^>]*>([\s\S]*?)<\/td>/i.exec(window);
+    const snippet = snippetMatch
+      ? truncateSnippet(stripTagsAndDecode(snippetMatch[1]), maxSnippetChars)
+      : "";
+
+    results.push({ title, url, snippet });
+  }
+
+  return results;
+}
+
 /**
  * Build the SYSTEM guidance string when the operator hasn't supplied a custom one.
- * Mentions the `searxng.search` tool, that results arrive on the NEXT beat as a
- * user message tagged "searxng", the endpoint strategy, the maxResults cap, and the
- * honest caveat about public instances.
+ * Mentions the `web-search.search` tool, that results arrive on the NEXT beat as a
+ * user message tagged "web-search", the endpoint strategy, the maxResults cap, the
+ * DuckDuckGo fallback, and the honest caveat about public instances.
  */
-export function buildDefaultGuidance(cfg: SearxngConfig): string {
+export function buildDefaultGuidance(cfg: WebSearchConfig): string {
   const endpointStrategy =
     cfg.instanceUrl !== null
       ? `Queries go to the configured instance ${cfg.instanceUrl}.`
@@ -177,11 +242,15 @@ export function buildDefaultGuidance(cfg: SearxngConfig): string {
           cfg.usePublicFallback
             ? `, then fall back to public instances (${cfg.publicInstances.join(", ")})`
             : ``
+        }${
+          cfg.useDuckDuckGoFallback
+            ? `, and use a keyless DuckDuckGo web search when no SearXNG instance is set`
+            : ``
         }.`;
 
   return [
-    `You can search the web with the tool searxng.search (argument: query).`,
-    `Results do NOT come back inline: titles, URLs, and snippets arrive on the NEXT beat as a user message tagged "searxng". Call the tool, then read its results next beat.`,
+    `You can search the web with the tool web-search.search (argument: query).`,
+    `Results do NOT come back inline: titles, URLs, and snippets arrive on the NEXT beat as a user message tagged "web-search". Call the tool, then read its results next beat.`,
     endpointStrategy,
     `At most ${cfg.maxResults} results are returned per query.`,
     `Note: public SearXNG instances may rate-limit or disable the JSON API, so a search can fail. For reliable web search, run a local SearXNG or set instanceUrl in this plugin's config.`,

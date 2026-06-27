@@ -652,3 +652,57 @@ test("run report: omitted report sink changes nothing (back-compat)", async () =
   assert.equal(handles.length, 1);
   await assert.doesNotReject(() => handles[0].stop());
 });
+
+// ===========================================================================
+// EXT — requestRestart: a GRACEFUL restart stops EVERY agent (teardown → flush
+// best-effort state) BEFORE re-execing (spawn) and exiting. The re-exec/exit are
+// INJECTED here so the test never actually spawns a child or exits the process.
+// Resolved defensively: red on a missing export, never an import crash.
+// ===========================================================================
+
+const requestRestart: any = (bootModule as any).requestRestart;
+
+/** A fake AgentHandle that records its stop() order and can simulate a teardown throw. */
+function fakeHandle(id: string, order: string[], opts?: { throwOnStop?: boolean }): AgentHandle {
+  return {
+    id,
+    start: async () => {},
+    stop: async () => {
+      order.push("stop:" + id);
+      if (opts?.throwOnStop) throw new Error("teardown boom in " + id);
+    },
+  };
+}
+
+test("requestRestart: exported as a function from the boot node", () => {
+  assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
+});
+
+test("requestRestart: stops every handle BEFORE re-exec (spawn), spawn BEFORE exit, forwarding delayMs", async () => {
+  assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
+  const order: string[] = [];
+  const handles = [fakeHandle("a", order), fakeHandle("b", order)];
+  let spawnedMs = -1;
+  let exitCode = -1;
+  await requestRestart(handles, 1234, {
+    spawn: (ms: number) => { spawnedMs = ms; order.push("spawn"); },
+    exit: (c: number) => { exitCode = c; order.push("exit"); },
+  });
+  assert.ok(order.indexOf("stop:a") < order.indexOf("spawn"), "agent a torn down before re-exec");
+  assert.ok(order.indexOf("stop:b") < order.indexOf("spawn"), "agent b torn down before re-exec");
+  assert.ok(order.indexOf("spawn") < order.indexOf("exit"), "replacement spawned before this process exits");
+  assert.equal(spawnedMs, 1234, "delayMs is forwarded to the replacement");
+  assert.equal(exitCode, 0, "exits with code 0");
+});
+
+test("requestRestart: a handle whose stop() rejects does NOT block the re-exec (allSettled)", async () => {
+  assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
+  const order: string[] = [];
+  const handles = [fakeHandle("ok", order), fakeHandle("bad", order, { throwOnStop: true })];
+  let spawned = false;
+  let exited = false;
+  await assert.doesNotReject(() =>
+    requestRestart(handles, 0, { spawn: () => { spawned = true; }, exit: () => { exited = true; } }),
+  );
+  assert.ok(spawned && exited, "still re-execs + exits even when a teardown throws");
+});

@@ -1,15 +1,15 @@
 import type { ConfigSchema } from "../../contracts/plugin";
 
 export const KRAKEYCODE_SCHEMA: ConfigSchema = [
-  { key: "mode", label: "Security mode", type: "enum", default: "local",
+  { key: "mode", label: "Security mode", type: "enum", default: "sandbox",
     options: [
-      { value: "local", label: "Local", summary: "Absolute paths, full working-directory access." },
-      { value: "sandbox", label: "Sandbox", summary: "Confined to the root directory; command allowlist enforced." },
+      { value: "sandbox", label: "Sandbox", summary: "Confined to this plugin's own workspace; safe default." },
+      { value: "local", label: "Local", summary: "Absolute paths, full working-directory access — can touch any file on the computer." },
     ],
-    help: "Sandbox confines file ops to the configured root and filters shell commands." },
-  { key: "root", label: "Sandbox root", type: "string", placeholder: "(plugin data dir)", example: "./workspace", showIf: { key: "mode", equals: "sandbox" }, help: "File ops cannot escape this directory in sandbox mode. Resolved to an absolute path." },
+    help: "Default is Sandbox — file ops are confined to this plugin's workspace. Switch to Local to let Krakey read and modify files anywhere on the computer." },
+  { key: "root", label: "Sandbox root", type: "string", placeholder: "(plugin data dir)", example: "./workspace", showIf: { key: "mode", equals: "sandbox" }, help: "File ops cannot escape this directory in sandbox mode. Resolved to an absolute path. Defaults to the plugin's own workspace." },
   { key: "allowWrite", label: "Allow file writes", type: "boolean", default: true, help: "Enables write_file and edit_file tools. Disable for read-only access." },
-  { key: "allowCommands", label: "Allow shell commands", type: "boolean", default: true, help: "Enables the bash tool." },
+  { key: "allowCommands", label: "Allow shell commands", type: "boolean", default: false, help: "Enables the bash (shell) tool. OFF by default — turn it on to let Krakey run shell commands on the computer." },
   { key: "commandAllowlist", label: "Command allowlist", type: "list", default: [], placeholder: "git, ls, cat…", showIf: { key: "mode", equals: "sandbox" }, help: "Sandbox only. Empty list = allow all commands. Otherwise the first token of the command must appear here." },
   { key: "commandTimeoutMs", label: "Command timeout", type: "number", default: 60000, min: 1, step: 1000, unit: "ms", help: "Maximum wall-clock time a bash command may run." },
   { key: "maxReadBytes", label: "Max read bytes", type: "number", default: 1000000, min: 1, step: 1000, help: "Maximum bytes read_file may return." },

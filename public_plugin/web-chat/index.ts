@@ -255,19 +255,46 @@ const createWeb: PluginFactory = (): Plugin => {
         id: CONVERSATION_BLOCK_ID,
         target: "messages",
         priority: CONVERSATION_PRIORITY,
-        render: (): Message[] =>
-          windowTranscript(r.store.list(), maxTurns, maxChars).map((e) =>
+        render: (): Message[] => {
+          const entries = windowTranscript(r.store.list(), maxTurns, maxChars);
+          const msgs: Message[] = entries.map((e) =>
             e.role === "agent"
               ? { role: "assistant", content: e.text }
               : { role: "user", content: e.text, name: "web-chat" },
-          ),
+          );
+          // Append a situational-status marker computed from the LAST visible turn,
+          // so the model knows whether the user is awaiting a reply (their latest
+          // message is unanswered) or has already been fully answered (the last turn
+          // was the agent's). On an empty transcript there is nothing to mark.
+          if (entries.length > 0) {
+            const last = entries[entries.length - 1];
+            msgs.push(
+              last.role === "agent"
+                ? {
+                    role: "user",
+                    content:
+                      "[Status: you have already replied to everything the user has said. They have not sent anything new since. Do not message again unless you genuinely have something new to add.]",
+                    name: "web-chat.status",
+                  }
+                : {
+                    role: "user",
+                    content: "[Status: the user's latest message above has not been answered yet.]",
+                    name: "web-chat.status",
+                  },
+            );
+          }
+          return msgs;
+        },
       });
 
-      // A new request snapshots the messages now in its composed context: those
-      // pending messages are carried by THIS request and become its responsibility
-      // (so an EARLIER outstanding request's return can't claim them).
-      const offRequest = events.on(Events.LLM_REQUEST, (payload) => {
-        const reqId = (payload as EventPayloads["llm.request"] | undefined)?.id;
+      // A DISPATCHED request snapshots the messages now in its composed context: those
+      // pending messages are carried by THIS request and become its responsibility (so
+      // an EARLIER outstanding request's return can't claim them). We key off
+      // `llm.request.sent` — emitted by llm-core right before chat() with the assembled
+      // request and the SAME corrId as the eventual `llm.return` — because the plain
+      // `llm.request` is now a body-less trigger (no corrId).
+      const offRequest = events.on(Events.LLM_REQUEST_SENT, (payload) => {
+        const reqId = (payload as EventPayloads["llm.request.sent"] | undefined)?.id;
         if (typeof reqId !== "string" || r.pending.length === 0) return;
         const prior = r.inFlight.get(reqId) ?? [];
         r.inFlight.set(reqId, prior.concat(r.pending));
@@ -282,12 +309,11 @@ const createWeb: PluginFactory = (): Plugin => {
         const done = r.inFlight.get(reqId);
         if (!done) return;
         r.inFlight.delete(reqId);
-        for (const id of done) {
-          broadcast(r, { type: "status", id, status: "read" });
-          // Also flip the in-memory transcript so a reconnect/replay shows "read"
-          // immediately, and teardown's compacting rewrite bakes it onto disk (M-9).
-          r.store.markRead(id);
-        }
+        for (const id of done) broadcast(r, { type: "status", id, status: "read" });
+        // Flip the in-memory transcript so a reconnect/replay shows "read", and persist
+        // (write-through, so the flips survive a non-graceful exit). markReadMany
+        // coalesces all of THIS beat's flips into a SINGLE rewrite instead of one per id.
+        r.store.markReadMany(done);
       });
 
       // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web-chat's

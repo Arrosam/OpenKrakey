@@ -110,7 +110,7 @@ function communicatorFields(providerId) {
       options: PROVIDERS.map((x) => ({ value: x.id, label: x.label, summary: x.summary })),
       help: "The wire format your endpoint speaks. Drives every option below." },
     { key: "model", label: "Model id", control: "text", default: "", example: `e.g. ${p.modelExample}`,
-      placeholder: p.modelExample, help: "Exactly as your provider names it." },
+      placeholder: p.modelExample, help: "Exactly as your provider names it.", fetchModels: true },
     { key: "baseURL", label: "Endpoint URL", control: "url", default: "",
       example: `e.g. ${p.baseURLExample}`, placeholder: p.baseURLExample, help: p.baseURLHint },
     { key: "apiKey", label: "API key", control: "secret", default: "",
@@ -167,6 +167,18 @@ let dirty = false;
 const $ = (sel, el = document) => el.querySelector(sel);
 const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+// Human-friendly duration from milliseconds: "30 s", "15 min", "8 h", "2 d".
+const fmtDur = (ms) => {
+  if (typeof ms !== "number" || !isFinite(ms) || ms < 0) return "—";
+  const s = ms / 1000;
+  if (s < 60) return (Number.isInteger(s) ? s : s.toFixed(1)) + " s";
+  const m = s / 60;
+  if (m < 60) return (Number.isInteger(m) ? m : m.toFixed(1)) + " min";
+  const h = m / 60;
+  if (h < 24) return (Number.isInteger(h) ? h : h.toFixed(1)) + " h";
+  const d = h / 24;
+  return (Number.isInteger(d) ? d : d.toFixed(1)) + " d";
+};
 const serviceNames = () => Object.keys(state.services);
 
 /* ── Inline SVG icon set (line icons, currentColor — no emoji/glyphs) ───────*/
@@ -243,10 +255,51 @@ function renderField(field, get, set, ctx = {}) {
   wrap.appendChild(labWrap);
 
   const ctrl = el("div", "fcontrol");
-  ctrl.appendChild(buildControl(field, get, set, ctx));
+  const control = buildControl(field, get, set, ctx);
+  if (field.fetchModels) {
+    const row = el("div", "fetch-row");
+    row.appendChild(control);
+    row.appendChild(makeFetchModelsBtn(control, ctx, set));
+    ctrl.appendChild(row);
+  } else {
+    ctrl.appendChild(control);
+  }
   if (field.example) ctrl.appendChild(el("div", "fexample", "↳ " + esc(field.example)));
   wrap.appendChild(ctrl);
   return wrap;
+}
+
+// "Fetch models" affordance beside the Model field: probes the provider's model
+// list via the SERVER (no browser CORS) and offers the results as a datalist on
+// the input. Reads the sibling provider/baseURL/apiKey via ctx.peek.
+function makeFetchModelsBtn(inputEl, ctx, setModel) {
+  const btn = el("button", "btn fetch-btn");
+  btn.type = "button";
+  btn.textContent = "Fetch models";
+  btn.onclick = async () => {
+    const peek = ctx && ctx.peek ? ctx.peek : () => undefined;
+    const payload = { provider: peek("provider"), baseURL: peek("baseURL"), apiKey: peek("apiKey") };
+    btn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Fetching…";
+    try {
+      const r = await apiPost("/api/provider-models", payload);
+      const models = (r && r.models) || [];
+      if (!models.length) { toastErr("No models returned by the provider"); return; }
+      let dl = document.getElementById("models-datalist");
+      if (dl) dl.remove();
+      dl = document.createElement("datalist");
+      dl.id = "models-datalist";
+      models.forEach((m) => { const o = document.createElement("option"); o.value = m; dl.appendChild(o); });
+      document.body.appendChild(dl);
+      inputEl.setAttribute("list", "models-datalist");
+      if (!inputEl.value && models.length === 1) { inputEl.value = models[0]; setModel(models[0]); }
+      inputEl.focus();
+      toast(models.length + " model" + (models.length === 1 ? "" : "s") + " found — pick from the list");
+    } catch (e) { handleApiError(e); }
+    finally { btn.disabled = false; btn.textContent = label; }
+  };
+  return btn;
 }
 
 function controlTag(c) {
@@ -594,6 +647,7 @@ function editService(name) {
     for (const fld of fields) {
       const sl = slice(working, fld.key, fld.default);
       const node = renderField(fld, sl.get, sl.set, {
+        peek: (k) => working[k],
         onSelect: (key) => { if (key === "provider") { reconcileProvider(); drawFields(); } },
       });
       if (node) fieldsHost.appendChild(node);
@@ -656,7 +710,7 @@ views.agents = (main) => {
     const a = state.agents[id];
     const row = el("div", "row");
     row.innerHTML = `<span class="g">${icon("robot")}</span><div class="rt"><div class="name"><span class="id">${esc(id)}</span></div>` +
-      `<div class="sub">every ${a.intervalMs != null ? a.intervalMs / 1000 : "—"}s · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
+      `<div class="sub">every ${fmtDur(a.intervalMs)} · ${(a.plugins || []).length} plugins · ${(a.privatePlugins || []).length} private</div></div>` +
       `<span class="arrow">${icon("arrowRight")}</span>`;
     row.onclick = () => editAgent(id);
     list.appendChild(row);
@@ -735,7 +789,7 @@ function naAgent(panel) {
   const body = el("div", "wz-body");
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(nwz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -803,7 +857,7 @@ function naReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(nwz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (nwz.agent.intervalMs / 1000) + "s", true);
+    reviewLine("Wakes", "every " + fmtDur(nwz.agent.intervalMs), true);
   body.appendChild(ag);
 
   const llm = el("div", "review-blk");
@@ -948,8 +1002,8 @@ const WZ_STEPS = ["Welcome", "AI service", "Capabilities", "Agent", "Review"];
 const wz = {
   step: 0,
   service: { provider: "anthropic", name: "", model: "", baseURL: undefined, apiKey: "", capabilities: ["chat"] },
-  plugins: ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode"],
-  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. Be concise and helpful.", intervalMs: 30000 },
+  plugins: ["llm-core", "tool-manager", "persona", "system-prompt", "web-chat", "krakeycode"],
+  agent: { id: "krakey", persona: "You are Krakey, an autonomous agent. You run on a heartbeat — each beat you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful.", intervalMs: 30000 },
 };
 
 views.wizard = (main) => {
@@ -1022,7 +1076,7 @@ function wzService(panel) {
     const map = { provider: live[0], model: live[1], baseURL: live[2], apiKey: live[3] };
     [map.provider, nameFld, map.model, map.baseURL, map.apiKey].forEach((fld) => {
       const sl = slice(wz.service, fld.key, fld.default);
-      const node = renderField(fld, sl.get, sl.set, { onSelect: (k) => { if (k === "provider") draw(); } });
+      const node = renderField(fld, sl.get, sl.set, { peek: (k) => wz.service[k], onSelect: (k) => { if (k === "provider") draw(); } });
       if (node) host.appendChild(node);
     });
   };
@@ -1062,7 +1116,7 @@ function wzAgent(panel) {
   const fields = [
     { key: "id", label: "Agent name", control: "text", placeholder: "krakey", help: "Used as its folder under agents/.", example: "letters, digits, . _ -" },
     { key: "persona", label: "Persona", control: "textarea", help: "The system prompt — who the agent is and how it behaves." },
-    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute)." },
+    { key: "intervalMs", label: "Heartbeat interval", control: "number", min: 1, step: 1000, unit: "ms", help: "How often it wakes unprompted, in milliseconds (60000 = 1 minute). Applies when the agent next (re)starts." },
   ];
   fields.forEach((fld) => { const sl = slice(wz.agent, fld.key, fld.default); body.appendChild(renderField(fld, sl.get, sl.set, {})); });
   panel.appendChild(body);
@@ -1098,7 +1152,7 @@ function wzReview(panel) {
 
   const ag = el("div", "review-blk");
   ag.innerHTML = `<div class="rh"><span class="rh-ic">${icon("robot")}</span> Agent · ${esc(wz.agent.id)}</div>` +
-    reviewLine("Wakes", "every " + (wz.agent.intervalMs != null ? wz.agent.intervalMs / 1000 : "—") + "s", true) +
+    reviewLine("Wakes", "every " + fmtDur(wz.agent.intervalMs), true) +
     reviewLine("Persona", (wz.agent.persona || "").slice(0, 48) + ((wz.agent.persona || "").length > 48 ? "…" : ""));
   body.appendChild(ag);
 

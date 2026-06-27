@@ -2,36 +2,36 @@
   "intervalMs": 900000,
   "plugins": [
     "llm-core",
+    "tool-manager",
     "persona",
     "system-prompt",
     "krakeycode",
-    "searxng",
-    "inspector"
+    "web-search",
+    "inspector",
+    "interval_toggle"
   ],
   "privatePlugins": [
     "web-chat",
-    "browser",
     "memory-note",
     "history"
   ],
   "config": {
     "persona": {
-      "text": "You are Krakey, an autonomous agent. Be concise and helpful."
+      "text": "You are Krakey, an autonomous agent. You run on a heartbeat — each beat you monitor what's happening (new messages, tool results, your goals and notes), think about the current situation, then decide what, if anything, to do. Acting is optional: when nothing needs doing, simply observe and wait rather than acting for its own sake. Be concise and helpful."
     },
     "llm-core": {},
     "web-chat": {
       "port": 7718
     },
     "krakeycode": {},
-    "searxng": {
+    "web-search": {
       "instanceUrl": null,
       "localUrl": "http://localhost:8080",
-      "usePublicFallback": true
+      "useDuckDuckGoFallback": true
     },
     "inspector": {},
-    "browser": {
-      "headless": false,
-      "chromePath": null
+    "interval_toggle": {
+      "baseIntervalMs": 900000
     },
     "memory-note": {},
     "history": {}

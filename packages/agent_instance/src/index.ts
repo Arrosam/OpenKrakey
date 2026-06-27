@@ -21,7 +21,7 @@ import type { Agent, AgentDefinition } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
 import type { EventBus } from "../../../contracts/event-system";
 import { PATHS, agentPaths } from "../../../shared/config";
-import { Events } from "../../../shared/actions";
+import { Actions, Events } from "../../../shared/actions";
 import { consoleLogger, tagged, type Logger } from "../../../shared/logging";
 
 /**
@@ -79,6 +79,15 @@ export function createAgentInstance(
     print?: (text: string) => void;
     publicPluginDir?: string;
     agentsDir?: string;
+    /**
+     * GRACEFUL-restart callback wired by the composition root (boot). When given,
+     * this Agent registers a core-owned `core.restart` action (Actions.CORE_RESTART)
+     * on its actionbus that delegates here, so the `restart` plugin can trigger a
+     * restart that runs teardown FIRST (persisting best-effort state) instead of a
+     * raw `process.exit`. Absent in tests / non-boot setups — the action is then
+     * simply not registered (the plugin guards with `has`).
+     */
+    requestRestart?: (delayMs: number) => Promise<void>;
   },
 ): Agent {
   const log = tagged(deps?.log ?? consoleLogger, "[agent:" + def.id + "]");
@@ -106,7 +115,7 @@ export function createAgentInstance(
   // loggers so they serialize among themselves but never across agents (R6).
   const mirrorGuard: MirrorGuard = { active: false };
   const orchLog = busLogger(log, events.events, "core:orchestrator", mirrorGuard);
-  const orchestrator = createOrchestrator({ events, clock, log: orchLog });
+  const orchestrator = createOrchestrator({ agentId: def.id, events, clock, log: orchLog });
   const loader = createLoader({
     agentId: def.id,
     def,
@@ -129,10 +138,23 @@ export function createAgentInstance(
   let started = false;
   let stopped = false;
   let running = false;
+  let offCoreRestart: (() => void) | undefined;
 
   const start = async (): Promise<void> => {
     if (started) return;
     started = true;
+    // Expose the graceful-restart seam (only when boot wired the callback): a core
+    // `core.restart` action the restart plugin invokes instead of exiting the process
+    // itself, so every plugin's teardown runs (persisting best-effort state) before the
+    // re-exec. Registered before load so it's available throughout; removed on stop.
+    const requestRestart = deps?.requestRestart;
+    if (requestRestart) {
+      offCoreRestart = events.actions.register(Actions.CORE_RESTART, async (params: unknown) => {
+        const d = (params as { delayMs?: unknown } | undefined)?.delayMs;
+        await requestRestart(typeof d === "number" && d >= 0 ? Math.floor(d) : 0);
+        return { restarting: true };
+      });
+    }
     await loader.load();
     // A stop() may have arrived while load was in flight: nothing is wired yet,
     // so tear the just-loaded plugins down and end genuinely stopped — no
@@ -151,6 +173,10 @@ export function createAgentInstance(
   const stop = async (): Promise<void> => {
     if (stopped || !started) return;
     stopped = true;
+    if (offCoreRestart) {
+      offCoreRestart();
+      offCoreRestart = undefined;
+    }
     if (!running) return; // start() is mid-load — it owns teardown of the in-flight load.
     clock.stop();
     orchestrator.stop();

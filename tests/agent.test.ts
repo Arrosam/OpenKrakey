@@ -677,6 +677,12 @@ export default () => ({
       priority: 100,
       render() { throw new Error("render-boom"); },
     });
+    // METHOD B: compose happens on demand, so stand in for llm-core — pull a
+    // prompt.compose each beat so the throwing block actually renders (and the
+    // orchestrator logs the caught failure as a core:orchestrator warn).
+    ctx.events.on("clock.tick", () => {
+      if (ctx.actions.has("prompt.compose")) ctx.actions.invoke("prompt.compose").catch(() => {});
+    });
   },
 });
 `;
@@ -1141,4 +1147,56 @@ try {
     result.count < 50,
     "the observed log.entry count must stay BOUNDED (no runaway recursion) — got " + result.count,
   );
+});
+
+// ===========================================================================
+// EXT — GRACEFUL-RESTART SEAM: when boot wires a `requestRestart` callback,
+// the agent registers a core-owned `core.restart` action that DELEGATES to it
+// (forwarding delayMs). Without the dep, the action is simply NOT registered, so
+// a plugin's ctx.actions.has("core.restart") is false and it must not invoke.
+// Black-box: we observe via a plugin that records has() and invokes once.
+// ===========================================================================
+
+/** A plugin that, in setup, records whether core.restart exists and invokes it once. */
+function restartCallerPlugin(id: string, delayMs = 1234): string {
+  return `
+export const observed = { has: null, invoked: false };
+export default () => ({
+  manifest: { id: ${JSON.stringify(id)}, version: "1" },
+  async setup(ctx) {
+    observed.has = ctx.actions.has("core.restart");
+    if (observed.has) {
+      try { await ctx.actions.invoke("core.restart", { delayMs: ${delayMs} }); observed.invoked = true; } catch {}
+    }
+  },
+});
+`;
+}
+
+test("deps.requestRestart: the agent registers core.restart; a plugin invoking it reaches the callback with delayMs", async () => {
+  writePublicPlugin("restart-caller", restartCallerPlugin("restart-caller", 1234));
+  const calls: number[] = [];
+  const agent = make(
+    bareDef("rr-on", { intervalMs: 10_000, plugins: ["restart-caller"] }),
+    baseDeps({ requestRestart: async (ms: number) => { calls.push(ms); } }),
+  );
+  await agent.start();
+  const mod = await importPublicPlugin("restart-caller");
+  assert.equal(mod.observed.has, true, "core.restart must be registered when requestRestart is provided");
+  assert.equal(mod.observed.invoked, true, "the plugin's core.restart invoke resolved");
+  assert.deepEqual(calls, [1234], "requestRestart received the delayMs the plugin passed");
+  await agent.stop();
+});
+
+test("no deps.requestRestart: core.restart is NOT registered; a plugin's has() is false and it never invokes", async () => {
+  writePublicPlugin("restart-caller-off", restartCallerPlugin("restart-caller-off"));
+  const agent = make(
+    bareDef("rr-off", { intervalMs: 10_000, plugins: ["restart-caller-off"] }),
+    baseDeps(), // no requestRestart wired
+  );
+  await assert.doesNotReject(() => agent.start());
+  const mod = await importPublicPlugin("restart-caller-off");
+  assert.equal(mod.observed.has, false, "core.restart must be absent without the dep");
+  assert.equal(mod.observed.invoked, false, "the plugin must not invoke a missing action");
+  await agent.stop();
 });

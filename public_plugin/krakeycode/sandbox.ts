@@ -35,7 +35,9 @@ export interface KrakeycodeConfig {
 export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
   const c = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 
-  const mode: "local" | "sandbox" = c.mode === "sandbox" ? "sandbox" : "local";
+  // Safe by default: sandbox (confined to the plugin's own workspace) unless the
+  // operator explicitly opts into "local". An unknown/absent mode → sandbox.
+  const mode: "local" | "sandbox" = c.mode === "local" ? "local" : "sandbox";
 
   const root =
     typeof c.root === "string" && c.root.length > 0
@@ -43,7 +45,8 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
       : path.resolve(dataDir);
 
   const allowWrite = c.allowWrite === false ? false : true;
-  const allowCommands = c.allowCommands === false ? false : true;
+  // Shell is OFF unless explicitly enabled (c.allowCommands === true). Absent → false.
+  const allowCommands = c.allowCommands === true ? true : false;
 
   const commandAllowlist = Array.isArray(c.commandAllowlist)
     ? c.commandAllowlist.filter((x): x is string => typeof x === "string")

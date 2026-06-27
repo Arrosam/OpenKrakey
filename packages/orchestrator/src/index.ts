@@ -2,14 +2,27 @@
  * orchestrator — the per-Agent conductor. The context-buffer lives INSIDE it.
  *
  * It imports NO concrete node, only the injected `events`/`clock` and contract
- * TYPES. It holds NO LLM behavior (no prompt building, no provider calls): it
- * only emits/handles generic lifecycle events and dispatches tool actions by
- * name on the actionbus.
+ * TYPES. It holds NO LLM behavior — and, by design, makes NO decision about WHEN to
+ * send. Each beat it emits a body-less TRIGGER; it composes the prompt only when
+ * ASKED; and it dispatches the tool calls that come back.
  *
  * Beat (driven by clock ticks bridged onto the eventbus as CLOCK_TICK):
- *   tick → PROMPT_GATHER (plugins refresh blocks) → compose → LLM_REQUEST.
- * The beat ends at the emit — the LLM round-trip returns later as LLM_RETURN,
- * whose tool calls are dispatched fire-and-forget on the actionbus.
+ *   tick / immediate wake → emit LLM_REQUEST { agentId }   ← a trigger, no body
+ *
+ * The round-trip plugin (llm-core) owns serialization: it keeps at most one request
+ * in flight PER agentId, coalesces triggers that arrive while a request is busy, and
+ * — right before it actually sends — pulls a freshly-composed body via the
+ * PROMPT_COMPOSE action:
+ *   prompt.compose → emit PROMPT_GATHER (plugins refresh blocks) → compose → { context, messages }
+ * Composing on demand means the body always reflects the latest blocks (a message
+ * that arrived while a previous request was in flight is folded into the next send),
+ * and the orchestrator never has to track or guard the LLM round-trip itself.
+ *
+ * `compose` splits the buffer by target: system blocks → system-prompt text
+ * (priority DESC, each wrapped `<label>…</label>`), message blocks → the messages
+ * array (groups concatenated priority DESC, order within a group kept; the
+ * conversation is one such block). Tool calls from LLM_RETURN are dispatched on the
+ * actionbus fire-and-forget, each settling into a TOOL_RESULT.
  */
 import type { Orchestrator } from "../../../contracts/orchestrator";
 import type { EventSystem, Unsub } from "../../../contracts/event-system";
@@ -17,11 +30,13 @@ import type { Clock } from "../../../contracts/clock";
 import type { ContextBlock, ComposedContext } from "../../../contracts/context";
 import type { LLMResponse, Message } from "../../../contracts/llm";
 import { Actions, Events } from "../../../shared/actions";
-import type { Notify, Request, Reply } from "../../../shared/actions";
+import type { Notify, Reply } from "../../../shared/actions";
 import { consoleLogger, tagged } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
 
 export function createOrchestrator(deps: {
+  /** This Agent's id — stamped on the per-beat trigger as the llm-core lock key. */
+  agentId: string;
   events: EventSystem;
   clock: Clock;
   log?: Logger;
@@ -29,12 +44,10 @@ export function createOrchestrator(deps: {
   // ---- internal state ----
   const blocks = new Map<string, ContextBlock>(); // the context-buffer
   let running = false;
-  let beatBusy = false;
-  let beatQueued = false;
+  let seq = 0; // beat counter (PROMPT_GATHER seq), bumped on each compose
   let tickUnsub: Unsub | null = null;
   let returnUnsub: Unsub | null = null;
-  let clockUnsubs: Unsub[] = []; // CLOCK_* action registrations (while started)
-  let seq = 0; // beat counter
+  let actionUnsubs: Unsub[] = []; // CLOCK_* + PROMPT_COMPOSE registrations (while started)
   const log = tagged(deps.log ?? consoleLogger, "[orchestrator]");
 
   // ---- context composition ----
@@ -95,60 +108,25 @@ export function createOrchestrator(deps: {
   }
 
   // ---- the beat ----
-  async function runBeat(): Promise<void> {
-    // After stop() no beat work runs — emit nothing, even for a queued beat.
-    if (!running) {
-      beatBusy = false;
-      beatQueued = false;
-      return;
-    }
-    try {
-      const n = ++seq;
-      // Let plugins refresh their blocks before we compose. A conversation provider
-      // (history) contributes the conversation as a message-target block, so compose()
-      // assembles BOTH the system text and the messages array from the buffer.
-      const gather: Notify<{ seq: number }> = { at: Date.now(), data: { seq: n } };
-      deps.events.events.emit(Events.PROMPT_GATHER, gather);
-
-      const { context, messages } = await compose();
-      // compose() is async; if we were stopped mid-flight, emit nothing further.
-      if (!running) return;
-
-      // Request the LLM round-trip; do NOT await — the beat ends here. The reply
-      // arrives later as LLM_RETURN. In Phase 0 nobody listens and that is fine.
-      const payload: Request<{ context: ComposedContext; messages: Message[] }> = {
-        id: String(n),
-        at: Date.now(),
-        data: { context, messages },
-      };
-      deps.events.events.emit(Events.LLM_REQUEST, payload);
-    } catch (err) {
-      log.warn(`beat failed: ${err}`);
-    } finally {
-      beatBusy = false;
-      // Only spin up a queued beat if still running; the re-entry also guards
-      // !running, so a stop() between scheduling and execution emits nothing.
-      if (beatQueued && running) {
-        beatQueued = false;
-        setImmediate(() => {
-          if (!running) return;
-          beatBusy = true;
-          runBeat();
-        });
-      } else {
-        beatQueued = false;
-      }
-    }
+  /** A tick (or immediate wake) just signals "think now" — a body-less trigger
+   *  stamped with this Agent's id. llm-core serializes per agentId and pulls the
+   *  body via PROMPT_COMPOSE when it is ready to send. */
+  function onTick(): void {
+    if (!running) return;
+    const trigger: Notify<{ agentId: string }> = {
+      at: Date.now(),
+      data: { agentId: deps.agentId },
+    };
+    deps.events.events.emit(Events.LLM_REQUEST, trigger);
   }
 
-  function onTick(): void {
-    // At most one beat in flight and at most one queued.
-    if (beatBusy) {
-      beatQueued = true;
-      return;
-    }
-    beatBusy = true;
-    runBeat();
+  /** Gather + compose the current prompt ON DEMAND — the PROMPT_COMPOSE action.
+   *  Emits PROMPT_GATHER so plugins refresh their blocks, then composes. */
+  async function composeNow(): Promise<{ context: ComposedContext; messages: Message[] }> {
+    const n = ++seq;
+    const gather: Notify<{ seq: number }> = { at: Date.now(), data: { seq: n } };
+    deps.events.events.emit(Events.PROMPT_GATHER, gather);
+    return compose();
   }
 
   function onReturn(payload: unknown): void {
@@ -160,9 +138,8 @@ export function createOrchestrator(deps: {
     if (!calls || calls.length === 0) return;
     for (const tc of calls) {
       // Fire-and-forget: each then/catch is independent, so one failing tool does
-      // not affect the others and does not abort the beat. As each settles, emit
-      // TOOL_RESULT (id = the ToolCall id, name = the action name) so plugins can
-      // fold the outcome into the next beat's context.
+      // not affect the others. As each settles, emit TOOL_RESULT (id = the ToolCall
+      // id, name = the action name) so plugins can fold the outcome into the next beat.
       deps.events.actions
         .invoke(tc.name, tc.arguments)
         .then((data) => {
@@ -189,8 +166,8 @@ export function createOrchestrator(deps: {
     }
   }
 
-  // ---- clock-rhythm actions (registered while started) ----
-  // Validate { ms: number } for the setters: a missing/non-object params or a
+  // ---- actions registered while started ----
+  // Validate { ms: number } for the clock setters: a missing/non-object params or a
   // non-finite/non-positive ms REJECTS without touching the clock.
   function readMs(params: unknown): number {
     if (params === null || typeof params !== "object") {
@@ -203,8 +180,8 @@ export function createOrchestrator(deps: {
     return ms;
   }
 
-  function registerClockActions(): void {
-    clockUnsubs = [
+  function registerActions(): void {
+    actionUnsubs = [
       deps.events.actions.register(Actions.CLOCK_SET_INTERVAL, async (params) => {
         deps.clock.setInterval(readMs(params));
       }),
@@ -214,6 +191,8 @@ export function createOrchestrator(deps: {
       deps.events.actions.register(Actions.CLOCK_FIRE_NOW, async () => {
         deps.clock.fireNow();
       }),
+      // Compose-on-demand: the round-trip plugin calls this right before it sends.
+      deps.events.actions.register(Actions.PROMPT_COMPOSE, async () => composeNow()),
     ];
   }
 
@@ -223,19 +202,18 @@ export function createOrchestrator(deps: {
       running = true;
       tickUnsub = deps.events.events.on(Events.CLOCK_TICK, () => onTick());
       returnUnsub = deps.events.events.on(Events.LLM_RETURN, (p) => onReturn(p));
-      registerClockActions();
+      registerActions();
     },
 
     stop(): void {
       if (!running) return; // idempotent
       running = false;
-      beatQueued = false; // drop any beat queued behind an in-flight one
       tickUnsub?.();
       tickUnsub = null;
       returnUnsub?.();
       returnUnsub = null;
-      for (const unsub of clockUnsubs) unsub();
-      clockUnsubs = [];
+      for (const unsub of actionUnsubs) unsub();
+      actionUnsubs = [];
     },
 
     // ---- context-block store (the "context-buffer") ----
