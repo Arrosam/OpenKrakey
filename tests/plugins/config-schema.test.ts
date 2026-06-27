@@ -183,13 +183,13 @@ test("system-prompt: priority is a number field", () => {
 });
 
 // ===========================================================================
-// 3. llm-core — keys: communicator, temperature, maxTokens
+// 3. llm-core — keys: communicator, temperature, maxTokens + the context.full knobs
 // ===========================================================================
-test("llm-core: schema is contract-valid and covers exactly its three keys", () => {
+test("llm-core: schema is contract-valid and covers exactly its keys", () => {
   assertValidConfigSchema(LLM_CORE_SCHEMA, "LLM_CORE_SCHEMA");
   assertKeysExactly(
     LLM_CORE_SCHEMA as ConfigSchema,
-    ["communicator", "temperature", "maxTokens"],
+    ["communicator", "temperature", "maxTokens", "contextLimitTokens", "safetyTokens", "charsPerToken", "maxReduceRounds"],
     "LLM_CORE_SCHEMA",
   );
 });

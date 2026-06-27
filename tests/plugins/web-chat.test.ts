@@ -2378,11 +2378,15 @@ test("web-chat(pressure): llm.return clears pressure so the next render returns 
     // right after must reflect the FULL window again. Poll the render until it does
     // (or fails) — no fixed sleep — so a slow same-tick reset is still observed.
     c.send("ret alice R-RESET");
-    let after = base - 1;
-    await c.waitFor(async () => {
+    // The reset is synchronous on the bus, but renderConvoP must be AWAITED (it
+    // awaits a fresh render each call) — so poll it directly in an async loop
+    // rather than via the sync-predicate waitFor (an async predicate would resolve
+    // immediately as a truthy Promise without ever assigning `after`).
+    let after = 0;
+    for (let i = 0; i < 20; i++) {
       after = turnCount(await renderConvoP(c, "alice"));
-      return after === base;
-    }, 4000);
+      if (after === base) break;
+    }
     assert.equal(
       after,
       base,
