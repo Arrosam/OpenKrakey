@@ -105,12 +105,35 @@ function validToken(t: unknown): t is string {
   return typeof t === "string" && t.length >= 16 && /^[A-Za-z0-9._~+\/=-]+$/.test(t);
 }
 
+/**
+ * Context-pressure shrink curve for the conversation window. Each successive
+ * pressure `round` halves the budget (round 0 → base unchanged), with a floor so
+ * the newest turns always survive: at least 1 turn / 500 chars. llm-core emits
+ * `context.full` with a `round` that increments per re-compose within one frame, so
+ * the conversation block sheds proportionally until the prompt fits.
+ */
+function pressuredMaxTurns(base: number, round: number): number {
+  return Math.max(1, Math.floor(base / 2 ** round));
+}
+function pressuredMaxChars(base: number, round: number): number {
+  return Math.max(500, Math.floor(base / 2 ** round));
+}
+
 const createWeb: PluginFactory = (): Plugin => {
   let reg: AgentReg | undefined;
   let unsubs: Array<() => void> = [];
+  // Current context-pressure level for THIS agent's conversation window: 0 = no
+  // pressure (full budget). Bumped synchronously when llm-core signals `context.full`
+  // (so the immediate re-compose reads the shrunk budget), reset to 0 at frame end.
+  let pressureRound = 0;
 
   return {
-    manifest: { id: "web-chat", version: "0.1.0", requires: ["llm.register_tool"], configSchema: WEB_SCHEMA },
+    manifest: {
+      id: "web-chat",
+      version: "0.1.0",
+      requires: ["llm.register_tool"],
+      configSchema: WEB_SCHEMA,
+    },
 
     async setup(ctx: PluginContext): Promise<void> {
       // Destructure the only ctx members the long-lived closures need, so the rest
@@ -256,7 +279,14 @@ const createWeb: PluginFactory = (): Plugin => {
         target: "messages",
         priority: CONVERSATION_PRIORITY,
         render: (): Message[] => {
-          const entries = windowTranscript(r.store.list(), maxTurns, maxChars);
+          // Window under the current pressure level: round 0 keeps the full budget,
+          // each higher round halves it (floored), so a too-large prompt shrinks here
+          // and the model still sees the newest turns.
+          const entries = windowTranscript(
+            r.store.list(),
+            pressuredMaxTurns(maxTurns, pressureRound),
+            pressuredMaxChars(maxChars, pressureRound),
+          );
           const msgs: Message[] = entries.map((e) =>
             e.role === "agent"
               ? { role: "assistant", content: e.text }
@@ -304,6 +334,9 @@ const createWeb: PluginFactory = (): Plugin => {
       // A request's return means the frame that carried its messages completed →
       // flip exactly those messages to "read" (not any still-pending ones).
       const offReturn = events.on(Events.LLM_RETURN, (payload) => {
+        // The frame's round-trip has returned → context pressure is over; reset so the
+        // NEXT frame starts from the full conversation budget (pressure is per-frame).
+        pressureRound = 0;
         const reqId = (payload as Reply<LLMResponse> | undefined)?.id;
         if (typeof reqId !== "string") return;
         const done = r.inFlight.get(reqId);
@@ -316,13 +349,56 @@ const createWeb: PluginFactory = (): Plugin => {
         r.store.markReadMany(done);
       });
 
-      // Cleanup thunks for teardown: the three bus unsubscribes, plus dropping web-chat's
+      // llm-core signals the prompt it assembled overflowed the model's budget. We
+      // shrink the conversation block (raise pressureRound SYNCHRONOUSLY, so the
+      // immediately-following re-compose reads the smaller budget) and, best-effort,
+      // distill the turns that pressure now drops into a memory-note finding so their
+      // gist isn't simply lost. This listener must NEVER throw — an overflow handler
+      // that itself fails would abort the recovery path.
+      const offContextFull = events.on(Events.CONTEXT_FULL, (payload) => {
+        // Parse the pressure round robustly: only a POSITIVE INTEGER is a real
+        // round. Anything else (missing, NaN, ≤ 0, fractional, non-number) is a
+        // malformed signal — treat it as a no-op so a garbage `context.full` can't
+        // spuriously shrink the window (or, via a fractional round, push
+        // pressureRound to a non-integer the reset path then has to clear).
+        const raw = (payload as any)?.data?.round;
+        if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) return;
+        const round = raw;
+        pressureRound = round;
+        try {
+          const all = r?.store.list() ?? [];
+          const kept = windowTranscript(
+            all,
+            pressuredMaxTurns(maxTurns, round),
+            pressuredMaxChars(maxChars, round),
+          );
+          const keptSet = new Set(kept);
+          const dropped = all.filter((e) => !keptSet.has(e));
+          if (dropped.length > 0 && actions.has("memory-note.remember")) {
+            const note =
+              "Web-chat dropped " +
+              dropped.length +
+              " older turn(s) under context pressure:\n" +
+              dropped
+                .map((e) => "[" + (e.role === "agent" ? "agent" : "user") + "] " + e.text.slice(0, 200))
+                .join("\n");
+            actions
+              .invoke("memory-note.remember", { note, kind: "finding", importance: 2 })
+              .catch(() => {});
+          }
+        } catch {
+          /* best-effort distill: never let a failure here break overflow recovery */
+        }
+      });
+
+      // Cleanup thunks for teardown: the four bus unsubscribes, plus dropping web-chat's
       // two context blocks (the guidance + conversation blocks, registered above) via
       // the captured removeBlock.
       unsubs = [
         offSend,
         offRequest,
         offReturn,
+        offContextFull,
         () => removeBlock(GUIDANCE_BLOCK_ID),
         () => removeBlock(CONVERSATION_BLOCK_ID),
       ];
