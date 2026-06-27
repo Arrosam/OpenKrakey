@@ -1946,3 +1946,554 @@ test("web-chat(security): a VALID long configured token IS adopted (a request pr
     await c.close();
   }
 });
+
+// ###########################################################################
+// NEW SECTION — CONTEXT-PRESSURE response in the `web-chat.conversation` block
+// ---------------------------------------------------------------------------
+// Surface under test is derived ONLY from the development spec + the pinned
+// shared/actions contract for this feature — NO implementation was read; the
+// behavior does not exist yet, so every scenario here fails on a CLEAN assertion
+// until it does (assertUp still passes: the plugin binds + registers its existing
+// surface; only the new pressure reaction is missing).
+//
+//   NEW event `Events.CONTEXT_FULL` = "context.full", payload
+//     Notify<{ estimatedTokens; limit; overBy; round }>  (i.e. { at, data:{...} }).
+//   web-chat listens SYNCHRONOUSLY and tightens the window of the
+//   `web-chat.conversation` MESSAGES block for the IMMEDIATELY-following render:
+//     effective maxTurns = max(1,   floor(baseMaxTurns / 2^round))
+//     effective maxChars = max(500, floor(baseMaxChars / 2^round))
+//   round = 0 (or no pressure ever seen) == the full base window (no change).
+//   Pressure is MONOTONIC within a frame: a higher `round` shows <= as many turns.
+//   On `Events.LLM_RETURN` the pressure RESETS — the NEXT render uses the full
+//   base window again.
+//
+//   When `context.full` causes turns to be DROPPED (the windowed set shrank), web
+//   BEST-EFFORT invokes the `memory-note.remember` action exactly once with
+//     { note:<non-empty string summary of dropped turns>, kind:"finding", importance:2 }
+//   GUARDED by ctx.actions.has("memory-note.remember") and `.catch()`-ed so it
+//   never throws. With NO such action registered, `context.full` must not throw.
+//
+// Harness for this section is SELF-CONTAINED (a second child built below) so the
+// existing harness + every existing test stay byte-for-byte untouched. It mirrors
+// the main child (same makeCtx-shaped ctx, same render/out/ret/down/quit loop,
+// same per-agent dataDir + token + BLOCK_SET/BLOCK_RENDER reporting) and ADDS:
+//   * a `memory-note.remember` mock that RECORDS each invoke (REMEMBER:<id>:<json>),
+//     registered only when WEB_MEMNOTE !== "off" (so the absent-case test omits it);
+//   * a `full <id> <round>` stdin command emitting Events.CONTEXT_FULL with a full
+//     payload { estimatedTokens, limit, overBy, round }.
+// ###########################################################################
+
+const PRESSURE_CHILD = `
+import { createEventSystem } from ${JSON.stringify(EVENT_SYSTEM_URL)};
+import * as readline from "node:readline";
+import * as fs from "node:fs";
+import * as path from "node:path";
+function emit(s){ process.stdout.write(s + "\\n"); }
+
+const AGENTS = (process.env.WEB_AGENTS || "alice").split(",").filter(Boolean);
+const MEMNOTE = process.env.WEB_MEMNOTE !== "off"; // default: register the mock
+const instances = {};
+
+function makeCtx(agentId, port){
+  const sys = createEventSystem();
+  const blocks = new Map();
+  sys.actions.register(${JSON.stringify(Actions.CLOCK_FIRE_NOW)}, async () => { emit("FIRED:" + agentId); });
+  sys.events.on(${JSON.stringify(Events.INPUT_MESSAGE)}, (p) => { emit("GOT_INPUT:" + agentId + ":" + JSON.stringify(p)); });
+  sys.actions.register("llm.register_tool", async (def) => { emit("TOOL_REGISTERED:" + agentId + ":" + JSON.stringify(def)); return true; });
+  // The memory-note.remember capture mock — present iff WEB_MEMNOTE !== "off".
+  // It records every invoke (REMEMBER:<agent>:<json of params>) so a test can
+  // assert the call count + params; returns a resolved promise (best-effort path).
+  if (MEMNOTE) {
+    sys.actions.register("memory-note.remember", async (params) => {
+      emit("REMEMBER:" + agentId + ":" + JSON.stringify(params));
+      return { ok: true };
+    });
+  }
+  const agentDataDir = path.join(process.env.WEB_DATADIR, agentId);
+  fs.mkdirSync(agentDataDir, { recursive: true });
+  const cfg = { port };
+  if (process.env.WEB_TOKEN !== undefined) cfg.token = process.env.WEB_TOKEN;
+  return { sys, blocks, ctx: {
+    agentId,
+    events: sys.events,
+    actions: sys.actions,
+    config: cfg,
+    dataDir: agentDataDir,
+    llm: { get: () => undefined, has: () => false, list: () => [], withCapability: () => [] },
+    setBlock: (b) => {
+      blocks.set(b.id, b);
+      let text = null;
+      try { const r = b.render(); if (typeof r === "string") text = r; } catch {}
+      emit("BLOCK_SET:" + agentId + ":" + JSON.stringify({ id: b.id, label: b.label, priority: b.priority, target: b.target, text }));
+    },
+    getBlock: (id) => blocks.get(id),
+    removeBlock: (id) => { const had = blocks.delete(id); emit("BLOCK_REMOVED:" + agentId + ":" + id); return had; },
+    listBlocks: () => [...blocks.values()].map((b) => ({ id: b.id, priority: b.priority })),
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    print: (t) => { emit("PRINT:" + t); },
+  } };
+}
+
+const mod = await import(${JSON.stringify(PLUGIN_URL)}).then((m) => m, () => null);
+if (!mod || typeof mod.default !== "function") { emit("NOT_IMPLEMENTED"); process.exit(0); }
+
+let isFirst = true;
+for (const a of AGENTS) {
+  const { sys, ctx, blocks } = makeCtx(a, isFirst ? 0 : 7717);
+  isFirst = false;
+  const plugin = mod.default();
+  await plugin.setup(ctx);
+  instances[a] = { plugin, sys, blocks };
+}
+emit("SETUP_DONE");
+
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", async (line) => {
+  const t = line.trim(); if (!t) return;
+  const sp = t.indexOf(" ");
+  const op = sp === -1 ? t : t.slice(0, sp);
+  const rest = sp === -1 ? "" : t.slice(sp + 1);
+  if (op === "out") {
+    const sp2 = rest.indexOf(" ");
+    const id = sp2 === -1 ? rest : rest.slice(0, sp2);
+    const text = sp2 === -1 ? "" : rest.slice(sp2 + 1);
+    instances[id] &&
+      instances[id].sys.actions
+        .invoke(${JSON.stringify(SEND_ACTION)}, { text })
+        .catch((e) => emit("SEND_ERROR:" + id + ":" + String(e && e.message ? e.message : e)));
+  } else if (op === "ret") {
+    const s2 = rest.indexOf(" ");
+    const id = s2 === -1 ? rest : rest.slice(0, s2);
+    const rid = s2 === -1 ? "r" : rest.slice(s2 + 1);
+    instances[id] && instances[id].sys.events.emit(${JSON.stringify(Events.LLM_RETURN)}, { id: rid, at: Date.now(), ok: true, data: { content: "ok", toolCalls: [] } });
+  } else if (op === "full") {
+    // full <id> <round> -> emit Events.CONTEXT_FULL with a full Notify payload.
+    // The handler MUST run synchronously (the spec says web shrinks in time for the
+    // immediately-following compose); surfacing PRESSURE_DONE lets a test confirm
+    // the emit was DELIVERED before it triggers a render, with no arbitrary sleep.
+    const s2 = rest.indexOf(" ");
+    const id = s2 === -1 ? rest : rest.slice(0, s2);
+    const round = s2 === -1 ? 1 : Number(rest.slice(s2 + 1));
+    if (instances[id]) {
+      instances[id].sys.events.emit(${JSON.stringify(Events.CONTEXT_FULL)}, {
+        at: Date.now(),
+        data: { estimatedTokens: 100000, limit: 8000, overBy: 92000, round },
+      });
+      emit("PRESSURE_DONE:" + id + ":" + round);
+    }
+  } else if (op === "render") {
+    const s2 = rest.indexOf(" ");
+    const rid = s2 === -1 ? rest : rest.slice(0, s2);
+    const bid = s2 === -1 ? "" : rest.slice(s2 + 1);
+    const b = instances[rid] && instances[rid].blocks.get(bid);
+    if (b) Promise.resolve(b.render()).then((out) => emit("BLOCK_RENDER:" + rid + ":" + bid + ":" + JSON.stringify(out)), () => {});
+  } else if (op === "down") {
+    if (instances[rest] && instances[rest].plugin.teardown) await instances[rest].plugin.teardown();
+    emit("TORE_DOWN:" + rest);
+    delete instances[rest];
+  } else if (op === "quit") {
+    for (const k of Object.keys(instances)) { try { instances[k].plugin.teardown && await instances[k].plugin.teardown(); } catch {} }
+    emit("BYE");
+    process.exit(0);
+  }
+});
+`;
+
+/**
+ * Boot the SELF-CONTAINED pressure child (its own harness above). Mirrors
+ * startChild's lifecycle (spawn tsx, parse PORT/token from the printed URL, line
+ * buffering, EPIPE swallow, waitFor/send/close) but uses PRESSURE_CHILD so it
+ * carries the `full` command + the memory-note.remember mock. `opts.memNote:false`
+ * sets WEB_MEMNOTE=off so the mock is NOT registered (the absent-action test).
+ */
+async function startPressureChild(
+  agents: string[],
+  opts: { memNote?: boolean } = {},
+): Promise<Child> {
+  const dataDir = fs.mkdtempSync(path.join(TMP, "pdata-"));
+  const scriptPath = path.join(fs.mkdtempSync(path.join(TMP, "pchild-")), "web-pressure-harness.mts");
+  fs.writeFileSync(scriptPath, PRESSURE_CHILD, "utf8");
+
+  const proc = spawn(process.execPath, ["--import", "tsx", scriptPath], {
+    cwd: REPO,
+    env: {
+      ...process.env,
+      WEB_AGENTS: agents.join(","),
+      WEB_DATADIR: dataDir,
+      ...(opts.memNote === false ? { WEB_MEMNOTE: "off" } : {}),
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  proc.stdin.on("error", () => {
+    /* child already gone */
+  });
+
+  const lines: string[] = [];
+  let buf = "";
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (d) => {
+    buf += d;
+    let i;
+    while ((i = buf.indexOf("\n")) !== -1) {
+      const l = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      if (l.length) lines.push(l);
+    }
+  });
+  let stderr = "";
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (d) => (stderr += d));
+
+  const waitFor = (pred: (lines: string[]) => boolean, ms = 8000): Promise<boolean> =>
+    new Promise((resolve) => {
+      const deadline = Date.now() + ms;
+      const tick = () => {
+        if (pred(lines)) return resolve(true);
+        if (Date.now() > deadline) return resolve(false);
+        setTimeout(tick, 15);
+      };
+      tick();
+    });
+
+  const child: Child = {
+    proc,
+    port: 0,
+    token: "",
+    lines,
+    send: (cmd) => {
+      try {
+        proc.stdin.write(cmd + "\n");
+      } catch {
+        /* gone */
+      }
+    },
+    waitFor,
+    notImplemented: false,
+    close: () =>
+      new Promise<void>((resolve) => {
+        if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+        proc.once("close", () => resolve());
+        try {
+          proc.stdin.write("quit\n");
+        } catch {
+          /* gone */
+        }
+        setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+            /* dead */
+          }
+        }, 2500);
+      }),
+  };
+
+  const up = await waitFor(
+    (ls) => ls.includes("NOT_IMPLEMENTED") || (ls.includes("SETUP_DONE") && ls.some((l) => l.startsWith("PRINT:"))),
+    9000,
+  );
+  if (!up) {
+    await child.close();
+    throw new Error("web pressure child never came up. stderr:\n" + stderr.slice(0, 1200));
+  }
+  if (lines.includes("NOT_IMPLEMENTED")) {
+    child.notImplemented = true;
+    return child;
+  }
+  const urlLine = lines.find((l) => l.startsWith("PRINT:") && /http:\/\/[^\s]+:\d+/.test(l));
+  const m = urlLine ? /:(\d+)\b/.exec(urlLine.replace("PRINT:", "")) : null;
+  child.port = m ? parseInt(m[1], 10) : 0;
+  const tk = urlLine ? /[?&]token=([^\s&]+)/.exec(urlLine) : null;
+  child.token = tk ? decodeURIComponent(tk[1]) : "";
+  return child;
+}
+
+/**
+ * Seed `n` complete (user, agent) turn PAIRS into agent `id`'s transcript, in
+ * order. Each turn is a SHORT, distinctly-numbered text so the rendered window is
+ * driven by the TURN cap, not the char cap (we want to observe turn-count shrink).
+ * POSTs the user message (HTTP, authed) then drives an explicit agent send (`out`);
+ * verifies each agent send actually appended by re-rendering until the assistant
+ * turn appears, so persistence is settled before the next pair (no fixed sleeps).
+ */
+async function seedTurns(c: Child, id: string, n: number): Promise<void> {
+  const verb = "BLOCK_RENDER:" + id + ":web-chat.conversation:";
+  for (let i = 1; i <= n; i++) {
+    const u = "U" + i;
+    const a = "A" + i;
+    const res = await fetch(api(c, "/api/agents/" + id + "/message"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: u }),
+    });
+    assert.equal(res.status, 202, "seed user message " + u + " accepted");
+    c.send("out " + id + " " + a);
+    // Poll: nudge a render each tick, succeed once a render shows this agent turn
+    // (so it is persisted/in-memory before the next pair — keeps order deterministic).
+    const ok = await c.waitFor((ls) => {
+      c.send("render " + id + " web-chat.conversation");
+      return [...ls]
+        .reverse()
+        .some((l) => l.startsWith(verb) && l.includes('"content":"' + a + '"'));
+    }, 6000);
+    assert.ok(ok, "seeded agent turn " + a + " must round-trip into the transcript");
+  }
+}
+
+/**
+ * Render the conversation block for `id` (pressure child) and return the LATEST
+ * parsed Message[] (or null on timeout). Mirrors renderConversation but is local
+ * to this section so it stays independent of the main harness helpers.
+ */
+async function renderConvoP(c: Child, id: string): Promise<any[] | null> {
+  const verb = "BLOCK_RENDER:" + id + ":web-chat.conversation:";
+  const before = c.lines.filter((l) => l.startsWith(verb)).length;
+  c.send("render " + id + " web-chat.conversation");
+  const ok = await c.waitFor((ls) => ls.filter((l) => l.startsWith(verb)).length > before);
+  if (!ok) return null;
+  const line = [...c.lines].reverse().find((l) => l.startsWith(verb))!;
+  return JSON.parse(line.slice(verb.length));
+}
+
+/** Count the real conversation TURNS in a rendered Message[] (drop the status marker). */
+function turnCount(msgs: any[] | null): number {
+  if (!msgs) return 0;
+  return msgs.filter((m) => m && m.name !== "web-chat.status").length;
+}
+
+/** Emit context.full {round} on `id` and wait until the harness confirms delivery. */
+async function pressure(c: Child, id: string, round: number): Promise<void> {
+  const marker = "PRESSURE_DONE:" + id + ":" + round;
+  c.send("full " + id + " " + round);
+  await c.waitFor((ls) => ls.includes(marker));
+}
+
+// --- POSITIVE / BASELINE: the conversation block renders the FULL windowed set ---
+test("web-chat(pressure): with NO context.full, the conversation block renders the full base window of turns", async () => {
+  const c = await startPressureChild(["alice"]);
+  try {
+    assertUp(c);
+    assert.ok(
+      await c.waitFor((ls) =>
+        ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+      ),
+      "web must register a web-chat.conversation block",
+    );
+
+    // Seed MANY turns (more than any plausible default window) so the base render
+    // is itself a window (capped) — the quantity a later pressure event shrinks.
+    await seedTurns(c, "alice", 24);
+
+    const msgs = await renderConvoP(c, "alice");
+    assert.ok(msgs, "the conversation block must render");
+    const baseTurns = turnCount(msgs);
+    assert.ok(baseTurns >= 1, "the base render shows at least one turn; got " + baseTurns);
+    // It must reflect a WINDOW: the most RECENT turn is present (window keeps the tail).
+    assert.ok(
+      msgs!.some((m) => m && m.content === "A24"),
+      "the base window keeps the most recent agent turn (A24); got " + JSON.stringify(msgs),
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- STATE TRANSITION: round 0 -> round 1 -> round 2 monotonically shrinks turns ---
+test("web-chat(pressure): context.full {round} monotonically tightens the window (round0 >= round1 >= round2, strict shrink at least once)", async () => {
+  const c = await startPressureChild(["alice"]);
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    // Round 0 baseline (no pressure yet).
+    const base = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(base >= 4, "need a base window of several turns to observe shrink; got " + base);
+
+    // Round 1: effective maxTurns = floor(base/2) -> strictly fewer turns.
+    await pressure(c, "alice", 1);
+    const r1 = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(r1 <= base, "round 1 must not show MORE turns than round 0 (" + r1 + " <= " + base + ")");
+    assert.ok(r1 < base, "round 1 must shed turns vs the full window (" + r1 + " < " + base + ")");
+
+    // Round 2: effective maxTurns = floor(base/4) -> fewer still (monotonic).
+    await pressure(c, "alice", 2);
+    const r2 = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(r2 <= r1, "round 2 must not show MORE turns than round 1 (" + r2 + " <= " + r1 + ")");
+    assert.ok(r2 < base, "round 2 stays below the full window (" + r2 + " < " + base + ")");
+    assert.ok(r2 >= 1, "the floor keeps at least one turn even under heavy pressure; got " + r2);
+  } finally {
+    await c.close();
+  }
+});
+
+// --- BOUNDARY: a huge round collapses to the floor (>=1 turn), never empty/negative ---
+test("web-chat(pressure): a very high round collapses the window to the floor (at least 1 turn, never empty)", async () => {
+  const c = await startPressureChild(["alice"]);
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    // round = 20 -> floor(base/2^20) clamps to the max(1, …) floor: exactly 1 turn
+    // (plus the trailing status marker). The render must NOT be empty and must keep
+    // the MOST RECENT turn (windows keep the tail).
+    await pressure(c, "alice", 20);
+    const msgs = await renderConvoP(c, "alice");
+    assert.ok(msgs, "the conversation block must still render under extreme pressure");
+    const turns = turnCount(msgs);
+    assert.ok(turns >= 1, "the floor guarantees at least one turn; got " + turns);
+    assert.ok(
+      msgs!.some((m) => m && m.content === "A24"),
+      "even at the floor the most recent turn (A24) is kept; got " + JSON.stringify(msgs),
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- STATE TRANSITION: llm.return RESETS pressure -> next render is the full window ---
+test("web-chat(pressure): llm.return clears pressure so the next render returns to the full base window", async () => {
+  const c = await startPressureChild(["alice"]);
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    const base = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(base >= 2, "need a multi-turn base window; got " + base);
+
+    // Apply pressure -> shrink.
+    await pressure(c, "alice", 2);
+    const shrunk = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(shrunk < base, "pressure shrank the window (" + shrunk + " < " + base + ")");
+
+    // llm.return clears the pressure. The emit is synchronous on the bus; a render
+    // right after must reflect the FULL window again. Poll the render until it does
+    // (or fails) — no fixed sleep — so a slow same-tick reset is still observed.
+    c.send("ret alice R-RESET");
+    let after = base - 1;
+    await c.waitFor(async () => {
+      after = turnCount(await renderConvoP(c, "alice"));
+      return after === base;
+    }, 4000);
+    assert.equal(
+      after,
+      base,
+      "after llm.return the next render uses the FULL base window again (" + after + " == " + base + ")",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// --- ACTION: a dropping context.full invokes memory-note.remember EXACTLY once ---
+test("web-chat(pressure): dropping turns triggers exactly one memory-note.remember{note,kind:'finding',importance:2}", async () => {
+  const c = await startPressureChild(["alice"]); // memNote mock registered by default
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    // Confirm the base window has more turns than round-1 will keep (so turns DROP,
+    // which is the precondition for the remember side-effect).
+    const base = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(base >= 2, "need a window that round-1 can shrink; got " + base);
+
+    const before = c.lines.filter((l) => l.startsWith("REMEMBER:alice:")).length;
+    assert.equal(before, 0, "no remember call before any pressure");
+
+    // A pressure round that drops turns must invoke memory-note.remember.
+    await pressure(c, "alice", 1);
+    // Force the render that actually applies the tighter window (the spec ties the
+    // remember to the drop; whether it fires on emit or on the shrinking render,
+    // driving the render guarantees the drop has happened by now).
+    await renderConvoP(c, "alice");
+
+    assert.ok(
+      await c.waitFor((ls) => ls.some((l) => l.startsWith("REMEMBER:alice:"))),
+      "a dropping context.full must invoke memory-note.remember",
+    );
+    const calls = c.lines.filter((l) => l.startsWith("REMEMBER:alice:"));
+    assert.equal(calls.length, 1, "exactly ONE remember invoke for the drop; got " + calls.length);
+
+    const params = JSON.parse(calls[0].slice("REMEMBER:alice:".length));
+    assert.equal(typeof params.note, "string", "the note param is a string");
+    assert.ok(params.note.length > 0, "the note summarizing dropped turns is non-empty");
+    assert.equal(params.kind, "finding", "the remember kind is 'finding'");
+    assert.equal(params.importance, 2, "the remember importance is 2");
+  } finally {
+    await c.close();
+  }
+});
+
+// --- NEGATIVE / BEST-EFFORT GUARD: no memory-note.remember registered -> no throw ---
+test("web-chat(pressure): with NO memory-note.remember registered, a dropping context.full does NOT throw (best-effort guarded)", async () => {
+  const c = await startPressureChild(["alice"], { memNote: false }); // mock NOT registered
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    const base = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(base >= 2, "need a window round-1 can shrink; got " + base);
+
+    // Pressure with the action ABSENT — guarded by ctx.actions.has, so it must be a
+    // no-op for the side-effect and must NOT throw / crash the process.
+    await pressure(c, "alice", 1);
+    const shrunk = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(shrunk < base, "the window still shrinks even without memory-note (" + shrunk + " < " + base + ")");
+
+    // No remember line could have been produced (the action was never registered).
+    assert.ok(
+      !c.lines.some((l) => l.startsWith("REMEMBER:")),
+      "no memory-note.remember invoke is observable when the action is absent",
+    );
+
+    // THE crash detector: the process is still alive and the block still renders —
+    // the unguarded path would have thrown synchronously inside the emit. A normal
+    // authed request must still be served.
+    const after = await probe(api(c, "/api/agents"));
+    assert.ok(after.ok, "the server must still be alive (no throw from the absent action): " + (after.error || ""));
+    assert.equal(after.status, 200, "GET /api/agents still returns 200 after the guarded no-op pressure");
+  } finally {
+    await c.close();
+  }
+});
+
+// --- NEGATIVE: round 0 explicitly is a NO-OP (no shrink, no remember) ---
+test("web-chat(pressure): context.full {round:0} is a no-op (full window, no memory-note.remember)", async () => {
+  const c = await startPressureChild(["alice"]);
+  try {
+    assertUp(c);
+    await c.waitFor((ls) =>
+      ls.some((l) => l.startsWith("BLOCK_SET:alice:") && l.includes('"id":"web-chat.conversation"')),
+    );
+    await seedTurns(c, "alice", 24);
+
+    const base = turnCount(await renderConvoP(c, "alice"));
+    assert.ok(base >= 1, "the base render shows turns; got " + base);
+
+    // round 0: effective maxTurns = floor(base/2^0) = base -> NO change, and no drop
+    // means NO memory-note.remember.
+    await pressure(c, "alice", 0);
+    const after = turnCount(await renderConvoP(c, "alice"));
+    assert.equal(after, base, "round 0 leaves the full window unchanged (" + after + " == " + base + ")");
+    assert.ok(
+      !c.lines.some((l) => l.startsWith("REMEMBER:alice:")),
+      "round 0 drops nothing, so it must NOT invoke memory-note.remember",
+    );
+  } finally {
+    await c.close();
+  }
+});
