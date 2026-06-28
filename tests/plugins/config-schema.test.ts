@@ -189,7 +189,7 @@ test("llm-core: schema is contract-valid and covers exactly its keys", () => {
   assertValidConfigSchema(LLM_CORE_SCHEMA, "LLM_CORE_SCHEMA");
   assertKeysExactly(
     LLM_CORE_SCHEMA as ConfigSchema,
-    ["communicator", "temperature", "maxTokens", "contextLimitTokens", "safetyTokens", "charsPerToken", "maxReduceRounds"],
+    ["communicator", "temperature", "maxTokens", "contextLimitTokens", "safetyTokens", "charsPerToken", "maxReduceRounds", "retryOnContextError", "contextErrorPatterns"],
     "LLM_CORE_SCHEMA",
   );
 });

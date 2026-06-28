@@ -1276,7 +1276,7 @@ test("reactive: a context-length rejection then a success -> exactly one ok:true
     error: new Error(`Request failed: ${CTX_ERR}`),
     response: { content: "recovered" },
   });
-  const h = await setupPlugin(t, { llm: library([com]) });
+  const h = await setupPlugin(t, { llm: library([com]), noCompose: true });
   // A reducer that shrinks on the retry (proves re-compose feeds chat()).
   customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call === 1 ? 8000 : 100)] }));
   const replies = collect(h.events, Events.LLM_RETURN) as any[];
@@ -1324,7 +1324,7 @@ test("reactive/bounded: a context error that never clears emits context.full at 
     failTimes: Number.POSITIVE_INFINITY,
     error: new Error(`fatal: ${CTX_ERR}`),
   });
-  const h = await setupPlugin(t, { llm: library([com]) });
+  const h = await setupPlugin(t, { llm: library([com]), noCompose: true });
   customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
   const replies = collect(h.events, Events.LLM_RETURN) as any[];
   const fulls = collectFull(h.events);
@@ -1348,7 +1348,7 @@ test("reactive/bounded BVA: maxReduceRounds=1 retries exactly once (>=1, <=1 con
     failTimes: Number.POSITIVE_INFINITY,
     error: new Error(CTX_ERR),
   });
-  const h = await setupPlugin(t, { config: { maxReduceRounds: 1 }, llm: library([com]) });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 1 }, llm: library([com]), noCompose: true });
   customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
   const replies = collect(h.events, Events.LLM_RETURN) as any[];
   const fulls = collectFull(h.events);
@@ -1366,7 +1366,7 @@ test("reactive/bounded: reactive rounds increment 1..N monotonically (contiguous
     failTimes: Number.POSITIVE_INFINITY,
     error: new Error(CTX_ERR),
   });
-  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]) });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]), noCompose: true });
   customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
   const fulls = collectFull(h.events);
   trigger(h.events);
@@ -1448,7 +1448,7 @@ test("reactive/no-window: with NO contextLength and no contextLimitTokens, a con
     error: new Error(CTX_ERR), // no window advertised
     response: { content: "recovered" },
   });
-  const h = await setupPlugin(t, { llm: library([com]) });
+  const h = await setupPlugin(t, { llm: library([com]), noCompose: true });
   // Small body so the PROACTIVE path is inert even if a window existed.
   customCompose(h, () => ({ text: "", messages: [{ role: "user", content: "hi" }] }));
   const replies = collect(h.events, Events.LLM_RETURN) as any[];
@@ -1588,7 +1588,7 @@ test("reactive/invariant: exactly ONE terminal llm.return across a retry-then-su
     error: new Error(CTX_ERR),
     response: { content: "recovered" },
   });
-  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]) });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]), noCompose: true });
   customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call < 3 ? 8000 : 80)] }));
   const replies = collect(h.events, Events.LLM_RETURN) as any[];
   trigger(h.events);
