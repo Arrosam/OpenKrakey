@@ -730,19 +730,22 @@ test("EventStore retention BVA: retentionMs=0 DISABLES pruning (all records surv
   assert.deepEqual(s2.window().map((r) => r.seq), [1, 2], "retentionMs=0 keeps everything (pruning off)");
 });
 
-test("EventStore retention BVA: a record exactly at the boundary (now - retentionMs) is retained", async () => {
+test("EventStore retention: a record within the retention window is kept; one outside is pruned", async () => {
   const { EventStore } = await loadStore();
   const dir = tmpDataDir();
   const now = Date.now();
+  // Wall-clock retention (cutoff = now - retentionMs) is read a few ms after these
+  // timestamps are chosen, so an EXACT-tick boundary is unobservable; use clear
+  // margins (5s either side of the 10s window) to test the invariant deterministically.
   const s1 = await EventStore.load(dir, "alice", cfg({ retentionMs: 10_000 }));
-  s1.append(srec({ seq: 1, at: now - 10_000 })); // exactly at the cutoff — inclusive ⇒ kept
-  s1.append(srec({ seq: 2, at: now - 10_001 })); // one ms past — dropped
+  s1.append(srec({ seq: 1, at: now - 5_000 })); // well inside the 10s window ⇒ kept
+  s1.append(srec({ seq: 2, at: now - 15_000 })); // well outside the window ⇒ pruned
   await s1.flush();
   const s2 = await EventStore.load(dir, "alice", cfg({ retentionMs: 10_000 }));
   assert.deepEqual(
     s2.window().map((r) => r.seq),
     [1],
-    "the boundary record (age == retentionMs) is kept; one tick older is pruned",
+    "wall-clock retention keeps records newer than now - retentionMs and prunes older ones",
   );
 });
 
