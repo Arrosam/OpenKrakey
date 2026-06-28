@@ -37,7 +37,8 @@
         "memory-note",
         "history",
         "interval_toggle",
-        "restart"
+        "restart",
+        "retry"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -352,6 +353,19 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/restart.md"
+    },
+    "retry": {
+      "zone": "plugins",
+      "path": "public_plugin/retry",
+      "description": "Failure-reactive pacing: on a failed llm.return (ok:false) it shortens the frame interval (clock.set_interval, optional backoff) so the agent retries sooner; a successful return resets the streak. Self-contained — no requires, no context blocks, no context.full reaction; guards every clock action with actions.has.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/retry.md"
     }
   },
   "contracts": {
