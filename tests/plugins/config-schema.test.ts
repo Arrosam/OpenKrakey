@@ -221,13 +221,14 @@ test("web-chat: token is a secret field (masked in UIs)", () => {
 });
 
 // ===========================================================================
-// 5. inspector — keys: port, host, token, bufferSize, maxRecordBytes
+// 5. inspector — keys: port, host, token, bufferSize, maxRecordBytes,
+//    persist, maxPersistedEntries, retentionMs (the Logs-view persistence settings)
 // ===========================================================================
-test("inspector: schema is contract-valid and covers exactly its five keys", () => {
+test("inspector: schema is contract-valid and covers exactly its eight keys", () => {
   assertValidConfigSchema(INSPECTOR_SCHEMA, "INSPECTOR_SCHEMA");
   assertKeysExactly(
     INSPECTOR_SCHEMA as ConfigSchema,
-    ["port", "host", "token", "bufferSize", "maxRecordBytes"],
+    ["port", "host", "token", "bufferSize", "maxRecordBytes", "persist", "maxPersistedEntries", "retentionMs"],
     "INSPECTOR_SCHEMA",
   );
 });
