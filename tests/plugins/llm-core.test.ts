@@ -1193,7 +1193,453 @@ test("overflow/state: a second frame re-runs detection from round 1 (counter is 
 });
 
 // ===========================================================================
-// 15. teardown
+// 16. REACTIVE CONTEXT-OVERFLOW RETRY — NEW behavior
+// ===========================================================================
+//
+// Distinct from §14's PROACTIVE char-estimate path. This path is triggered by the
+// PROVIDER: when `communicator.chat()` REJECTS and `String(err)` matches a context
+// pattern AND the shared `maxReduceRounds` budget is not exhausted, llm-core:
+//   1. emits `context.full` (escalating `round`),
+//   2. re-invokes `prompt.compose` (so reactors that shed produce a smaller body),
+//   3. reassembles and RETRIES `chat()`.
+// Every real `chat()` attempt emits `llm.request.sent`. Otherwise (non-context
+// error, retryOnContextError:false, or budget exhausted) it reports ONE
+// `llm.return{ok:false, error}` immediately. Exactly ONE terminal `llm.return`.
+//
+// New config keys on llm-core's slice:
+//   - retryOnContextError: boolean (default true)
+//   - contextErrorPatterns: string[] (default set below), matched
+//     CASE-INSENSITIVELY against String(err).
+//
+// ASSUMPTIONS (need confirmation — not all explicit in the contract):
+//  A1. `round` is drawn from the SAME `maxReduceRounds` budget the proactive path
+//      uses (a SHARED per-frame cap). In a pure-reactive scenario (no proactive
+//      window) the first reactive emission is round===1 and rounds increment
+//      1,2,3,… across successive provider rejections within the one frame.
+//  A2. With `maxReduceRounds` reactive retries permitted, `chat()` is attempted at
+//      most `maxReduceRounds + 1` times (initial send + one retry per budgeted
+//      round), then the last error is reported terminally.
+//  A3. The default `contextErrorPatterns` include `context_length_exceeded`,
+//      `maximum context length`, `prompt is too long`, `input is too long`,
+//      `too many tokens`, and `reduce the length`. Matching is case-insensitive
+//      on `String(err)` (so an Error's `.message`, surfaced by Error.toString, is
+//      what we match against).
+//  A4. The reactive path is INDEPENDENT of any context window: it fires even when
+//      no `contextLength`/`contextLimitTokens` is known (the proactive path inert).
+//  A5. `maxReduceRounds:0` disables BOTH the proactive reduce loop and the reactive
+//      retry — a context rejection reports ok:false on the first failure.
+// ---------------------------------------------------------------------------
+
+/** A representative default-pattern context-overflow error string. */
+const CTX_ERR = "context_length_exceeded";
+
+/**
+ * A chat communicator whose chat() rejects for the first `failTimes` calls with
+ * `error`, then resolves `response`. Records every call. Models a provider that
+ * keeps rejecting until the body is small enough (or forever, if failTimes is
+ * Infinity). Optionally advertises a context window.
+ */
+function flakyContextCom(opts: {
+  name?: string;
+  failTimes: number;
+  error: unknown;
+  response?: LLMResponse;
+  contextLength?: number;
+}): ChatStub {
+  let n = 0;
+  const stub: ChatStub = {
+    name: opts.name ?? "flaky-ctx",
+    provider: "stub",
+    model: "stub-model",
+    capabilities: ["chat"],
+    input: ["text"],
+    output: ["text"],
+    calls: [],
+    chat(req: LLMRequest): Promise<LLMResponse> {
+      stub.calls.push(req);
+      n += 1;
+      if (n <= opts.failTimes) return Promise.reject(opts.error);
+      return Promise.resolve(opts.response ?? { content: "recovered" });
+    },
+  };
+  if (opts.contextLength !== undefined) {
+    (stub as { contextLength?: number }).contextLength = opts.contextLength;
+  }
+  return stub;
+}
+
+// ---- 16a. CONTEXT ERROR THEN SUCCESS (positive / state-transition) ----------
+
+test("reactive: a context-length rejection then a success -> exactly one ok:true, >=1 context.full (first round 1), >=2 chat()", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: new Error(`Request failed: ${CTX_ERR}`),
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  // A reducer that shrinks on the retry (proves re-compose feeds chat()).
+  customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call === 1 ? 8000 : 100)] }));
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  const sent = collectSent(h.events);
+  trigger(h.events);
+  await settle();
+
+  assert.equal(replies.length, 1, "exactly one terminal llm.return");
+  assert.equal(replies[0].ok, true, "the retried send succeeded");
+  assert.equal(replies[0].data.content, "recovered");
+  assert.ok(fulls.length >= 1, "at least one context.full emitted on the provider error");
+  assert.equal(fulls[0].data.round, 1, "first reactive emission is round 1");
+  assert.ok(com.calls.length >= 2, "chat() retried after the context rejection");
+  assert.ok(sent.length >= 2, "each real chat() attempt emits llm.request.sent");
+  // The retried send carried the SMALLER re-composed body.
+  assert.equal(
+    (com.calls[com.calls.length - 1].messages![0].content as string).length,
+    100,
+    "the successful retry used the re-composed (shrunk) body",
+  );
+});
+
+test("reactive: the retried chat() carries a FRESH re-composed body (compose runs again)", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: new Error(CTX_ERR),
+    response: { content: "ok" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]), noCompose: true });
+  const c = customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call === 1 ? 5000 : 50)] }));
+  trigger(h.events);
+  await settle();
+  assert.ok(c.calls() >= 2, "prompt.compose re-invoked for the retry");
+  assert.equal(com.calls.length, 2, "one failed send + one successful retry");
+  assert.equal((com.calls[0].messages![0].content as string).length, 5000, "first send used the original body");
+  assert.equal((com.calls[1].messages![0].content as string).length, 50, "retry used the re-composed body");
+});
+
+// ---- 16b. PERSISTENT CONTEXT ERROR (boundary / bounded loop) -----------------
+
+test("reactive/bounded: a context error that never clears emits context.full at most maxReduceRounds times, then ONE ok:false carrying the message", async (t) => {
+  const MAX = 3; // default maxReduceRounds
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(`fatal: ${CTX_ERR}`),
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+
+  assert.ok(fulls.length >= 1, "overflow detected at least once");
+  assert.ok(fulls.length <= MAX, `context.full emitted at most maxReduceRounds (${MAX}), got ${fulls.length}`);
+  assert.equal(replies.length, 1, "exactly one terminal llm.return (no infinite loop)");
+  assert.equal(replies[0].ok, false);
+  assert.ok((replies[0].error ?? "").includes(CTX_ERR), "the terminal error carries the provider message");
+  assert.ok(
+    com.calls.length <= MAX + 1,
+    `chat() attempted at most maxReduceRounds+1 (${MAX + 1}) times, got ${com.calls.length}`,
+  );
+  assert.ok(com.calls.length >= 2, "it did retry at least once before giving up");
+});
+
+test("reactive/bounded BVA: maxReduceRounds=1 retries exactly once (>=1, <=1 context.full; <=2 chat()) then ok:false", async (t) => {
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(CTX_ERR),
+  });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 1 }, llm: library([com]) });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 1, "exactly one reactive emission at maxReduceRounds=1");
+  assert.equal(fulls[0].data.round, 1);
+  assert.ok(com.calls.length <= 2, `at most maxReduceRounds+1 (2) chat() attempts, got ${com.calls.length}`);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+});
+
+test("reactive/bounded: reactive rounds increment 1..N monotonically (contiguous, no gaps) for a stuck provider", async (t) => {
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(CTX_ERR),
+  });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]) });
+  customCompose(h, () => ({ text: "", messages: [msgOfLen(40000)] }));
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  const rounds = fulls.map((f) => f.data.round);
+  assert.deepEqual(
+    rounds,
+    rounds.map((_, i) => i + 1),
+    "reactive emissions carry a contiguous 1..N round sequence",
+  );
+});
+
+// ---- 16c. NON-CONTEXT ERROR (negative — no retry) ---------------------------
+
+test("reactive/negative: a NON-context rejection (\"boom\") -> NO context.full, NO retry, ONE ok:false with \"boom\", chat() once", async (t) => {
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error("boom"),
+    response: { content: "never" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  const outs = collect(h.events, Events.OUTPUT_MESSAGE) as any[];
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "a non-context error never triggers the reactive retry");
+  assert.equal(com.calls.length, 1, "no retry: chat() called exactly once");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+  assert.ok((replies[0].error ?? "").includes("boom"));
+  assert.equal(outs.length, 0);
+});
+
+test("reactive/negative: a context SUBSTRING in an unrelated word does NOT match a default pattern", async (t) => {
+  // "uncontextualized" contains "context" but not any default phrase.
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error("uncontextualized failure: 503"),
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "a stray 'context' substring is not a context-overflow pattern");
+  assert.equal(com.calls.length, 1, "no retry");
+  assert.equal(replies[0].ok, false);
+});
+
+// ---- 16d. retryOnContextError:false (state-transition / config) -------------
+
+test("reactive/config: retryOnContextError:false reports a context rejection immediately (one ok:false, no context.full, one chat())", async (t) => {
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(`Error: ${CTX_ERR}`),
+    response: { content: "never" },
+  });
+  const h = await setupPlugin(t, { config: { retryOnContextError: false }, llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "retry disabled => no reactive context.full");
+  assert.equal(com.calls.length, 1, "retry disabled => exactly one chat() attempt");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+  assert.ok((replies[0].error ?? "").includes(CTX_ERR));
+});
+
+// ---- 16e. WORKS WITHOUT A WINDOW (proactive path inert) ---------------------
+
+test("reactive/no-window: with NO contextLength and no contextLimitTokens, a context rejection STILL retries (>=1 context.full, >=2 chat())", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: new Error(CTX_ERR), // no window advertised
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  // Small body so the PROACTIVE path is inert even if a window existed.
+  customCompose(h, () => ({ text: "", messages: [{ role: "user", content: "hi" }] }));
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "reactive path fires independent of any context window");
+  assert.equal(fulls[0].data.round, 1);
+  assert.ok(com.calls.length >= 2, "it retried even though no window is known");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, true, "the retry succeeded");
+});
+
+test("reactive/no-window: a persistent context error with no window is still bounded by maxReduceRounds", async (t) => {
+  const MAX = 3;
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(`maximum context length is 8192 tokens`), // a DIFFERENT default phrase
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1 && fulls.length <= MAX, `bounded by maxReduceRounds, got ${fulls.length}`);
+  assert.ok(com.calls.length <= MAX + 1, `chat() bounded at maxReduceRounds+1, got ${com.calls.length}`);
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+});
+
+// ---- 16f. PATTERN OVERRIDE (config / equivalence partitioning) --------------
+
+test("reactive/patterns: a custom contextErrorPatterns makes a matching error retry", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: new Error("provider said: my-overflow at row 3"),
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, {
+    config: { contextErrorPatterns: ["my-overflow"] },
+    llm: library([com]),
+  });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "the custom pattern triggers the reactive retry");
+  assert.ok(com.calls.length >= 2, "it retried on the custom pattern");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, true);
+});
+
+test("reactive/patterns: a custom contextErrorPatterns REPLACES the defaults (a default phrase no longer retries)", async (t) => {
+  // With only ["my-overflow"] configured, the default phrase must NOT match.
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(CTX_ERR), // a DEFAULT phrase, but defaults are overridden
+  });
+  const h = await setupPlugin(t, {
+    config: { contextErrorPatterns: ["my-overflow"] },
+    llm: library([com]),
+  });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "the overridden patterns no longer include the default phrase");
+  assert.equal(com.calls.length, 1, "no retry for an error outside the custom pattern set");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+});
+
+test("reactive/patterns: matching is CASE-INSENSITIVE against String(err)", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: new Error("MAXIMUM CONTEXT LENGTH exceeded"), // uppercased default phrase
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "an uppercased context phrase still matches (case-insensitive)");
+  assert.ok(com.calls.length >= 2, "it retried on the case-insensitive match");
+  assert.equal(replies[0].ok, true);
+});
+
+test("reactive/patterns: a non-Error rejection value is coerced via String(err) and matched", async (t) => {
+  // Some providers reject with a bare string, not an Error.
+  const com = flakyContextCom({
+    failTimes: 1,
+    error: "input is too long for this model",
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, { llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.ok(fulls.length >= 1, "String(err) on a bare-string rejection still matches a default phrase");
+  assert.ok(com.calls.length >= 2, "retried on the coerced string match");
+  assert.equal(replies[0].ok, true);
+});
+
+// ---- 16g. maxReduceRounds:0 (boundary — reactive disabled) ------------------
+
+test("reactive/boundary: maxReduceRounds=0 performs NO reactive retry (context rejection reports ok:false immediately, one chat())", async (t) => {
+  const com = flakyContextCom({
+    failTimes: Number.POSITIVE_INFINITY,
+    error: new Error(`Error: ${CTX_ERR}`),
+    response: { content: "never" },
+  });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 0 }, llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  const fulls = collectFull(h.events);
+  trigger(h.events);
+  await settle();
+  assert.equal(fulls.length, 0, "no reduce budget => no reactive emission");
+  assert.equal(com.calls.length, 1, "no reduce budget => no retry");
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false);
+  assert.ok((replies[0].error ?? "").includes(CTX_ERR));
+});
+
+// ---- 16h. terminal-return invariant + lock release --------------------------
+
+test("reactive/invariant: exactly ONE terminal llm.return across a retry-then-success sequence (no duplicate from the failed attempt)", async (t) => {
+  const com = flakyContextCom({
+    failTimes: 2, // two context rejections, then success
+    error: new Error(CTX_ERR),
+    response: { content: "recovered" },
+  });
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 3 }, llm: library([com]) });
+  customCompose(h, (call) => ({ text: "", messages: [msgOfLen(call < 3 ? 8000 : 80)] }));
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+  trigger(h.events);
+  await settle();
+  assert.equal(replies.length, 1, "the intermediate failures emit NO terminal return — only the final one");
+  assert.equal(replies[0].ok, true);
+  assert.equal(replies[0].data.content, "recovered");
+  assert.equal(com.calls.length, 3, "two failed attempts + one successful retry");
+});
+
+test("reactive/state: the lock releases after a reactive give-up — a later frame sends again", async (t) => {
+  // First frame: persistent context error -> ok:false after the budget.
+  // Second frame: provider recovered -> ok:true. Proves the lock was released.
+  let frame = 0;
+  const com: ChatStub = {
+    name: "ctx-then-ok",
+    provider: "stub",
+    model: "m",
+    capabilities: ["chat"],
+    input: ["text"],
+    output: ["text"],
+    calls: [],
+    chat(req: LLMRequest) {
+      com.calls.push(req);
+      if (frame === 0) return Promise.reject(new Error(CTX_ERR));
+      return Promise.resolve({ content: "ok-now" });
+    },
+  };
+  const h = await setupPlugin(t, { config: { maxReduceRounds: 2 }, llm: library([com]) });
+  h.setCompose("CTX");
+  const replies = collect(h.events, Events.LLM_RETURN) as any[];
+
+  trigger(h.events);
+  await settle();
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].ok, false, "frame 1 gave up after the budget");
+  const callsAfterFrame1 = com.calls.length;
+  assert.ok(callsAfterFrame1 >= 2, "frame 1 retried within the budget");
+
+  // Provider recovers; a fresh trigger must send again (lock released).
+  frame = 1;
+  trigger(h.events);
+  await settle();
+  assert.equal(replies.length, 2, "frame 2 produced its own terminal return");
+  assert.equal(replies[1].ok, true);
+  assert.equal(replies[1].data.content, "ok-now");
+  assert.ok(com.calls.length > callsAfterFrame1, "frame 2 issued a new send (lock was released)");
+});
+
+// ===========================================================================
+// 17. teardown
 // ===========================================================================
 
 test("teardown: after teardown a later trigger produces nothing", async (t) => {
