@@ -168,3 +168,5 @@ config/agent.default.json
 .krakey/
 
 .mdsmoke/
+overviews/
+.mdwt/
