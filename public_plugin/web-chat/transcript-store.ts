@@ -155,6 +155,17 @@ export class TranscriptStore {
     if (changed) this.persist();
   }
 
+  /**
+   * Await every file write enqueued so far (the serialized `writing` chain). Persistence
+   * is otherwise fire-and-forget; this lets a caller wait for the current append/persist
+   * chain to actually reach disk — e.g. before a deterministic reload, so a reader never
+   * races an in-flight write. Resolves even if a write failed (errors are swallowed,
+   * best-effort persistence).
+   */
+  async flush(): Promise<void> {
+    await this.writing;
+  }
+
   /** Flip one retained entry to "read" in memory; returns true iff it changed. No-op for an unknown/already-read id. */
   private flip(id: number): boolean {
     const end = this.head + this.count;
