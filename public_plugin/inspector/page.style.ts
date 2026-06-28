@@ -377,6 +377,56 @@ body {
 .levelseg button.active[data-lvl="error"] { color: var(--danger); }
 .levelseg button.active[data-lvl="print"] { color: var(--sky); }
 
+/* ── LOGS query bar (live ⇄ query source + range + type multi-select) ─────── */
+/* The query-only toolbar row is hidden in Live mode; the Logs panel sets
+ * data-src="query" on its <section> to reveal it. */
+.toolbar2 { flex-wrap: wrap; }
+.panel--logs:not([data-src="query"]) .query-only { display: none; }
+.qf-label {
+  font-family: var(--mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--faint);
+}
+select.tsel {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  background: var(--ink); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 5px 9px; outline: none; cursor: pointer; transition: all .15s;
+}
+select.tsel:focus { border-color: var(--gold-deep); box-shadow: 0 0 0 3px var(--gold-glow); }
+.qf-run { font-size: 11.5px; padding: 5px 12px; }
+.qf-run:hover { border-color: var(--gold-deep); color: var(--gold); }
+.qf-meta { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-left: auto; }
+
+/* type multi-select — dependency-free popover */
+.typems { position: relative; }
+.typems-btn {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text);
+  background: var(--ink); border: 1px solid var(--line2); border-radius: var(--r-sm);
+  padding: 5px 11px; cursor: pointer; transition: all .15s;
+}
+.typems-btn:hover { border-color: var(--gold-deep); }
+.typems-btn b { color: var(--gold); font-weight: 700; }
+.typems-pop {
+  display: none; position: absolute; z-index: 30; top: calc(100% + 6px); left: 0;
+  min-width: 200px; max-height: 280px; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: var(--r);
+  box-shadow: var(--shadow); padding: 7px;
+}
+.typems.open .typems-pop { display: block; }
+.typems-pop .tms-actions { display: flex; gap: 6px; padding: 2px 4px 7px; border-bottom: 1px solid var(--line); margin-bottom: 5px; }
+.typems-pop .tms-actions button {
+  font-family: var(--mono); font-size: 10px; color: var(--muted);
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 5px;
+  padding: 3px 8px; cursor: pointer; transition: all .14s;
+}
+.typems-pop .tms-actions button:hover { color: var(--text); border-color: var(--line2); }
+.typems-pop label {
+  display: flex; align-items: center; gap: 9px; padding: 4px 6px; border-radius: 5px;
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted); cursor: pointer;
+}
+.typems-pop label:hover { background: var(--panel2); color: var(--text); }
+.typems-pop label input { accent-color: var(--gold); cursor: pointer; }
+.typems-pop label.on { color: var(--text); }
+
 /* ── EVENT STREAM rows ───────────────────────────────────────────────────── */
 .ev {
   font-family: var(--mono); font-size: 11.5px; line-height: 1.7;

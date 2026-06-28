@@ -31,6 +31,7 @@ import {
   type AgentReg,
   type EventRecord,
 } from "./hub";
+import { EventStore } from "./store";
 
 // ---- the plugin factory ------------------------------------------------------
 
@@ -50,6 +51,7 @@ const KIND: { [eventName: string]: string } = {
   [Events.OUTPUT_MESSAGE]: "output",
   [Events.TOOL_RESULT]: "tool.result",
   [Events.LOG]: "log",
+  [Events.CONTEXT_FULL]: "context.full",
 };
 
 const factory: PluginFactory = (): Plugin => {
@@ -65,8 +67,26 @@ const factory: PluginFactory = (): Plugin => {
     // ---- config resolution (merge nested-over-flat + validation) ----
     const cfg = resolveConfig(ctx);
 
+    // ---- persistence: load this agent's JSONL store, restore a window, and
+    // keep `seq` monotonic across a restart (next seq = highest persisted + 1) ----
+    let store: EventStore | null = null;
+    let restore: EventRecord[] = [];
+    if (cfg.persist) {
+      store = await EventStore.load(ctx.dataDir, agentId, {
+        maxPersistedEntries: cfg.maxPersistedEntries,
+        retentionMs: cfg.retentionMs,
+        persist: true,
+      });
+      restore = store.window();
+      seq = store.maxSeq() + 1;
+    }
+
     // ---- join the refcounted hub (first registration listens) ----
-    const joined = await hubRegister(agentId, { port: cfg.port, host: cfg.host, token: cfg.token });
+    const joined = await hubRegister(
+      agentId,
+      { port: cfg.port, host: cfg.host, token: cfg.token, bufferSize: cfg.bufferSize },
+      { store, restore },
+    );
     reg = joined.reg;
     const boundPort = joined.boundPort;
     // The process token is whatever the first agent set; use it in our URL.

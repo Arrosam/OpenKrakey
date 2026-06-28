@@ -245,7 +245,7 @@
     "inspector": {
       "zone": "plugins",
       "path": "public_plugin/inspector",
-      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-frame by request id. Emits nothing — never perturbs the observed agent.",
+      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-frame by request id. Persists each agent's records to dataDir/<agentId>/events.jsonl (bounded, wall-clock retention) so scrollback survives restart, and serves a token-gated /query endpoint plus a filterable Logs view (time window / type / level) with a live tail. Emits nothing — never perturbs the observed agent.",
       "depends_on_contracts": [
         "plugin",
         "event-system",

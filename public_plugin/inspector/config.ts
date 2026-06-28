@@ -23,6 +23,12 @@ interface InspectorConfig {
   token: string;
   bufferSize: number;
   maxRecordBytes: number;
+  /** Persist captured records to a per-agent JSONL file under the dataDir. */
+  persist: boolean;
+  /** Cap on persisted entries per agent (bounds the file; compacts past 2×). */
+  maxPersistedEntries: number;
+  /** Drop restored entries older than now - retentionMs (0 = keep everything). */
+  retentionMs: number;
 }
 
 /**
@@ -53,5 +59,16 @@ export function resolveConfig(ctx: PluginContext): InspectorConfig {
   const maxRecordBytes: number =
     typeof slice.maxRecordBytes === "number" && slice.maxRecordBytes > 0 ? slice.maxRecordBytes : 65536;
 
-  return { port, host, token, bufferSize, maxRecordBytes };
+  // Persistence config — validate, not trust. `persist` defaults ON; a non-number
+  // (or out-of-range) size/retention falls back to its default rather than poisoning
+  // the store. retentionMs of 0 is the valid "keep everything" sentinel.
+  const persist: boolean = typeof slice.persist === "boolean" ? slice.persist : true;
+  const maxPersistedEntries: number =
+    typeof slice.maxPersistedEntries === "number" && slice.maxPersistedEntries >= 1
+      ? Math.floor(slice.maxPersistedEntries)
+      : 5000;
+  const retentionMs: number =
+    typeof slice.retentionMs === "number" && slice.retentionMs >= 0 ? slice.retentionMs : 0;
+
+  return { port, host, token, bufferSize, maxRecordBytes, persist, maxPersistedEntries, retentionMs };
 }
