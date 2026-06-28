@@ -38,7 +38,8 @@
         "history",
         "interval_toggle",
         "restart",
-        "retry"
+        "retry",
+        "logbook"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -366,6 +367,20 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/retry.md"
+    },
+    "logbook": {
+      "zone": "plugins",
+      "path": "public_plugin/logbook",
+      "description": "Comprehensive activity log: subscribes to all well-known bus events + log.entry, records compact timestamped/typed summaries into a bounded ring AND a persistent per-agent activity.jsonl, and exposes a log.fetch tool (query by time window + type/level/ok) so the agent can self-diagnose failures. Folds fetch results back next frame; data-carrying (private).",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/logbook.md"
     }
   },
   "contracts": {
