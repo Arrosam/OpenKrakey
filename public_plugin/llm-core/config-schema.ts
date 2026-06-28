@@ -63,4 +63,17 @@ export const LLM_CORE_SCHEMA: ConfigSchema = [
     placeholder: "200",
     help: "Tokens held back from the context window as headroom when computing the overflow budget. Default 200.",
   },
+  {
+    key: "retryOnContextError",
+    label: "Retry on context-overflow error",
+    type: "boolean",
+    help: "When the AI service rejects a request because the prompt is too long, shrink the prompt and retry (up to the max shrink rounds) instead of failing. Catches overflows the size estimate missed. Default on.",
+  },
+  {
+    key: "contextErrorPatterns",
+    label: "Context-overflow error patterns",
+    type: "list",
+    placeholder: "context_length_exceeded, prompt is too long",
+    help: "Provider error text (matched case-insensitively, each entry tried as a regular expression) that marks a rejection as a context overflow eligible for the shrink-and-retry above. Leave blank to use the built-in defaults.",
+  },
 ];

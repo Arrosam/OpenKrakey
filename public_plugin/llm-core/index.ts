@@ -47,6 +47,21 @@ import {
 } from "../../shared/actions";
 import { LLM_CORE_SCHEMA } from "./config-schema";
 
+/**
+ * Default provider error substrings/patterns that signal a context-overflow
+ * REJECTION — matched case-insensitively (each tried as a regex, falling back to a
+ * plain substring test). Drives the REACTIVE retry path: when a `chat()` rejects with
+ * one of these, llm-core shrinks the prompt and retries instead of giving up.
+ */
+const DEFAULT_CONTEXT_ERROR_PATTERNS = [
+  "context_length_exceeded",
+  "maximum context length",
+  "prompt is too long",
+  "input is too long",
+  "too many tokens",
+  "reduce the length",
+];
+
 /** The config slice this plugin reads (everything optional). */
 interface LLMCoreConfig {
   communicator?: string;
@@ -60,6 +75,10 @@ interface LLMCoreConfig {
   maxReduceRounds?: number;
   /** Tokens held back from the window as headroom when computing the budget (default 200). */
   safetyTokens?: number;
+  /** Retry (after shrinking) when a chat() rejection looks like context overflow (default true). */
+  retryOnContextError?: boolean;
+  /** Provider-error patterns that mark a rejection as context overflow (default DEFAULT_CONTEXT_ERROR_PATTERNS). */
+  contextErrorPatterns?: string[];
 }
 
 /** Safe view of `ctx.config` — only the keys of the right runtime type survive. */
@@ -77,7 +96,31 @@ function readConfig(raw: unknown): LLMCoreConfig {
     out.maxReduceRounds = c.maxReduceRounds;
   if (typeof c.safetyTokens === "number" && c.safetyTokens >= 0)
     out.safetyTokens = c.safetyTokens;
+  if (typeof c.retryOnContextError === "boolean")
+    out.retryOnContextError = c.retryOnContextError;
+  if (Array.isArray(c.contextErrorPatterns)) {
+    const patterns = c.contextErrorPatterns.filter(
+      (p): p is string => typeof p === "string" && p.length > 0,
+    );
+    out.contextErrorPatterns = patterns;
+  }
   return out;
+}
+
+/**
+ * Does `err` look like a provider context-overflow rejection? Each pattern is tried
+ * as a case-insensitive regex; an invalid regex falls back to a plain substring test.
+ * Empty `patterns` ⇒ never a context error.
+ */
+function isContextError(err: unknown, patterns: string[]): boolean {
+  const s = String(err);
+  return patterns.some((p) => {
+    try {
+      return new RegExp(p, "i").test(s);
+    } catch {
+      return s.toLowerCase().includes(p.toLowerCase());
+    }
+  });
 }
 
 /**
@@ -146,8 +189,23 @@ const createLLMCore: PluginFactory = (): Plugin => {
       : ctx!.llm.get(ctx!.llm.withCapability("chat")[0]);
   }
 
+  /**
+   * Outcome of one round-trip. A chat() REJECTION is reported as `{kind:"error"}`
+   * WITHOUT emitting any `llm.return` — the caller owns the terminal reply so it can
+   * retry on a context-overflow rejection. The missing/incapable-communicator case
+   * already emitted its own terminal `llm.return{ok:false}` (nothing more to do).
+   */
+  type RoundResult =
+    | { kind: "ok" }
+    | { kind: "no-communicator" }
+    | { kind: "error"; error: string };
+
   /** One full round-trip for an already-composed body, under corrId `id`. */
-  async function roundTrip(id: string, context: ComposedContext, turns: Message[]): Promise<void> {
+  async function roundTrip(
+    id: string,
+    context: ComposedContext,
+    turns: Message[],
+  ): Promise<RoundResult> {
     const communicator: Communicator | undefined = resolveCommunicator();
 
     if (!communicator || typeof communicator.chat !== "function") {
@@ -156,7 +214,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
         : "llm-core: no chat-capable communicator is available";
       ctx!.log.warn(error);
       emitReturn({ id, at: Date.now(), ok: false, error });
-      return;
+      return { kind: "no-communicator" };
     }
 
     // With turns, the composed context becomes the `system`; without, fall back to the
@@ -189,8 +247,11 @@ const createLLMCore: PluginFactory = (): Plugin => {
         };
         ctx.events.emit(Events.OUTPUT_MESSAGE, msg);
       }
+      return { kind: "ok" };
     } catch (err) {
-      emitReturn({ id, at: Date.now(), ok: false, error: String(err) });
+      // Emit NOTHING — the caller (sendOnce) decides whether to retry (context
+      // overflow) or surface a terminal `llm.return{ok:false}`.
+      return { kind: "error", error: String(err) };
     }
   }
 
@@ -237,18 +298,33 @@ const createLLMCore: PluginFactory = (): Plugin => {
     if (!initial) return;
     let { context, turns } = initial;
 
+    const charsPerToken = config.charsPerToken ?? 4;
     const maxReduceRounds = config.maxReduceRounds ?? 3;
-    // SKIP the overflow loop entirely when there's no budget or shrinking is disabled —
-    // CURRENT BEHAVIOR: no event, single compose, single chat.
+    const retryOnCtx = config.retryOnContextError ?? true;
+    const patterns = config.contextErrorPatterns ?? DEFAULT_CONTEXT_ERROR_PATTERNS;
+
+    // Tool defs are stable this frame — fetch ONCE, only when a budget makes the
+    // estimate meaningful (both the proactive loop and the reactive estimate reuse it).
+    const toolDefs: ToolDef[] = budget !== undefined ? await listTools() : [];
+
+    // A SINGLE shared round counter across BOTH the proactive (char-estimate) settle
+    // loop below and the reactive (provider-rejection) retry loop further down, so
+    // reactive rounds CONTINUE from any proactive rounds — `round` escalates monotonically
+    // and is the hard cap on total prompt-shrink rounds this frame.
+    let round = 0;
+
+    // PROACTIVE settle loop. SKIPPED entirely when there's no budget or shrinking is
+    // disabled — no event, single compose. On exit `round` = number of `context.full`
+    // emissions made here.
     if (budget !== undefined && maxReduceRounds !== 0) {
-      const charsPerToken = config.charsPerToken ?? 4;
-      const toolDefs = await listTools(); // fetch ONCE — tool defs are stable this frame
+      if (!ctx) return; // torn down while listing tools — emit nothing
       let lastEstimate: number | undefined;
-      for (let round = 1; round <= maxReduceRounds; round++) {
+      while (round < maxReduceRounds) {
         const est = estimateTokens(context, turns, toolDefs, charsPerToken);
         if (est <= budget) break; // fits — STRICT overflow is est > budget
         if (est === lastEstimate) break; // no progress — reactors can't shrink further
         lastEstimate = est;
+        round += 1;
         const notify: Notify<{ estimatedTokens: number; limit: number; overBy: number; round: number }> = {
           at: Date.now(),
           data: { estimatedTokens: est, limit: budget, overBy: est - budget, round },
@@ -267,8 +343,45 @@ const createLLMCore: PluginFactory = (): Plugin => {
       }
     }
 
-    if (!ctx) return; // torn down while composing — emit nothing
-    await roundTrip(String(++seq), context, turns);
+    // REACTIVE retry loop: send, and if the provider REJECTS with a context-overflow
+    // error, shrink (emit `context.full`, re-compose) and try again — sharing `round`
+    // with the proactive loop so the two together never exceed `maxReduceRounds`. Each
+    // attempt uses a FRESH corrId; the terminal `llm.return` is owned here.
+    for (;;) {
+      if (!ctx) return; // torn down while composing — emit nothing
+      const id = String(++seq);
+      const result = await roundTrip(id, context, turns);
+      if (result.kind === "ok" || result.kind === "no-communicator") return;
+      // result.kind === "error": a chat() rejection that roundTrip did NOT report.
+      if (retryOnCtx && round < maxReduceRounds && isContextError(result.error, patterns)) {
+        round += 1;
+        if (!ctx) return; // torn down — emit nothing
+        const est =
+          budget !== undefined ? estimateTokens(context, turns, toolDefs, charsPerToken) : 0;
+        const notify: Notify<{ estimatedTokens: number; limit: number; overBy: number; round: number }> = {
+          at: Date.now(),
+          data: {
+            estimatedTokens: est,
+            limit: budget ?? 0,
+            overBy: budget !== undefined ? Math.max(0, est - budget) : 0,
+            round,
+          },
+        };
+        ctx!.events.emit(Events.CONTEXT_FULL, notify);
+        const next = await compose();
+        if (!next) {
+          // Re-compose failed — surface the provider error under this attempt's corrId.
+          emitReturn({ id, at: Date.now(), ok: false, error: result.error });
+          return;
+        }
+        ({ context, turns } = next);
+        continue;
+      }
+      // Non-context error, retry disabled, or the shared round cap is reached —
+      // terminal failure under the LAST attempt's corrId.
+      emitReturn({ id, at: Date.now(), ok: false, error: result.error });
+      return;
+    }
   }
 
   /**
