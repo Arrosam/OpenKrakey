@@ -1,36 +1,15 @@
 {
   "communicators": {
-    "claude": {
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-6",
-      "apiKey": "${ANTHROPIC_API_KEY}",
-      "capabilities": ["chat", "ocr"],
-      "input": ["text", "image", "document"],
-      "output": ["text"],
-      "contextLength": 200000
-    },
-    "gpt": {
+    "my-llm": {
       "provider": "openai-completion",
-      "model": "gpt-5.4-mini",
+      "model": "gpt-4o-mini",
       "apiKey": "${OPENAI_API_KEY}",
       "baseURL": "https://api.openai.com/v1",
       "capabilities": ["chat"],
-      "input": ["text", "image", "audio"],
+      "input": ["text", "image"],
       "output": ["text"],
-      "reasoningEffort": "medium"
-    },
-    "embeddings": {
-      "provider": "openai-completion",
-      "model": "text-embedding-3-small",
-      "apiKey": "${OPENAI_API_KEY}",
-      "capabilities": ["embed"]
-    },
-    "reranker": {
-      "provider": "jina",
-      "model": "jina-reranker-v2-base-multilingual",
-      "apiKey": "${JINA_API_KEY}",
-      "capabilities": ["rerank"]
+      "contextLength": 128000
     }
   },
-  "default": "claude"
+  "default": "my-llm"
 }

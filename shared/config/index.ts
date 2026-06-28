@@ -135,7 +135,7 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
   {
     id: "openai-completion",
     label: "OpenAI-compatible (chat completions)",
-    summary: "The /chat/completions wire format — OpenAI, or any compatible endpoint (oneAPI, Ollama, vLLM…).",
+    summary: "OpenAI's /chat/completions wire format. Use for OpenAI cloud (api.openai.com), or any self-hosted compatible endpoint (Ollama, vLLM, LM Studio, oneAPI…).",
     capabilities: ["chat", "embed", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "audio"],
@@ -148,7 +148,7 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
   {
     id: "anthropic",
     label: "Anthropic-compatible (Messages API)",
-    summary: "Anthropic's /v1/messages wire format — Claude, or any Anthropic-compatible endpoint.",
+    summary: "Anthropic's /v1/messages wire format. Use for Anthropic cloud (api.anthropic.com) or any Anthropic-compatible endpoint (e.g. a local LM Studio server).",
     capabilities: ["chat", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "document"],
@@ -160,7 +160,7 @@ export const KNOWN_PROVIDERS: readonly ProviderInfo[] = [
   {
     id: "openai-responses",
     label: "OpenAI (Responses API)",
-    summary: "OpenAI's /responses wire format.",
+    summary: "OpenAI's newer /responses wire format. For OpenAI cloud — most self-hosted endpoints speak /chat/completions instead.",
     capabilities: ["chat", "embed", "ocr"],
     defaultCapabilities: ["chat"],
     inputs: ["text", "image", "document"],

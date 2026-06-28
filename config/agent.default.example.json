@@ -8,12 +8,14 @@
     "krakeycode",
     "web-search",
     "inspector",
-    "interval_toggle"
+    "interval_toggle",
+    "retry"
   ],
   "privatePlugins": [
     "web-chat",
     "memory-note",
-    "history"
+    "history",
+    "logbook"
   ],
   "config": {
     "persona": {
@@ -34,6 +36,8 @@
       "baseIntervalMs": 900000
     },
     "memory-note": {},
-    "history": {}
+    "history": {},
+    "retry": {},
+    "logbook": {}
   }
 }
