@@ -57,5 +57,5 @@ the **shared data of a public plugin**, which is shared by design across the Age
 
 ## Supported versions
 
-OpenKrakey is at an early (MVP) stage; security fixes are applied to the `main` branch. Pin to a
-commit you have reviewed if you deploy it.
+OpenKrakey is at an early stage (`0.1.0`, beta); security fixes are applied to the `main` branch.
+Pin to a commit you have reviewed if you deploy it.

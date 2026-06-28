@@ -1,6 +1,7 @@
 # OpenKrakey — Architecture
 
-> **Status:** design finalized (v1.0, the starting point of a full clean-room rewrite).
+> **Status:** design finalized (design v1.0 — the starting point of a full clean-room rewrite;
+> the software itself is `0.1.0`, an early beta — see `package.json`).
 > **Stack:** TypeScript + Node.js (npm; tests run via tsx). **License:** MIT.
 > **Predecessor:** [`Arrosam/KrakeyBot`](https://github.com/Arrosam/KrakeyBot) (Python) — which,
 > for lack of up-front planning, had its abstractions re-cut repeatedly until it decayed.
@@ -60,7 +61,9 @@
 | Scope | Module | One line |
 |---|---|---|
 | Global | **boot** | Startup launcher (also builds the global LLM library) |
-| Global | **cli** | Config-file management UI (independent tool) |
+| Global | **cli** | Config-file management UI — the arrow-key tool (independent of the runtime) |
+| Global | **config-web** | The same config management as a token-gated loopback web UI (renders every plugin's `configSchema`; hosts the onboarding wizard) |
+| Global | **console** | Unified web console that frames config-web + the per-Agent chat + inspector under one nav bar |
 | Global | **llm-gateway** | LLM communication gateway: builds a key-less communicator library from `config/llm.json` |
 | Per-Agent | **agent_instance** | Wraps one Agent (façade / container) |
 | Per-Agent | **orchestrator** | The conductor (contains the context-buffer) |
@@ -238,10 +241,11 @@ OpenKrakey/
 ├─ contracts/          # L1 — the only shared vocabulary (pure types + well-known action/event names)
 │   agent · clock · context · event-system · llm · loader · orchestrator · plugin
 ├─ packages/           # module implementations
-│   agent_instance · boot · cli · clock · event-system · llm-gateway · loader · orchestrator
+│   agent_instance · boot · cli · clock · config-web · console · event-system · llm-gateway · loader · orchestrator
 ├─ public_plugin/<id>/ # shared plugins
-│   llm-core · persona · system-prompt · web-chat · krakeycode · web-search · browser · inspector
-├─ shared/             # cross-cutting helpers (actions, config, errors, http-auth, logging, theme)
+│   llm-core · tool-manager · persona · system-prompt · web-chat · krakeycode · web-search · browser
+│   · inspector · memory-note · history · interval_toggle · restart
+├─ shared/             # cross-cutting helpers (actions, config, config-ops, errors, http-auth, logging, theme)
 ├─ config/             # *.example.json templates (llm, agent.default)
 ├─ tests/              # contract-derived edge tests (run via tsx)
 └─ docs/               # documentation (architecture-graph tooling under docs/scripts/)
@@ -302,7 +306,8 @@ envelopes.
   plugins.
 - **Phase 1** — Example plugins (`persona`, the identity block; `system-prompt`, the operating
   model block (the monologue rule + basic usage, channel-agnostic); `llm-core`, the LLM
-  round-trip + `llm.register_tool`; `web-chat`, the browser channel — the `web-chat.send_message` tool +
+  round-trip (the `llm.register_tool` / `llm.list_tools` registry was later split into its own
+  `tool-manager` plugin); `web-chat`, the browser channel — the `web-chat.send_message` tool +
   `web-chat.guidance` usage block + `web-chat.conversation` block, maintaining its own chat log;
   `inspector`, the debugging panel) → conversation, with memory.
 - **Phase 2** — The cli configuration tool (logo + `agent` / `default` / `providers` management).

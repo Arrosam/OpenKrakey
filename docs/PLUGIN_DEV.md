@@ -42,6 +42,13 @@ That last point matters: **building a plugin is editing the program that runs yo
 test it, but a human/build step loads it. Treat plugin authoring as a proposal you prepare and verify,
 then hand off.
 
+> **Mind the relative-import depth — it depends on where the file sits.** Every code example below is
+> written for the shared `public_plugin/<id>/` location, which is two levels under the repo root, so its
+> imports read `"../../contracts/…"` and `"../../shared/…"`. Your Agent workspace
+> `agents/<agent-id>/plugins/<id>/index.ts` is **two levels deeper** — from there the same imports need
+> `"../../../../contracts/…"` and `"../../../../shared/…"`. Adjust the `../` depth when you paste an
+> example into your workspace, or it won't resolve.
+
 ---
 
 ## 1. The world you live in (mental model)
@@ -138,8 +145,8 @@ interface PluginManifest {
   rather than letting you silently lose a capability.
 - Any other entry must match a plugin **id** or a `provides` capability of another plugin in the load set.
 
-Example: any tool plugin declares `requires: ["llm.register_tool"]` so it is guaranteed `llm-core` loaded
-first.
+Example: any tool plugin declares `requires: ["llm.register_tool"]` so it is guaranteed `tool-manager`
+(which `provides` that action) loaded first.
 
 ### 2.3 The PluginContext (everything you are handed at setup)
 
@@ -300,6 +307,7 @@ and its `Reply`. So when the table says a payload is `Reply<LLMResponse>`, you k
 | `output.message` | `Events.OUTPUT_MESSAGE` | `Notify<{text, to?, channel?, meta?}>` | The model's raw monologue, surfaced as a **HOOK** — it is NOT a channel send (delivering it would break the monologue rule). |
 | `tool.result` | `Events.TOOL_RESULT` | `Reply<unknown> & {name}` | A dispatched tool call settled (`id` = the `ToolCall` id, `name` = the action). Fold YOUR tools' results into context here (§4.1). |
 | `log.entry` | `Events.LOG` | `Notify<{level, pluginId, text}>` | A mirrored console line (`level` includes `"print"`). The inspector/channels consume it; never `ctx.log.*` from inside this handler (infinite loop). |
+| `context.full` | `Events.CONTEXT_FULL` | `Notify<{estimatedTokens, limit, overBy, round}>` | The assembled prompt exceeds the model's context budget. `llm-core` emits this **synchronously** before sending, then re-composes; a plugin owning a growable `messages` block should **shed its oldest entries** when it sees this (`round` increments per emission within one frame, so you can shed more each round). |
 
 **The well-known actions you can `invoke`** (these are *operations*, not events — call them, optionally
 guarding with `ctx.actions.has(name)`):
@@ -311,15 +319,18 @@ guarding with `ctx.actions.has(name)`):
 | `clock.fire_now` | `Actions.CLOCK_FIRE_NOW` | none | Orchestrator. **Wake the frame immediately** — the "important" signal (§4.1). |
 | `prompt.compose` | `Actions.PROMPT_COMPOSE` | none | Orchestrator. Gather + compose the current `{ context, messages }` on demand. `llm-core` calls this right before sending; you almost never call it yourself. |
 | `core.restart` | `Actions.CORE_RESTART` | `{ delayMs? }` | Core (only when boot wired it — guard with `has`). Graceful restart: every plugin's `teardown` runs before re-exec. The `restart` plugin invokes this rather than exiting. |
-| `llm.register_tool` | *(plugin action)* | a `ToolDef` | `llm-core` (`provides: ["llm.register_tool"]`). Declare a tool (§4). |
+| `llm.register_tool` | *(plugin action)* | a `ToolDef` | `tool-manager` (`provides: ["llm.register_tool"]`). Declare a tool (§4). |
+| `llm.list_tools` | *(plugin action)* | none → `ToolDef[]` | `tool-manager`. A snapshot of the registry; `llm-core` invokes it each request to attach the current tools. You rarely call it yourself. |
 
 ---
 
 ## 4. Building a TOOL plugin (the important pattern)
 
-A tool is a `ToolDef` you declare to `llm-core`, plus an action that backs it. **`llm-core` is the
-tool-registration hub** — it `provides: ["llm.register_tool"]`, and on every chat request it attaches all
-registered ToolDefs.
+A tool is a `ToolDef` you declare to the tool registry, plus an action that backs it. **`tool-manager` is
+the tool-registration hub** — it `provides: ["llm.register_tool"]` (and `llm.list_tools`); `llm-core`
+calls `llm.list_tools` on every chat request and attaches all registered ToolDefs. (The two stay
+decoupled: tool plugins never import `llm-core`, and `llm-core` never knows your tool — they meet only on
+the actionbus.)
 
 ```ts
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
@@ -542,8 +553,8 @@ Agent config (`agents/<id>/config.json`, or the template `config/agent.default.e
 
 ```jsonc
 {
-  "intervalMs": 30000,
-  "plugins": ["llm-core", "persona", "system-prompt", "web-chat", "krakeycode", "my-plugin"],
+  "intervalMs": 30000,                     // 30s — short for dev; the default is 900000 (15 min)
+  "plugins": ["llm-core", "tool-manager", "persona", "system-prompt", "web-chat", "krakeycode", "my-plugin"],
   "privatePlugins": ["web-chat"],          // ids to make independent (copied + isolated data)
   "config": {
     "my-plugin": { /* your config slice → arrives as ctx.config */ }
@@ -551,7 +562,7 @@ Agent config (`agents/<id>/config.json`, or the template `config/agent.default.e
 }
 ```
 
-- **Order matters for `requires`:** put providers before consumers (`llm-core` before any tool plugin).
+- **Order matters for `requires`:** put providers before consumers (`tool-manager` before `llm-core` and any tool plugin).
 - A plugin with no config still needs no entry, but adding `"my-plugin": {}` documents that it's wired.
 - The live default (`config/agent.default.json`) and per-Agent configs are local runtime state
   (gitignored); the committed template is `config/agent.default.example.json`.
@@ -581,7 +592,7 @@ implementation. The established harness (copy it from `tests/plugins/system-prom
   bus and check your messages block); `teardown` removes blocks and unregisters actions and is idempotent.
 - Use real temp dirs (`fs.mkdtempSync`) for anything touching the filesystem; clean up in `test.after`.
 
-`krakeycode`'s own suite (`tests/plugins/krakeycode.test.ts`, 54 cases) is a thorough worked example.
+`krakeycode`'s own suite (`tests/plugins/krakeycode.test.ts`, 80+ cases) is a thorough worked example.
 
 Housekeeping: never run `tsc` to "check" a plugin — it emits stray `.js`/`.d.ts` next to your `.ts`.
 If any appear, delete them before finishing (`tsc` is scoped to `contracts/`+`packages/`+`shared/`).

@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="OpenKrakey — the ultimate autonomous agent" width="560" />
+<img src="assets/logo.svg" alt="OpenKrakey — autonomous agents on a frame loop" width="560" />
 
 <p>
   <a href="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Arrosam/OpenKrakey/actions/workflows/ci.yml/badge.svg" /></a>
@@ -94,7 +94,7 @@ The Console frames the other three — run config-web and at least one agent for
 ## What your agent can do
 
 Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set
-below; `web-chat` is loaded as a **private** (per-agent) plugin. `browser` is **off by default** —
+below; `web-chat`, `memory-note`, and `history` are loaded as **private** (per-agent) plugins. `browser` is **off by default** —
 it drives your own Chrome, so turn it on per agent when you want it. Add or remove any of them per
 agent in its config.
 
@@ -104,7 +104,11 @@ agent in its config.
 | **krakeycode** | Files and shell: `read_file`, `write_file`, `edit_file`, `bash`, `list_dir`. | `local` mode (real paths) or `sandbox` mode (confined to a root + command allowlist). |
 | **web-search** | Web search: `web-search.search`. | Keyless **DuckDuckGo** by default; or point `instanceUrl` at your own **SearXNG** — see [SECURITY.md](SECURITY.md). |
 | **browser** | Read-only Chrome: `navigate`, `read_page`, `list_tabs`, `activate_tab`, `screenshot`. | Drives Chrome over the DevTools Protocol with **zero dependencies**. Never clicks, types, or runs scripts. |
-| **llm-core** | The LLM round-trip, and the tool registry every tool plugin registers into. | Required by all of the above. Picks the model from config (or by capability). |
+| **interval_toggle** | Self-pacing: `interval.set` / `interval.hold` to change its own frame rate. | Drives the agent's clock over the bus — speed up under load, idle down when quiet. |
+| **memory-note** | A private notebook: `memory-note.remember` / `memory-note.forget`. | The whole notebook re-renders into context every frame. Loaded **private** (per-agent). |
+| **history** | A compacting log of every tool result, rendered as a trail. | Auto-captured; distills a checkpoint into `memory-note` when it compacts. Loaded **private**; requires `memory-note`. |
+| **llm-core** | The LLM round-trip every chat request goes through. | Required by all of the above. Picks the model from config (or by capability). |
+| **tool-manager** | The tool registry every tool plugin registers into (`llm.register_tool` / `llm.list_tools`). | **Required whenever any tool plugin is loaded** — the loader sequences it ahead of them and fails fast if it's missing. |
 | **persona** | Its identity — the top of the system prompt. | Set the text in the agent's config. |
 | **system-prompt** | Its operating rules (the *monologue rule*, below). | Channel-agnostic; teaches the general model. |
 | **inspector** | A live, read-only dashboard of everything on the agent's bus. | Loopback + token gated. Great for watching frames, prompts, and tool results. |
@@ -199,7 +203,7 @@ Two files, both shipped as `.example.json` templates (your live copies are git-i
 ```jsonc
 {
   "intervalMs": 900000,                 // frame period (frame rate, 15 min)
-  "plugins": ["llm-core", "persona", "system-prompt", "krakeycode"],
+  "plugins": ["llm-core", "tool-manager", "persona", "system-prompt", "krakeycode"],
   "privatePlugins": ["web-chat"],       // ids whose data is isolated to this agent
   "config": {
     "persona": { "text": "You are Krakey, an autonomous agent. Be concise and helpful." },
