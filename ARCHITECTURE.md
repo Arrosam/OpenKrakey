@@ -35,33 +35,9 @@
 
 ## 2. Module structure
 
-<div align="center">
-<img src="docs/structure.svg" alt="Krakey software structure — global modules, the per-Agent instance, and the contracts/shared foundations" width="860" />
-<br/><sub><i>The three layers: global tools (one per process), the per-Agent instance, and the foundations every part imports but never bypasses.</i></sub>
-</div>
+![Krakey software structure — global modules, the per-Agent instance, and the contracts/shared foundations](docs/structure.svg)
 
-```
-┌──────────────────────────── Global (one per process) ─────────────────────────────┐
-│  boot  — startup only: read each Agent's config file → bring the Agent up           │
-│  cli   — an independent config-file management tool (UI): create/edit Agent configs  │
-│          and Default settings by the correct schema (users may also edit by hand;    │
-│          displays the Krakey logo)                                                   │
-└──────────────────────────────────────────────────────────────────────────────────────┘
-            │ creates per config at startup
-            ▼
-┌──────────── Agent instance (one set each, mutually isolated, wrapped by agent_instance) ┐
-│                                                                                          │
-│   agent_instance — wraps one Agent: holds and wires the four below; exposes start/stop   │
-│                                                                                          │
-│   ┌── event-system ──(independent hub: eventbus + actionbus)──┐                          │
-│   │      ▲          ▲              ▲           ▲               │                          │
-│   │   clock      loader       orchestrator   plugins…         │                          │
-│   │  (emit tick) (register)  (subscribe/compose/dispatch)     │                          │
-│   └────────────────────────────────────────────────────────────┘                        │
-│                                                                                          │
-│   orchestrator internally contains the context-buffer (ordered context blocks)          │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+*The three layers: global tools (one per process), the per-Agent instance, and the foundations every part imports but never bypasses.*
 
 | Scope | Module | One line |
 |---|---|---|
@@ -165,22 +141,9 @@ adjusted by the orchestrator (`setInterval` / `fireNow`).
 
 ## 4. Data flow of one frame (within a single Agent)
 
-<div align="center">
-<img src="docs/runtime.svg" alt="Krakey runtime — one frame: clock tick, gather, compose, non-blocking llm.request, llm.return with tool calls, dispatch, and tool.result fold" width="860" />
-<br/><sub><i>One frame end to end (solid, ①–⑦) plus the one-time startup wiring (dashed). Everything flows through the central event-system bus.</i></sub>
-</div>
+![Krakey runtime — one frame: clock tick, gather, compose, non-blocking llm.request, llm.return with tool calls, dispatch, and tool.result fold](docs/runtime.svg)
 
-```
-   plugin ──emit──▶ event-system (eventbus) ──▶ plugin adds/modifies/removes a context block by id
-     ▲                                                          │   (in the orchestrator's buffer)
-     │                                          clock counts down → emit tick
-     │                                                          ▼
-     │     orchestrator: emit prompt.gather → compose full context → emit "llm.request" ─▶ LLM plugin
-     │                                                          │ (in flight; non-blocking; frame ends)
-     │                                                          ▼
-     │           LLM plugin finishes round-trip + parse → emit "llm.return" (Reply<LLMResponse>, toolCalls)
-     └──invoke◀── event-system (actionbus) ◀── orchestrator dispatches each tool call (fired async)
-```
+*One frame end to end (solid, 1–7) plus the one-time startup wiring (dashed). Everything flows through the central event-system bus.*
 
 **Temporal parallelism = non-blocking.** Tool calls run asynchronously; a new input arriving
 mid-flight, and any message the Agent explicitly sends through a channel, are recorded by the
