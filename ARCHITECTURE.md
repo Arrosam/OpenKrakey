@@ -35,6 +35,11 @@
 
 ## 2. Module structure
 
+<div align="center">
+<img src="docs/structure.svg" alt="Krakey software structure — global modules, the per-Agent instance, and the contracts/shared foundations" width="860" />
+<br/><sub><i>The three layers: global tools (one per process), the per-Agent instance, and the foundations every part imports but never bypasses.</i></sub>
+</div>
+
 ```
 ┌──────────────────────────── Global (one per process) ─────────────────────────────┐
 │  boot  — startup only: read each Agent's config file → bring the Agent up           │
@@ -159,6 +164,11 @@ adjusted by the orchestrator (`setInterval` / `fireNow`).
 ---
 
 ## 4. Data flow of one frame (within a single Agent)
+
+<div align="center">
+<img src="docs/runtime.svg" alt="Krakey runtime — one frame: clock tick, gather, compose, non-blocking llm.request, llm.return with tool calls, dispatch, and tool.result fold" width="860" />
+<br/><sub><i>One frame end to end (solid, ①–⑦) plus the one-time startup wiring (dashed). Everything flows through the central event-system bus.</i></sub>
+</div>
 
 ```
    plugin ──emit──▶ event-system (eventbus) ──▶ plugin adds/modifies/removes a context block by id

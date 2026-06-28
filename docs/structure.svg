@@ -1,0 +1,73 @@
+<svg viewBox="0 0 900 720" xmlns="http://www.w3.org/2000/svg" role="img" font-family="var(--font-sans, ui-sans-serif, system-ui, sans-serif)">
+<title>Krakey software structure</title>
+<desc>Krakey is layered. At the top, GLOBAL modules run once per process: boot starts an Agent per config file, cli and config-web and console configure and observe, and llm-gateway holds the API keys and hands out key-less communicators which it injects into the per-Agent instance. The middle layer is the per-Agent instance, wrapped by agent_instance and replicated N times in isolation: kernel modules event-system, orchestrator with its context-buffer, clock, loader, and agent_instance, plus the plugins loaded by the loader. The bottom layer is the foundation everything imports but never bypasses: the contracts directory which is the only shared vocabulary, and the shared helpers. The core holds no LLM, prompt, or memory behavior; all of that lives in plugins; these invariants are test-enforced.</desc>
+<style>
+  .ttl{font-size:21px;font-weight:700;fill:var(--text-primary,#2C2C2A);}
+  .bn{font-size:11px;font-weight:700;fill:var(--text-muted,#888780);letter-spacing:.04em;}
+  .chip{fill:var(--surface-2,#ffffff);stroke:var(--border-strong,#B4B2A9);stroke-width:1.3;}
+  .ct{font-size:12.5px;font-weight:600;fill:var(--text-primary,#2C2C2A);}
+  .cs{font-size:10.5px;fill:var(--text-secondary,#5F5E5A);}
+  .mono{font-size:12px;font-family:var(--font-mono,ui-monospace,monospace);fill:var(--text-primary,#2C2C2A);}
+  .note{font-size:11.5px;fill:var(--text-muted,#888780);}
+  .flow{fill:none;stroke-width:1.8;stroke:#7F77DD;}
+</style>
+<defs>
+  <marker id="ah2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/>
+  </marker>
+</defs>
+
+<rect x="0" y="0" width="900" height="720" fill="#FBFBF9"/>
+
+<text x="450" y="30" text-anchor="middle" class="ttl">Krakey software structure — kernel stays domain-free, behavior lives in plugins</text>
+
+<!-- GLOBAL band -->
+<rect x="20" y="52" width="860" height="112" rx="12" fill="var(--surface-1,#FBFBF9)" stroke="#D85A30" stroke-width="1.6"/>
+<text x="34" y="74" class="bn">GLOBAL · ONE PER PROCESS</text>
+<rect x="34" y="86" width="150" height="64" rx="8" class="chip"/><text x="46" y="110" class="ct">boot</text><text x="46" y="128" class="cs">starts an Agent</text><text x="46" y="142" class="cs">per config file</text>
+<rect x="198" y="86" width="138" height="64" rx="8" class="chip"/><text x="210" y="110" class="ct">cli</text><text x="210" y="128" class="cs">arrow-key config</text><text x="210" y="142" class="cs">editor</text>
+<rect x="350" y="86" width="138" height="64" rx="8" class="chip"/><text x="362" y="110" class="ct">config-web</text><text x="362" y="128" class="cs">config UI +</text><text x="362" y="142" class="cs">onboarding wizard</text>
+<rect x="502" y="86" width="138" height="64" rx="8" class="chip"/><text x="514" y="110" class="ct">console</text><text x="514" y="128" class="cs">unified web shell</text><text x="514" y="142" class="cs">(frames the rest)</text>
+<rect x="654" y="86" width="212" height="64" rx="8" class="chip" stroke="#D85A30"/><rect x="654" y="86" width="5" height="64" rx="2.5" fill="#D85A30"/><text x="668" y="110" class="ct">llm-gateway</text><text x="668" y="128" class="cs">holds API keys (R1) →</text><text x="668" y="142" class="cs">key-less communicators out</text>
+
+<!-- PER-AGENT band -->
+<rect x="20" y="190" width="860" height="300" rx="12" fill="var(--surface-1,#FBFBF9)" stroke="#7F77DD" stroke-width="1.8"/>
+<text x="34" y="212" class="bn">PER-AGENT INSTANCE · wrapped by agent_instance · ×N, mutually isolated (R6)</text>
+
+<text x="34" y="234" class="bn" fill="#534AB7">KERNEL MODULES (packages/)</text>
+<rect x="34" y="242" width="186" height="58" rx="8" class="chip" stroke="#7F77DD"/><rect x="34" y="242" width="5" height="58" rx="2.5" fill="#7F77DD"/><text x="48" y="266" class="ct">event-system</text><text x="48" y="285" class="cs">eventbus + actionbus</text>
+<rect x="232" y="242" width="150" height="58" rx="8" class="chip" stroke="#7F77DD"/><rect x="232" y="242" width="5" height="58" rx="2.5" fill="#7F77DD"/><text x="246" y="266" class="ct">orchestrator</text><text x="246" y="285" class="cs">+ context-buffer</text>
+<rect x="394" y="242" width="120" height="58" rx="8" class="chip" stroke="#7F77DD"/><rect x="394" y="242" width="5" height="58" rx="2.5" fill="#7F77DD"/><text x="408" y="266" class="ct">clock</text><text x="408" y="285" class="cs">timer</text>
+<rect x="526" y="242" width="120" height="58" rx="8" class="chip" stroke="#7F77DD"/><rect x="526" y="242" width="5" height="58" rx="2.5" fill="#7F77DD"/><text x="540" y="266" class="ct">loader</text><text x="540" y="285" class="cs">install/register</text>
+<rect x="658" y="242" width="208" height="58" rx="8" class="chip" stroke="#7F77DD" stroke-dasharray="4 3"/><text x="672" y="266" class="ct">agent_instance</text><text x="672" y="285" class="cs">façade — wires + start/stop</text>
+
+<text x="34" y="326" class="bn" fill="#178a63">PLUGINS (public_plugin/) — loaded by loader · every capability is here</text>
+<rect x="34" y="334" width="150" height="50" rx="8" class="chip" stroke="#1D9E75"/><rect x="34" y="334" width="5" height="50" rx="2.5" fill="#1D9E75"/><text x="48" y="356" class="ct">llm-core</text><text x="48" y="373" class="cs">round-trip + parse</text>
+<rect x="196" y="334" width="158" height="50" rx="8" class="chip" stroke="#1D9E75"/><rect x="196" y="334" width="5" height="50" rx="2.5" fill="#1D9E75"/><text x="210" y="356" class="ct">tool-manager</text><text x="210" y="373" class="cs">the tool registry</text>
+<rect x="366" y="334" width="150" height="50" rx="8" class="chip"/><text x="380" y="356" class="ct">persona</text><text x="380" y="373" class="cs">identity block</text>
+<rect x="528" y="334" width="158" height="50" rx="8" class="chip"/><text x="542" y="356" class="ct">system-prompt</text><text x="542" y="373" class="cs">operating rules</text>
+<rect x="698" y="334" width="168" height="50" rx="8" class="chip"/><text x="712" y="356" class="ct">web-chat</text><text x="712" y="373" class="cs">channel (you ↔ agent)</text>
+
+<rect x="34" y="392" width="150" height="50" rx="8" class="chip"/><text x="48" y="414" class="ct">krakeycode</text><text x="48" y="431" class="cs">files + shell</text>
+<rect x="196" y="392" width="158" height="50" rx="8" class="chip"/><text x="210" y="414" class="ct">web-search</text><text x="210" y="431" class="cs">search</text>
+<rect x="366" y="392" width="150" height="50" rx="8" class="chip"/><text x="380" y="414" class="ct">browser</text><text x="380" y="431" class="cs">read-only Chrome</text>
+<rect x="528" y="392" width="158" height="50" rx="8" class="chip"/><text x="542" y="414" class="ct">memory-note</text><text x="542" y="431" class="cs">durable notes</text>
+<rect x="698" y="392" width="168" height="50" rx="8" class="chip"/><text x="712" y="414" class="ct">history · inspector</text><text x="712" y="431" class="cs">trail · live bus view</text>
+
+<rect x="34" y="450" width="320" height="30" rx="8" class="chip"/><text x="48" y="470" class="cs"><tspan font-weight="700" class="ct" font-size="12">interval_toggle</tspan> self-pacing · <tspan font-weight="700" class="ct" font-size="12">restart</tspan> reloads plugins/config</text>
+<text x="372" y="470" class="note">…and any plugin you write — a private one in agents/&lt;id&gt;/plugins/ overrides a public same-id</text>
+
+<!-- FOUNDATIONS band -->
+<rect x="20" y="516" width="860" height="186" rx="12" fill="var(--surface-1,#FBFBF9)" stroke="var(--border-strong,#B4B2A9)" stroke-width="1.6"/>
+<text x="34" y="538" class="bn">FOUNDATIONS · imported everywhere, never bypassed</text>
+<rect x="34" y="548" width="832" height="44" rx="8" class="chip"/><text x="48" y="567" class="ct">contracts/ <tspan class="cs">— L1, the only shared vocabulary (pure types + event/action names)</tspan></text><text x="48" y="585" class="mono">agent · clock · context · event-system · llm · loader · orchestrator · plugin</text>
+<rect x="34" y="600" width="832" height="44" rx="8" class="chip"/><text x="48" y="619" class="ct">shared/ <tspan class="cs">— cross-cutting helpers</tspan></text><text x="48" y="637" class="mono">actions · config · config-ops · errors · http-auth · logging · theme</text>
+<text x="34" y="666" class="note"><tspan font-weight="700">R1</tspan> core has zero domain knowledge (no LLM/prompt/memory; keys stay in llm-gateway)  ·  <tspan font-weight="700">R2</tspan> plugins talk only via the bus + contracts — never import each other</text>
+<text x="34" y="685" class="note"><tspan font-weight="700">R3</tspan> a zero-plugin Agent still completes a frame  ·  <tspan font-weight="700">R5</tspan> contracts are versioned  ·  these invariants are test-enforced — the anti-rot guarantee</text>
+
+<!-- connectors -->
+<path d="M 109 150 L 109 241" class="flow" marker-end="url(#ah2)"/>
+<text x="116" y="180" class="note">creates</text>
+<path d="M 760 150 L 760 241" fill="none" stroke="#D85A30" stroke-width="1.8" stroke-dasharray="5 4" marker-end="url(#ah2)"/>
+<text x="748" y="180" text-anchor="end" class="note">key-less llm</text>
+</svg>
