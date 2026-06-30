@@ -41,6 +41,12 @@ export function loadAgentConfigs(agentsDir: string): AgentDefinition[] {
     if (!fs.existsSync(cfgPath)) continue;
     try {
       const def = JSON.parse(fs.readFileSync(cfgPath, "utf8")) as AgentDefinition;
+      // The folder IS the agent's on-disk identity (dataDir + loopback ports key
+      // off `id` via agentPaths). A config that omits or blanks `id` adopts its
+      // directory name rather than booting as the literal `undefined`.
+      if (typeof def.id !== "string" || def.id.trim() === "") {
+        def.id = entry.name;
+      }
       defs.push(def);
     } catch (err) {
       console.warn("skipping agent '" + entry.name + "': failed to read/parse " + cfgPath + ": " + err);
