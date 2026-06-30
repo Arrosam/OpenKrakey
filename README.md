@@ -16,7 +16,12 @@ An agent wakes on a clock, looks at everything it knows, decides what to do (or 
 fires off any tools, and goes back to sleep — frame after frame. You talk to it through a local
 web chat; run one agent or many, each isolated with its own files on disk.
 
-<!-- launch TODO: drop the demo GIF here → assets/demo.gif (wizard → `krakey run` → web-chat reply → a frame firing live in the Inspector) -->
+<div align="center">
+<img src="assets/demo-chat.png" alt="Krakey web chat — an agent replying to you on its next frame" width="48%" />
+&nbsp;
+<img src="assets/demo-inspector.png" alt="Krakey Inspector — the live bus: composed prompt, frame events, per-frame timeline, and logs" width="48%" />
+<br/><sub><i>Talk to an agent in the local web chat (left); it replies on its next frame. The read-only Inspector (right) shows the live bus — the plugin-composed prompt, the frame's events, the per-frame timeline, and the activity log.</i></sub>
+</div>
 
 **Why it's different**
 
