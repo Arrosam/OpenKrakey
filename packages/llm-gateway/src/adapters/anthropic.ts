@@ -15,6 +15,7 @@ import type {
 } from "../../../../contracts/llm";
 import type { AdapterCfg } from "./types";
 import { buildToolNameMap, type ToolNameMap } from "./tool-names";
+import { fetchWithTimeout } from "./http";
 
 /** Map one ContentPart onto an Anthropic content block. */
 function mapContentPart(part: ContentPart): unknown {
@@ -197,7 +198,7 @@ export async function chat(
   // reasoningEffort is deliberately NOT wired for Anthropic: the Messages API has
   // no effort enum — it uses `thinking: { budget_tokens }`, a different mechanism.
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "x-api-key": cfg.apiKey,
@@ -205,7 +206,7 @@ export async function chat(
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

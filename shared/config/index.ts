@@ -55,6 +55,13 @@ export interface CommunicatorDef {
    * plugins can budget their context.
    */
   contextLength?: number;
+  /**
+   * Per-request timeout in milliseconds. A request that hangs past this aborts and
+   * surfaces as a FAILURE (so the `retry` plugin can accelerate the next frame)
+   * rather than stalling the agent forever. Omitted → a generous default;
+   * 0 disables the timeout.
+   */
+  timeoutMs?: number;
 }
 
 /**

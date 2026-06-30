@@ -19,6 +19,7 @@ import type {
 } from "../../../../contracts/llm";
 import type { AdapterCfg } from "./types";
 import { buildToolNameMap, type ToolNameMap } from "./tool-names";
+import { fetchWithTimeout } from "./http";
 
 /** The subtype of a MIME (e.g. "audio/mpeg" → "mpeg"). */
 function mimeSubtype(mime: string | undefined): string | undefined {
@@ -203,14 +204,14 @@ export async function chat(
   const reasoningEffort = req.reasoningEffort ?? cfg.reasoningEffort;
   if (reasoningEffort !== undefined) body.reasoning_effort = reasoningEffort;
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -425,14 +426,14 @@ export async function responsesChat(
   if (reasoningEffort !== undefined) body.reasoning = { effort: reasoningEffort };
   // `stop` is deliberately omitted: the Responses API has no stop-sequence param.
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -509,14 +510,14 @@ export async function embed(
     input: req.input,
   };
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
