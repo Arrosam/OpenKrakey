@@ -209,9 +209,9 @@ Two files, both shipped as `.example.json` templates (your live copies are git-i
 {
   "communicators": {
     // optional per-provider tuning: temperature, maxTokens, topP, stop, reasoningEffort, contextLength
-    "claude": { "provider": "anthropic", "model": "claude-sonnet-4-6", "apiKey": "${ANTHROPIC_API_KEY}", "capabilities": ["chat"] }
+    "glm": { "provider": "openai-completion", "model": "GLM5.2", "apiKey": "${ZAI_API_KEY}", "baseURL": "https://api.z.ai/api/paas/v4", "capabilities": ["chat"] }
   },
-  "default": "claude"
+  "default": "glm"
 }
 ```
 

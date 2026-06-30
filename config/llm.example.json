@@ -1,15 +1,15 @@
 {
   "communicators": {
-    "my-llm": {
+    "glm": {
       "provider": "openai-completion",
-      "model": "gpt-4o-mini",
-      "apiKey": "${OPENAI_API_KEY}",
-      "baseURL": "https://api.openai.com/v1",
+      "model": "GLM5.2",
+      "apiKey": "${ZAI_API_KEY}",
+      "baseURL": "https://api.z.ai/api/paas/v4",
       "capabilities": ["chat"],
-      "input": ["text", "image"],
+      "input": ["text"],
       "output": ["text"],
       "contextLength": 128000
     }
   },
-  "default": "my-llm"
+  "default": "glm"
 }
