@@ -487,9 +487,16 @@ test("e2e/3: persona rides `system`, the user input is a role:'user' turn with i
   assert.equal(hello.name, "web-chat", "the user turn's source channel must be surfaced via name");
 
   const names = toolNames(first);
+  // The gateway encodes dotted action names to the provider-legal pattern on the wire
+  // (web-chat.send_message -> web-chat_send_message); the adapter decodes the returned
+  // tool_call name so the orchestrator still dispatches the original dotted action.
   assert.ok(
-    names.includes("web-chat.send_message"),
-    "tools[] must include the web-chat.send_message chat tool; saw [" + names.join(", ") + "]",
+    names.includes("web-chat_send_message"),
+    "tools[] must include the (wire-encoded) web-chat send tool; saw [" + names.join(", ") + "]",
+  );
+  assert.ok(
+    names.every((n) => /^[a-zA-Z0-9_-]+$/.test(n)),
+    "every wire tool name must match the OpenAI/Anthropic pattern ^[a-zA-Z0-9_-]+$ (no dots); saw [" + names.join(", ") + "]",
   );
 });
 
