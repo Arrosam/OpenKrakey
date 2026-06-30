@@ -11,13 +11,30 @@
 
 </div>
 
-**OpenKrakey runs autonomous AI agents on a frame loop.** Instead of answering once and going
-quiet, an agent wakes on a timer, looks at everything it knows, decides what to do, fires off any
-tools, and goes back to sleep — over and over. You talk to it through a local web chat.
+**OpenKrakey runs autonomous AI agents on a frame loop — like a game engine, not a chatbot.**
+An agent wakes on a clock, looks at everything it knows, decides what to do (or to do nothing),
+fires off any tools, and goes back to sleep — frame after frame. You talk to it through a local
+web chat; run one agent or many, each isolated with its own files on disk.
 
-The runtime core is tiny and knows nothing about LLMs, prompts, or memory. **Everything an agent
-can do is a plugin** — the chat window, the file/shell tools, web search, the browser, even which
-model it calls. Run one agent or many; each is isolated and keeps its own data.
+<!-- launch TODO: drop the demo GIF here → assets/demo.gif (wizard → `krakey run` → web-chat reply → a frame firing live in the Inspector) -->
+
+**Why it's different**
+
+- **A frame loop, not request→response.** The agent acts every frame (or deliberately waits), so it
+  monitors, follows up, and runs long tasks — instead of only replying when poked.
+- **A tiny, domain-free kernel — everything is a plugin.** ~5 modules over typed contracts; the core
+  knows nothing about LLMs, prompts, or memory. The chat window, file/shell tools, web search, the
+  browser, even *which model it calls* are plugins. Read the whole kernel in one sitting.
+- **Sturdy on flaky endpoints.** The loop is non-blocking and single-flight, so a provider hiccup
+  doesn't cascade — context overflow auto-retries and shrinks the prompt; bursts coalesce; a failed
+  call just retries on a shorter frame.
+
+**vs. LangChain / AutoGPT / CrewAI:** those orchestrate a chat with a loop bolted on. Krakey is a
+non-blocking *runtime* with a domain-free kernel — a different primitive, not a wrapper.
+
+> **Status: `0.1.0`, early beta.** The kernel and L1 contracts are stable and test-enforced (the
+> R1–R6 invariants — see [ARCHITECTURE.md](ARCHITECTURE.md)); plugins evolve faster, so pin a commit
+> if you depend on one.
 
 [Architecture](ARCHITECTURE.md) · [Build a plugin](docs/PLUGIN_DEV.md) · [Docs index](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
