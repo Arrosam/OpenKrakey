@@ -165,7 +165,7 @@
     "llm-gateway": {
       "zone": "core",
       "path": "packages/llm-gateway",
-      "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Industry-standard infra, solidified into core.",
+      "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Encodes dotted tool/function names to the provider-legal pattern ^[a-zA-Z0-9_-]+$ on the wire and decodes returned tool_calls back to the original action, so strict providers (OpenAI/DeepSeek/Anthropic) accept Krakey's plugin.tool names. Industry-standard infra, solidified into core.",
       "depends_on_contracts": [
         "llm"
       ],

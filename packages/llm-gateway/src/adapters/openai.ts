@@ -18,6 +18,7 @@ import type {
   Usage,
 } from "../../../../contracts/llm";
 import type { AdapterCfg } from "./types";
+import { buildToolNameMap, type ToolNameMap } from "./tool-names";
 
 /** The subtype of a MIME (e.g. "audio/mpeg" → "mpeg"). */
 function mimeSubtype(mime: string | undefined): string | undefined {
@@ -96,7 +97,7 @@ function mapContent(content: string | ContentPart[]): unknown {
 }
 
 /** Map our messages onto OpenAI messages. */
-function mapMessages(messages: Message[]): unknown[] {
+function mapMessages(messages: Message[], toolNames: ToolNameMap): unknown[] {
   return messages.map((m) => {
     if (m.role === "tool") {
       return {
@@ -112,7 +113,10 @@ function mapMessages(messages: Message[]): unknown[] {
         tool_calls: m.toolCalls.map((tc) => ({
           id: tc.id,
           type: "function",
-          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+          function: {
+            name: toolNames.encode(tc.name),
+            arguments: JSON.stringify(tc.arguments),
+          },
         })),
       };
     }
@@ -126,12 +130,12 @@ function mapMessages(messages: Message[]): unknown[] {
   });
 }
 
-/** Map our tool defs onto OpenAI function tool defs. */
-function mapTools(tools: ToolDef[]): unknown[] {
+/** Map our tool defs onto OpenAI function tool defs (wire-legal names). */
+function mapTools(tools: ToolDef[], toolNames: ToolNameMap): unknown[] {
   return tools.map((t) => ({
     type: "function",
     function: {
-      name: t.name,
+      name: toolNames.encode(t.name),
       description: t.description,
       parameters: t.parameters ?? { type: "object" },
     },
@@ -177,7 +181,8 @@ export async function chat(
 ): Promise<LLMResponse> {
   const url = `${cfg.baseURL ?? "https://api.openai.com/v1"}/chat/completions`;
 
-  const messages = mapMessages(req.messages);
+  const toolNames = buildToolNameMap(req.tools);
+  const messages = mapMessages(req.messages, toolNames);
   if (req.system !== undefined) {
     messages.unshift({ role: "system", content: req.system });
   }
@@ -186,7 +191,7 @@ export async function chat(
     model: req.model ?? cfg.model,
     messages,
   };
-  if (req.tools !== undefined) body.tools = mapTools(req.tools);
+  if (req.tools !== undefined) body.tools = mapTools(req.tools, toolNames);
   const temperature = req.temperature ?? cfg.temperature;
   if (temperature !== undefined) body.temperature = temperature;
   const maxTokens = req.maxTokens ?? cfg.maxTokens;
@@ -231,7 +236,7 @@ export async function chat(
     }
     return {
       id: tc.id ?? "",
-      name: tc.function?.name ?? "",
+      name: toolNames.decode(tc.function?.name ?? ""),
       arguments: parsed,
     };
   });
@@ -294,7 +299,10 @@ function hasContent(content: string | ContentPart[]): boolean {
 }
 
 /** Map our messages onto Responses API input items. */
-function mapResponsesInput(messages: Message[]): unknown[] {
+function mapResponsesInput(
+  messages: Message[],
+  toolNames: ToolNameMap,
+): unknown[] {
   const out: unknown[] = [];
   for (const m of messages) {
     if (m.role === "tool") {
@@ -319,7 +327,7 @@ function mapResponsesInput(messages: Message[]): unknown[] {
         out.push({
           type: "function_call",
           call_id: tc.id,
-          name: tc.name,
+          name: toolNames.encode(tc.name),
           arguments: JSON.stringify(tc.arguments),
         });
       }
@@ -335,10 +343,10 @@ function mapResponsesInput(messages: Message[]): unknown[] {
 }
 
 /** Map our tool defs onto Responses API (flat) function tool defs. */
-function mapResponsesTools(tools: ToolDef[]): unknown[] {
+function mapResponsesTools(tools: ToolDef[], toolNames: ToolNameMap): unknown[] {
   return tools.map((t) => ({
     type: "function",
-    name: t.name,
+    name: toolNames.encode(t.name),
     description: t.description,
     parameters: t.parameters ?? { type: "object" },
   }));
@@ -398,12 +406,13 @@ export async function responsesChat(
 ): Promise<LLMResponse> {
   const url = `${cfg.baseURL ?? "https://api.openai.com/v1"}/responses`;
 
+  const toolNames = buildToolNameMap(req.tools);
   const body: Record<string, unknown> = {
     model: req.model ?? cfg.model,
-    input: mapResponsesInput(req.messages),
+    input: mapResponsesInput(req.messages, toolNames),
   };
   if (req.system !== undefined) body.instructions = req.system;
-  if (req.tools !== undefined) body.tools = mapResponsesTools(req.tools);
+  if (req.tools !== undefined) body.tools = mapResponsesTools(req.tools, toolNames);
   const temperature = req.temperature ?? cfg.temperature;
   if (temperature !== undefined) body.temperature = temperature;
   const maxTokens = req.maxTokens ?? cfg.maxTokens;
@@ -464,7 +473,7 @@ export async function responsesChat(
       }
       toolCalls.push({
         id: fc.call_id ?? fc.id ?? "",
-        name: fc.name ?? "",
+        name: toolNames.decode(fc.name ?? ""),
         arguments: parsed,
       });
     }
