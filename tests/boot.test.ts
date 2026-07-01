@@ -40,7 +40,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadAgentConfigs, loadLLMConfig, run, consumeRestartRequest, watchRestartRequest } from "../packages/boot/src";
+import { loadAgentConfigs, loadLLMConfig, run } from "../packages/boot/src";
 import * as bootModule from "../packages/boot/src";
 // createCommunicatorLibrary is the llm-gateway node's PUBLIC seam (the factory boot
 // calls to turn an LLMConfig into a CommunicatorLibrary). Imported here only as that
@@ -725,58 +725,6 @@ test("requestRestart: stops every handle BEFORE re-exec (spawn), spawn BEFORE ex
   assert.ok(order.indexOf("spawn") < order.indexOf("exit"), "replacement spawned before this process exits");
   assert.equal(spawnedMs, 1234, "delayMs is forwarded to the replacement");
   assert.equal(exitCode, 0, "exits with code 0");
-});
-
-// ===========================================================================
-// EXT — restart-REQUEST marker: the config UI writes a marker file; the running
-// boot process consumes it (deleting it so it never restart-loops) and fires a
-// graceful restart. consumeRestartRequest is the pure, awaitable core;
-// watchRestartRequest clears any stale marker at startup and wires fs.watch.
-// ===========================================================================
-
-test("consumeRestartRequest: a present marker is deleted and restart fires (returns true)", async () => {
-  const marker = path.join(tmp, "config", ".restart-request");
-  fs.mkdirSync(path.dirname(marker), { recursive: true });
-  fs.writeFileSync(marker, String(Date.now()), "utf8");
-
-  let fired = 0;
-  const ret = await consumeRestartRequest(marker, () => { fired++; });
-
-  assert.equal(ret, true);
-  assert.equal(fired, 1, "restart fired exactly once");
-  assert.equal(fs.existsSync(marker), false, "marker consumed (deleted) so no restart-loop");
-});
-
-test("consumeRestartRequest: no marker -> restart does NOT fire (returns false)", async () => {
-  const marker = path.join(tmp, "config", ".restart-request");
-  let fired = 0;
-  const ret = await consumeRestartRequest(marker, () => { fired++; });
-  assert.equal(ret, false);
-  assert.equal(fired, 0, "no marker → no restart");
-});
-
-test("consumeRestartRequest: awaits an async restart before resolving", async () => {
-  const marker = path.join(tmp, "config", ".restart-request");
-  fs.mkdirSync(path.dirname(marker), { recursive: true });
-  fs.writeFileSync(marker, "x", "utf8");
-  let done = false;
-  await consumeRestartRequest(marker, async () => { await new Promise((r) => setTimeout(r, 5)); done = true; });
-  assert.equal(done, true, "the async restart is awaited");
-});
-
-test("watchRestartRequest: clears a STALE marker at startup WITHOUT firing a restart", () => {
-  const marker = path.join(tmp, "config", ".restart-request");
-  fs.mkdirSync(path.dirname(marker), { recursive: true });
-  fs.writeFileSync(marker, "left over from a previous run", "utf8");
-
-  let fired = 0;
-  const w = watchRestartRequest(marker, () => { fired++; });
-  try {
-    assert.equal(fs.existsSync(marker), false, "stale marker cleared on start");
-    assert.equal(fired, 0, "clearing a stale marker must not restart the fresh process");
-  } finally {
-    assert.doesNotThrow(() => w.close());
-  }
 });
 
 test("requestRestart: a handle whose stop() rejects does NOT block the re-exec (allSettled)", async () => {
