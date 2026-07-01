@@ -8,11 +8,12 @@ on:
 
 jobs:
   test:
-    name: typecheck & test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    name: typecheck & test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
