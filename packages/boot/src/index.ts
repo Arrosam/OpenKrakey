@@ -152,6 +152,66 @@ export async function requestRestart(
   process.exit(0);
 }
 
+/** Delay (ms) before the restart-request re-exec, so ports free before rebind. */
+const RESTART_REQUEST_DELAY_MS = 500;
+
+/**
+ * Consume the restart-request marker (if present) and fire `restart`. The marker
+ * is DELETED before restarting so the re-exec'd process never restart-loops on a
+ * stale marker. Best-effort + never throws — a failed unlink still triggers the
+ * restart. Returns true iff a marker was found (and thus a restart fired).
+ */
+export async function consumeRestartRequest(
+  markerPath: string,
+  restart: () => void | Promise<void>,
+): Promise<boolean> {
+  const abs = path.resolve(process.cwd(), markerPath);
+  if (!fs.existsSync(abs)) return false;
+  try {
+    fs.rmSync(abs, { force: true });
+  } catch {
+    // best-effort: proceed with the restart even if the unlink failed
+  }
+  await restart();
+  return true;
+}
+
+/**
+ * Watch for the restart-request marker and, when it appears, consume it + fire
+ * `restart` (a graceful re-exec — the config UI writes the marker after a Save).
+ * Any stale marker from before this process started is cleared first so a fresh
+ * boot never immediately restarts. Watching the marker's parent dir (which always
+ * exists) keeps this robust; an unsupported watch degrades to inert (never throws).
+ */
+export function watchRestartRequest(
+  markerPath: string,
+  restart: () => void | Promise<void>,
+): { close: () => void } {
+  const abs = path.resolve(process.cwd(), markerPath);
+  try {
+    fs.rmSync(abs, { force: true });
+  } catch {
+    // no stale marker (or unremovable) — nothing to clear
+  }
+  let watcher: fs.FSWatcher | undefined;
+  try {
+    watcher = fs.watch(path.dirname(abs), () => {
+      void consumeRestartRequest(markerPath, restart);
+    });
+  } catch {
+    // fs.watch unsupported on this platform/dir → feature simply stays inert
+  }
+  return {
+    close: () => {
+      try {
+        watcher?.close();
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
 /**
  * Construct and start an Agent per definition, returning the handles that started
  * successfully. A failure to construct/start one agent is logged and skipped so
@@ -279,12 +339,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Watch for a restart-request marker (written by the config UI's "restart to
+  // apply" button): consume it and gracefully re-exec so a saved config is applied.
+  const restartWatcher = watchRestartRequest(PATHS.restartRequestPath, () =>
+    requestRestart(handles, RESTART_REQUEST_DELAY_MS),
+  );
+
   // Graceful shutdown on BOTH SIGINT (Ctrl+C) and SIGTERM (what `krakey stop`/
   // `restart` signal a backgrounded daemon): run every agent's teardown — flushing
   // best-effort state like the web-chat transcript's read-receipts — before exiting,
   // instead of dying mid-write.
   const shutdown = (signal: string): void => {
     console.log(`\n${signal} — shutting down...`);
+    restartWatcher.close();
     Promise.allSettled(handles.map((h) => h.stop())).then(() => process.exit(0));
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
