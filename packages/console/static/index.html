@@ -493,27 +493,36 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       },
     };
 
-    /* ── Reachability probe — cross-origin safe ───────────────────────────
-       We can't read a cross-origin response, but a `no-cors` fetch still tells
-       us whether the server ANSWERED: it RESOLVES (with an opaque response)
-       when something is listening, and REJECTS on connection-refused / DNS /
-       timeout. So: resolve ⇒ reachable, reject ⇒ not connected. A short
-       AbortSignal.timeout keeps a dead port from hanging the UI. Per-surface
-       reachability is cached so we don't re-probe a surface that's already up
-       (iframes are kept alive once loaded); Retry / a fresh dashboard re-probes. */
-    const PROBE_TIMEOUT_MS = 2500;
-    const reachable = { config: null, chat: null, inspector: null }; // null=unknown, true/false=last probe
+    /* ── Reachability — polled from the console SERVER (same-origin) ───────
+       The console's Node server checks each surface with a REAL fetch and reports
+       booleans at GET /api/status. We poll that same-origin endpoint on load and
+       on a timer. Why not probe the surfaces directly from here? A browser
+       cross-origin `no-cors` fetch can't read the response, so it RESOLVES for a
+       half-open socket too — making a STOPPED surface look "online". The
+       server-side check reads the real connection (a dead port refuses), and the
+       timer keeps the dots current instead of a one-shot snapshot. */
+    const PROBE_TIMEOUT_MS = 3000;
+    const POLL_MS = 5000;
+    const reachable = { config: null, chat: null, inspector: null }; // null=unknown, true/false=last poll
 
-    async function probe(key) {
-      const url = SURFACES[key].src;
+    async function fetchStatus() {
       try {
         const signal = AbortSignal.timeout ? AbortSignal.timeout(PROBE_TIMEOUT_MS) : undefined;
-        await fetch(url, { mode: "no-cors", signal });
-        reachable[key] = true;
+        const r = await fetch("/api/status", { signal, cache: "no-store" });
+        const s = await r.json();
+        for (const k of ["config", "chat", "inspector"]) reachable[k] = !!s[k];
       } catch {
-        reachable[key] = false;
+        /* a failed poll keeps the last-known status rather than blanking it */
       }
       paintConsoleStatus();
+      for (const k of ["config", "chat", "inspector"]) paintCardStatus(k, reachable[k]);
+      return reachable;
+    }
+
+    // probe(key) keeps its old contract (returns this surface's reachability) so
+    // the surface-open / Retry flows are unchanged — it just refreshes via the poll.
+    async function probe(key) {
+      await fetchStatus();
       return reachable[key];
     }
 
@@ -633,13 +642,10 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
       return `<span class="st${lblCls}" data-st="${key}"><span class="sdot ${cls}"></span>${lbl}</span>`;
     }
 
-    /* Re-probe every surface and update its card badge in place. */
+    /* Refresh every surface card badge — one poll updates all three + the top bar. */
     function probeAllCards() {
-      for (const key of ["config", "chat", "inspector"]) {
-        // show the in-flight state immediately
-        paintCardStatus(key, null);
-        probe(key).then((up) => paintCardStatus(key, up));
-      }
+      for (const key of ["config", "chat", "inspector"]) paintCardStatus(key, reachable[key]);
+      fetchStatus();
     }
 
     function paintCardStatus(key, up) {
@@ -823,8 +829,12 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 
     // initial view
     renderDashboard();
+    // Keep the online dots current: poll the server-side status on a timer (not a
+    // one-shot snapshot), so a surface going up/down is reflected within POLL_MS.
+    fetchStatus();
+    setInterval(fetchStatus, POLL_MS);
     // expose for the preview harness / debugging
-    window.__krakeyConsole = { renderDashboard, openSurface, quickSetup, retrySurface, probe, reachable, SURFACES, URLS };
+    window.__krakeyConsole = { renderDashboard, openSurface, quickSetup, retrySurface, probe, fetchStatus, reachable, SURFACES, URLS };
   })();
   </script>
 </body>

@@ -4,9 +4,10 @@
  * that embeds the three web surfaces — config-web, the web chat channel, the
  * inspector — each in an <iframe> by URL).
  *
- * This is intentionally SIMPLER than config-web's server: there is NO /api, NO
- * token gating, NO cookie. Every route just serves a static asset preloaded into
- * memory. The shell holds no secrets — the surface URLs are non-secret config.
+ * This is intentionally SIMPLER than config-web's server: NO token gating, NO
+ * cookie, no secrets. The only dynamic route is a read-only `GET /api/status` that
+ * reports each surface's reachability (checked server-side, so the online dots are
+ * accurate); everything else just serves a static asset preloaded into memory.
  *
  * The one dynamic step: the served index.html gets the surface URLs injected as
  * `window.__SURFACES__ = {config,chat,inspector}` (in place of the
@@ -89,11 +90,52 @@ export async function startServer(
   const indexHtml = rawIndex ? injectSurfaces(rawIndex.body.toString("utf8"), deps) : undefined;
   const indexBody = indexHtml === undefined ? undefined : Buffer.from(indexHtml, "utf8");
 
+  /**
+   * Reachability of the three surfaces, checked SERVER-SIDE. A real fetch from the
+   * Node process reads the actual connection — a live surface answers, a dead port
+   * refuses — with none of the cross-origin/opaque-response ambiguity a browser
+   * `no-cors` fetch suffers (which resolves for half-open sockets, so a stopped
+   * surface can look "online"). The page polls this same-origin endpoint on a timer.
+   */
+  async function writeStatus(res: http.ServerResponse): Promise<void> {
+    const reachable = async (u: string): Promise<boolean> => {
+      try {
+        await fetch(u, { signal: AbortSignal.timeout(2500) });
+        return true; // ANY HTTP response (even 401/404) means the server is up
+      } catch {
+        return false; // connection refused / timeout / bad url → down
+      }
+    };
+    const [config, chat, inspector] = await Promise.all([
+      reachable(deps.configUrl),
+      reachable(deps.chatUrl),
+      reachable(deps.inspectorUrl),
+    ]);
+    const body = JSON.stringify({ config, chat, inspector });
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "content-length": Buffer.byteLength(body),
+      "cache-control": "no-store",
+    });
+    res.end(body);
+  }
+
   const dispatch = (req: http.IncomingMessage, res: http.ServerResponse): void => {
     const url = req.url || "/";
     const qIdx = url.indexOf("?");
     const pathname = qIdx === -1 ? url : url.slice(0, qIdx);
     const method = req.method || "GET";
+
+    // GET /api/status — server-side reachability of the three surfaces (JSON).
+    if (method === "GET" && pathname === "/api/status") {
+      writeStatus(res).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+          res.end('{"config":false,"chat":false,"inspector":false}');
+        }
+      });
+      return;
+    }
 
     // GET / (and /index.html) — the shell, with surface URLs injected.
     if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
