@@ -512,7 +512,12 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
         const s = await r.json();
         for (const k of ["config", "chat", "inspector"]) reachable[k] = !!s[k];
       } catch {
-        /* a failed poll keeps the last-known status rather than blanking it */
+        // The poll itself failed → the console SERVER is unreachable (e.g. it was
+        // stopped by `krakey stop`, which reaps the dashboard too). We can't confirm
+        // ANY surface is up, so mark them all offline rather than freezing on a
+        // stale "online" — showing "online" for something we can't reach is exactly
+        // the false-positive to avoid. (A later poll flips them back once it answers.)
+        for (const k of ["config", "chat", "inspector"]) reachable[k] = false;
       }
       paintConsoleStatus();
       for (const k of ["config", "chat", "inspector"]) paintCardStatus(k, reachable[k]);
