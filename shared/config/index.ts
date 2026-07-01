@@ -84,12 +84,6 @@ export interface OpenKrakeyConfig {
   defaultPath: string;
   /** The global LLM communicator catalogue (gitignored — holds keys). */
   llmPath: string;
-  /**
-   * Marker file the config UI writes to REQUEST a runtime restart (so a saved
-   * config is applied). The running boot process watches for it, consumes it, and
-   * gracefully re-execs. Lives under the always-present `config/` dir (gitignored).
-   */
-  restartRequestPath: string;
 }
 
 /** Canonical default paths. */
@@ -98,7 +92,6 @@ export const PATHS: OpenKrakeyConfig = {
   agentsDir: "agents",
   defaultPath: "config/agent.default.json",
   llmPath: "config/llm.json",
-  restartRequestPath: "config/.restart-request",
 };
 
 /** A personal-folder layout helper for one Agent id. */
