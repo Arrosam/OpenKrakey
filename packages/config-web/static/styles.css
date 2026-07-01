@@ -148,6 +148,28 @@ body {
 .sidebar .foot p { font-family: var(--mono); font-size: 10.5px; color: var(--faint); line-height: 1.7; }
 .sidebar .foot .dot { color: var(--mint); }
 
+/* Restart-to-apply CTA — a bright, glowing call to action (matching the Guided/
+   Quick-setup styling) that appears in the sidebar only when config has been saved
+   but not yet applied to the running runtime. */
+.restart-cta {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin: 0 0 12px; padding: 11px 14px;
+  border: 1px solid var(--mint); border-radius: 10px;
+  background: linear-gradient(135deg, var(--mint), var(--mint-bright));
+  color: #04120d; font-weight: 700; font-size: 13px; letter-spacing: .2px;
+  cursor: pointer; transition: filter .16s, box-shadow .16s;
+  box-shadow: 0 0 0 3px var(--mint-glow), 0 8px 26px -8px var(--mint);
+  animation: restart-pulse 2.4s ease-in-out infinite;
+}
+.restart-cta:hover { filter: brightness(1.08); box-shadow: 0 0 0 3px var(--mint-glow), 0 12px 34px -6px var(--mint); }
+.restart-cta:disabled { opacity: .6; cursor: default; animation: none; }
+.restart-cta .ic { width: 16px; height: 16px; }
+.restart-cta[hidden] { display: none; }
+@keyframes restart-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--mint-glow), 0 8px 26px -8px var(--mint); }
+  50%      { box-shadow: 0 0 0 6px var(--mint-glow), 0 10px 32px -4px var(--mint); }
+}
+
 /* ── Main column ───────────────────────────────────────────────────────────*/
 .main { padding: 40px 48px 96px; max-width: 1080px; width: 100%; }
 
@@ -284,7 +306,9 @@ h1.title { font-size: 30px; font-weight: 800; letter-spacing: -0.6px; line-heigh
 .inp::placeholder { color: var(--faint); }
 .inp:focus { border-color: var(--mint); box-shadow: 0 0 0 3px var(--mint-glow); background: #060a09; }
 textarea.inp { resize: vertical; min-height: 84px; line-height: 1.6; }
-textarea.inp.auto { resize: none; overflow: hidden; } /* auto-grows — no scrollbar, no native resizer */
+/* JS auto-grows these to fit; resize + scroll stay ENABLED as a safety net so a
+   long value can never get trapped (e.g. if grown while its card was collapsed). */
+textarea.inp.auto { resize: vertical; overflow-y: auto; min-height: 140px; max-height: 60vh; }
 .inp.num { max-width: 220px; }
 /* strip the native number spinner — the up/down stepper is noise here */
 .inp[type="number"] { -moz-appearance: textfield; appearance: textfield; }

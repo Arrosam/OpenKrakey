@@ -10,6 +10,8 @@
  * the server's router stays alive.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import { createCli, CliError, CliParseError } from "../../../shared/config-ops";
 import type { AgentDefinition } from "../../../contracts/agent";
@@ -22,6 +24,8 @@ interface ApiDeps {
   defaultPath: string;
   publicPluginDir: string;
   llmPath: string;
+  /** Absolute path of the restart-request marker POST /api/restart writes. */
+  restartRequestPath: string;
 }
 
 type Handler = (
@@ -163,6 +167,18 @@ export function createApiHandler(deps: ApiDeps): Handler {
       guard(async () => {
         const payload = await assembleSchema({ publicPluginDir: deps.publicPluginDir });
         sendJson(res, 200, payload);
+      });
+      return;
+    }
+
+    // POST /api/restart — request a runtime restart so saved config is applied.
+    // Writes the marker the running boot process watches for; config-web itself is
+    // decoupled from the runtime, so this is the whole of its responsibility.
+    if (method === "POST" && pathname === "/api/restart") {
+      guard(async () => {
+        await mkdir(dirname(deps.restartRequestPath), { recursive: true });
+        await writeFile(deps.restartRequestPath, String(Date.now()), "utf8");
+        sendJson(res, 200, { ok: true });
       });
       return;
     }

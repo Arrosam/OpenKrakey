@@ -20,6 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -211,6 +212,7 @@ interface TempConfig {
   agentsDir: string;
   defaultPath: string;
   llmPath: string;
+  restartRequestPath: string;
   cleanup(): Promise<void>;
 }
 
@@ -221,6 +223,7 @@ async function makeTempConfig(): Promise<TempConfig> {
   const configDir = join(dir, "config");
   const defaultPath = join(configDir, "agent.default.json");
   const llmPath = join(configDir, "llm.json");
+  const restartRequestPath = join(configDir, ".restart-request");
 
   await mkdir(join(agentsDir, "krakey"), { recursive: true });
   await mkdir(configDir, { recursive: true });
@@ -237,6 +240,7 @@ async function makeTempConfig(): Promise<TempConfig> {
     agentsDir,
     defaultPath,
     llmPath,
+    restartRequestPath,
     cleanup: () => rm(dir, { recursive: true, force: true }),
   };
 }
@@ -262,6 +266,7 @@ async function startServer(tc: TempConfig): Promise<ServerHandle> {
     defaultPath: tc.defaultPath,
     publicPluginDir: PUBLIC_PLUGIN_DIR,
     llmPath: tc.llmPath,
+    restartRequestPath: tc.restartRequestPath,
   });
   assert.ok(handle && typeof handle === "object", "startServer must resolve a handle");
   assert.equal(typeof handle.port, "number", "handle.port must be a number");
@@ -399,6 +404,28 @@ test("server: GET /api/default?token -> 200 the Default Setting", async () => {
     const setting = (await res.json()) as { intervalMs: number; plugins: string[] };
     assert.equal(setting.intervalMs, 1000, "the stored default intervalMs is returned");
     assert.deepEqual(setting.plugins, [], "the stored default plugin list is returned");
+  });
+});
+
+// --- B7b: POST /api/restart writes the restart-request marker --------------
+test("server: POST /api/restart?token -> 200 and writes the restart marker", async () => {
+  await withServer(async (h, tc) => {
+    assert.equal(existsSync(tc.restartRequestPath), false, "no marker before the request");
+    const res = await fetch(api(h, "/api/restart"), { method: "POST" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok?: boolean };
+    assert.equal(body.ok, true);
+    assert.ok(existsSync(tc.restartRequestPath), "the restart marker was written");
+    const content = await readFile(tc.restartRequestPath, "utf8");
+    assert.ok(content.length > 0, "the marker carries a (timestamp) payload");
+  });
+});
+
+test("server: POST /api/restart WITHOUT a token -> 401 and NO marker written", async () => {
+  await withServer(async (h, tc) => {
+    const res = await fetch(base(h) + "/api/restart", { method: "POST" });
+    assert.equal(res.status, 401, "the control endpoint is token-gated");
+    assert.equal(existsSync(tc.restartRequestPath), false, "an unauthorized request never writes the marker");
   });
 });
 

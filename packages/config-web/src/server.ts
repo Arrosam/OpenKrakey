@@ -27,6 +27,8 @@ export interface ConfigWebDeps {
   defaultPath: string;
   publicPluginDir: string;
   llmPath: string;
+  /** Absolute path of the restart-request marker POST /api/restart writes. */
+  restartRequestPath: string;
 }
 
 /** static/ lives beside src/ in the package; resolve it relative to this file. */
@@ -76,6 +78,7 @@ export async function startServer(
     defaultPath: deps.defaultPath,
     publicPluginDir: deps.publicPluginDir,
     llmPath: deps.llmPath,
+    restartRequestPath: deps.restartRequestPath,
   });
 
   const dispatch = (req: http.IncomingMessage, res: http.ServerResponse): void => {

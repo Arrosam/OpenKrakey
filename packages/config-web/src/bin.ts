@@ -35,6 +35,7 @@ const { url } = await startServer({
   defaultPath: resolve(cwd, PATHS.defaultPath),
   publicPluginDir: resolve(cwd, PATHS.publicPluginDir),
   llmPath: resolve(cwd, PATHS.llmPath),
+  restartRequestPath: resolve(cwd, PATHS.restartRequestPath),
 });
 
 console.log("✦ Config console: " + url);
