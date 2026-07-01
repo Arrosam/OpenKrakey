@@ -10,8 +10,6 @@
  * the server's router stays alive.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
 
 import { createCli, CliError, CliParseError } from "../../../shared/config-ops";
 import type { AgentDefinition } from "../../../contracts/agent";
@@ -24,8 +22,8 @@ interface ApiDeps {
   defaultPath: string;
   publicPluginDir: string;
   llmPath: string;
-  /** Absolute path of the restart-request marker POST /api/restart writes. */
-  restartRequestPath: string;
+  /** Restart the runtime so saved config applies. Wired to `krakey restart`. */
+  restart: () => void | Promise<void>;
 }
 
 type Handler = (
@@ -171,13 +169,12 @@ export function createApiHandler(deps: ApiDeps): Handler {
       return;
     }
 
-    // POST /api/restart — request a runtime restart so saved config is applied.
-    // Writes the marker the running boot process watches for; config-web itself is
-    // decoupled from the runtime, so this is the whole of its responsibility.
+    // POST /api/restart — restart the runtime so a saved config is applied. Runs
+    // `krakey restart` (stop the tracked background daemon(s), then start fresh) —
+    // the same lifecycle the CLI drives, so config-web owns no process logic itself.
     if (method === "POST" && pathname === "/api/restart") {
       guard(async () => {
-        await mkdir(dirname(deps.restartRequestPath), { recursive: true });
-        await writeFile(deps.restartRequestPath, String(Date.now()), "utf8");
+        await deps.restart();
         sendJson(res, 200, { ok: true });
       });
       return;

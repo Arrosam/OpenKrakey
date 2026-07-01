@@ -20,7 +20,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -212,7 +211,8 @@ interface TempConfig {
   agentsDir: string;
   defaultPath: string;
   llmPath: string;
-  restartRequestPath: string;
+  /** Spy: incremented each time the server's injected restart() runs. */
+  restartCalls: { n: number };
   cleanup(): Promise<void>;
 }
 
@@ -223,7 +223,6 @@ async function makeTempConfig(): Promise<TempConfig> {
   const configDir = join(dir, "config");
   const defaultPath = join(configDir, "agent.default.json");
   const llmPath = join(configDir, "llm.json");
-  const restartRequestPath = join(configDir, ".restart-request");
 
   await mkdir(join(agentsDir, "krakey"), { recursive: true });
   await mkdir(configDir, { recursive: true });
@@ -240,7 +239,7 @@ async function makeTempConfig(): Promise<TempConfig> {
     agentsDir,
     defaultPath,
     llmPath,
-    restartRequestPath,
+    restartCalls: { n: 0 },
     cleanup: () => rm(dir, { recursive: true, force: true }),
   };
 }
@@ -266,7 +265,7 @@ async function startServer(tc: TempConfig): Promise<ServerHandle> {
     defaultPath: tc.defaultPath,
     publicPluginDir: PUBLIC_PLUGIN_DIR,
     llmPath: tc.llmPath,
-    restartRequestPath: tc.restartRequestPath,
+    restart: () => { tc.restartCalls.n++; },
   });
   assert.ok(handle && typeof handle === "object", "startServer must resolve a handle");
   assert.equal(typeof handle.port, "number", "handle.port must be a number");
@@ -407,25 +406,23 @@ test("server: GET /api/default?token -> 200 the Default Setting", async () => {
   });
 });
 
-// --- B7b: POST /api/restart writes the restart-request marker --------------
-test("server: POST /api/restart?token -> 200 and writes the restart marker", async () => {
+// --- B7b: POST /api/restart invokes the injected runtime restart ------------
+test("server: POST /api/restart?token -> 200 and invokes restart() exactly once", async () => {
   await withServer(async (h, tc) => {
-    assert.equal(existsSync(tc.restartRequestPath), false, "no marker before the request");
+    assert.equal(tc.restartCalls.n, 0, "restart not called before the request");
     const res = await fetch(api(h, "/api/restart"), { method: "POST" });
     assert.equal(res.status, 200);
     const body = (await res.json()) as { ok?: boolean };
     assert.equal(body.ok, true);
-    assert.ok(existsSync(tc.restartRequestPath), "the restart marker was written");
-    const content = await readFile(tc.restartRequestPath, "utf8");
-    assert.ok(content.length > 0, "the marker carries a (timestamp) payload");
+    assert.equal(tc.restartCalls.n, 1, "the runtime restart was triggered once");
   });
 });
 
-test("server: POST /api/restart WITHOUT a token -> 401 and NO marker written", async () => {
+test("server: POST /api/restart WITHOUT a token -> 401 and restart() is NOT called", async () => {
   await withServer(async (h, tc) => {
     const res = await fetch(base(h) + "/api/restart", { method: "POST" });
     assert.equal(res.status, 401, "the control endpoint is token-gated");
-    assert.equal(existsSync(tc.restartRequestPath), false, "an unauthorized request never writes the marker");
+    assert.equal(tc.restartCalls.n, 0, "an unauthorized request never restarts the runtime");
   });
 });
 
