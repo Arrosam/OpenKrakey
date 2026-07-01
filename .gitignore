@@ -138,6 +138,9 @@ dist
 # LLM communicator catalogue — holds API keys, never committed (use config/llm.example.json)
 config/llm.json
 
+# Restart-request marker — transient IPC from the config UI to the running runtime
+config/.restart-request
+
 # Per-Agent personal folders (configs + private plugin code/data) — user runtime state, not framework source
 agents/
 
