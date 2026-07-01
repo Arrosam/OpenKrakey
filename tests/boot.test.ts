@@ -218,6 +218,38 @@ test("loadAgentConfigs: a plain FILE among the agent dirs is skipped (no config.
   );
 });
 
+// ---------------------------------------------------------------------------
+// loadAgentConfigs — id ADOPTS the directory name when the config omits it.
+// The folder IS the agent's on-disk identity (dataDir + loopback ports key off
+// `id` via agentPaths). A config that omits/blanks `id` must NOT boot as the
+// literal `undefined` (which is exactly how the stray `agents/undefined/` dir
+// came to exist) — it adopts its directory name instead. An explicit id wins.
+// ---------------------------------------------------------------------------
+
+test("loadAgentConfigs: a config WITHOUT an id adopts the directory name", () => {
+  writeAgentConfigRaw(
+    "namedByDir",
+    JSON.stringify({ intervalMs: 1000, plugins: [], privatePlugins: [], config: {} }),
+  );
+  const got = loadAgentConfigs(agentsDirPath());
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, "namedByDir");
+});
+
+test("loadAgentConfigs: a config with a BLANK/whitespace id adopts the directory name", () => {
+  writeAgentConfigRaw("fromDir", JSON.stringify({ id: "   ", intervalMs: 1000, plugins: [] }));
+  const got = loadAgentConfigs(agentsDirPath());
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, "fromDir");
+});
+
+test("loadAgentConfigs: an explicit id is preserved even when it differs from the directory name", () => {
+  writeAgentConfigRaw("dirName", JSON.stringify({ id: "explicitId", intervalMs: 1000, plugins: [] }));
+  const got = loadAgentConfigs(agentsDirPath());
+  assert.equal(got.length, 1);
+  assert.equal(got[0].id, "explicitId");
+});
+
 // ===========================================================================
 // loadLLMConfig
 // ===========================================================================

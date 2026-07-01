@@ -41,6 +41,12 @@ async function api(method, path, body) {
     const msg = (data && typeof data === "object" && data.error) ? data.error : (typeof data === "string" ? data : res.statusText);
     throw new ApiError(res.status, msg || ("HTTP " + res.status));
   }
+  // Any successful config-mutating write leaves the RUNNING runtime stale until it
+  // restarts. Covers every Save (PUT default/agent/llm), delete, and agent create;
+  // excludes non-config POSTs (provider-models) and the restart request itself.
+  if (method === "PUT" || method === "DELETE" || (method === "POST" && /\/create$/.test(path))) {
+    markNeedsRestart();
+  }
   return data;
 }
 const apiGet = (p) => api("GET", p);
@@ -205,6 +211,7 @@ const ICONS = {
   x: `<path d="M6 6l12 12M18 6 6 18"/>`,
   box: `<rect x="4" y="4" width="16" height="16" rx="2.5"/>`,
   alert: `<circle cx="12" cy="12" r="9"/><path d="M12 7.5v5"/><path d="M12 16h.01"/>`,
+  refresh: `<path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/>`,
 };
 function icon(name, cls) {
   const p = ICONS[name];
@@ -214,6 +221,22 @@ function icon(name, cls) {
 
 function markDirty() { if (!dirty) { dirty = true; renderSaveBar(); } }
 function renderSaveBar() { document.querySelectorAll(".savebar").forEach((b) => b.classList.toggle("is-dirty", dirty)); }
+
+// Config saved to disk ≠ applied: the running runtime only picks up changes on a
+// restart. `needsRestart` shows the sidebar "Restart to apply" CTA until the user
+// triggers a restart (which POSTs the marker the running boot process watches for).
+let needsRestart = false;
+function markNeedsRestart() { if (!needsRestart) { needsRestart = true; renderRestartCta(); } }
+function renderRestartCta() { const b = $("#restart-cta"); if (b) b.hidden = !needsRestart; }
+async function requestRestart(btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  try {
+    await apiPost("/api/restart");
+    needsRestart = false; renderRestartCta();
+    toast("Restarting — your changes apply when the runtime comes back up");
+  } catch (e) { handleApiError(e); }
+  finally { if (btnEl) btnEl.disabled = false; }
+}
 // kind: "success" (green, check) | "error" (red, alert) — validation hints must
 // NOT look like confirmations.
 function toast(msg, kind = "success") {
@@ -357,15 +380,25 @@ function secretControl(field, get, set) {
   return wrap;
 }
 
+// Auto-grow a textarea to fit its content, capped so it scrolls past ~60vh. Skips
+// when the element is hidden (offsetParent null) — measuring scrollHeight while a
+// collapsed accordion hides it would otherwise lock the box to its min height. The
+// CSS (resize:vertical; overflow-y:auto) is the safety net if this ever misfires.
+function autoGrow(t) {
+  if (!t || t.offsetParent === null) return;
+  const cap = Math.round(window.innerHeight * 0.6);
+  t.style.height = "auto";
+  t.style.height = Math.min(cap, Math.max(140, t.scrollHeight + 2)) + "px";
+}
+
 function textareaControl(field, get, set) {
-  // Auto-growing: the box follows its content, so there is never a scrollbar
-  // (and thus no native resize handle fighting it) — resize is off by design.
   const t = el("textarea", "inp auto");
   if (field.placeholder) t.placeholder = field.placeholder;
   t.value = get() ?? "";
-  const grow = () => { t.style.height = "auto"; t.style.height = Math.max(84, t.scrollHeight + 2) + "px"; };
-  t.oninput = () => { set(t.value === "" ? undefined : t.value); markDirty(); grow(); };
-  requestAnimationFrame(grow);
+  t.oninput = () => { set(t.value === "" ? undefined : t.value); markDirty(); autoGrow(t); };
+  // Re-measure on focus too, so a card opened AFTER first render sizes correctly.
+  t.addEventListener("focus", () => autoGrow(t));
+  requestAnimationFrame(() => autoGrow(t));
   return t;
 }
 
@@ -968,7 +1001,14 @@ function settingEditor(main, model, opts) {
         }
       };
       renderPanel();
-      $("header", sec).onclick = () => sec.classList.toggle("open");
+      $("header", sec).onclick = () => {
+        sec.classList.toggle("open");
+        // A textarea measured while this card was collapsed sizes wrong — re-grow
+        // every auto textarea now that the card is visible.
+        if (sec.classList.contains("open")) {
+          requestAnimationFrame(() => sec.querySelectorAll("textarea.auto").forEach(autoGrow));
+        }
+      };
       sec.appendChild(bodyEl);
       panelsHost.appendChild(sec);
     }
@@ -1265,12 +1305,16 @@ function buildShell() {
         </nav>
       </div>
       <div class="foot">
+        <button class="restart-cta" id="restart-cta" type="button" hidden>${icon("refresh")}<span>Restart to apply</span></button>
         <p><span class="dot">●</span> live config<br>schema-driven · ${PLUGINS.reduce((n, p) => n + (PLUGIN_SCHEMAS[p.id] || []).length, 0)} settings<br>auto-fetched from plugins</p>
       </div>
     </aside>
     <main class="main" id="main"></main>`;
   document.body.appendChild(app);
   app.querySelectorAll(".nav button").forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+  const restartBtn = $("#restart-cta", app);
+  if (restartBtn) restartBtn.onclick = () => requestRestart(restartBtn);
+  renderRestartCta();
   if (!$("#toast")) { const t = el("div"); t.id = "toast"; document.body.appendChild(t); }
 }
 

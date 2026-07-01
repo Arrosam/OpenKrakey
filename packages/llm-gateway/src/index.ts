@@ -32,6 +32,7 @@ import type { AdapterCfg } from "./adapters/types";
 import * as anthropic from "./adapters/anthropic";
 import * as openai from "./adapters/openai";
 import * as rerankAdapter from "./adapters/rerank";
+import { DEFAULT_REQUEST_TIMEOUT_MS } from "./adapters/http";
 
 /**
  * Resolve an apiKey field: `"${ENV_VAR}"` → `process.env.ENV_VAR`, otherwise the
@@ -116,6 +117,9 @@ function buildCommunicator(name: string, def: CommunicatorDef): Communicator {
     stop: def.stop,
     reasoningEffort: def.reasoningEffort,
     contextLength: def.contextLength,
+    // Robustness default: bound every request unless the communicator opts out
+    // (timeoutMs: 0). A hang then becomes a retry-able failure, not an agent stall.
+    timeoutMs: typeof def.timeoutMs === "number" ? def.timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS,
   };
 
   let chat: ((req: LLMRequest) => Promise<LLMResponse>) | undefined;

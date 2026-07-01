@@ -14,6 +14,7 @@ import type {
   Usage,
 } from "../../../../contracts/llm";
 import type { AdapterCfg } from "./types";
+import { fetchWithTimeout } from "./http";
 
 interface RerankApiResult {
   index: number;
@@ -52,14 +53,14 @@ export async function rerank(
     ...(req.topN !== undefined ? { top_n: req.topN } : {}),
   };
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

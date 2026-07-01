@@ -37,7 +37,9 @@
         "memory-note",
         "history",
         "interval_toggle",
-        "restart"
+        "restart",
+        "retry",
+        "logbook"
       ],
       "overview": "overviews/zones/plugins.md"
     }
@@ -163,7 +165,7 @@
     "llm-gateway": {
       "zone": "core",
       "path": "packages/llm-gateway",
-      "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Industry-standard infra, solidified into core.",
+      "description": "Global LLM communication module: builds a key-less CommunicatorLibrary from config/llm.json (provider adapters: anthropic, openai-compatible; native fetch). Holds keys; does request+parse. Encodes dotted tool/function names to the provider-legal pattern ^[a-zA-Z0-9_-]+$ on the wire and decodes returned tool_calls back to the original action, so strict providers (OpenAI/DeepSeek/Anthropic) accept Krakey's plugin.tool names. Industry-standard infra, solidified into core.",
       "depends_on_contracts": [
         "llm"
       ],
@@ -243,7 +245,7 @@
     "inspector": {
       "zone": "plugins",
       "path": "public_plugin/inspector",
-      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-frame by request id. Emits nothing — never perturbs the observed agent.",
+      "description": "Read-only browser debug/analysis dashboard: own refcounted node:http hub (loopback + token) + per-agent SSE; subscribes to ALL well-known bus events into a bounded in-memory record ring (live + scrollback); serves a dependency-free page showing prompts sent (the actual assembled llm.request.sent — system+messages+tools+params — with a readable/raw toggle) / received (llm.return), the event timeline, and detailed logs (incl. core:* lines), correlated per-frame by request id. Persists each agent's records to dataDir/<agentId>/events.jsonl (bounded, wall-clock retention) so scrollback survives restart, and serves a token-gated /query endpoint plus a filterable Logs view (time window / type / level) with a live tail. Emits nothing — never perturbs the observed agent.",
       "depends_on_contracts": [
         "plugin",
         "event-system",
@@ -352,6 +354,33 @@
       "implements_contracts": [],
       "status": "done",
       "overview": "overviews/nodes/restart.md"
+    },
+    "retry": {
+      "zone": "plugins",
+      "path": "public_plugin/retry",
+      "description": "Failure-reactive pacing: on a failed llm.return (ok:false) it shortens the frame interval (clock.set_interval, optional backoff) so the agent retries sooner; a successful return resets the streak. Self-contained — no requires, no context blocks, no context.full reaction; guards every clock action with actions.has.",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/retry.md"
+    },
+    "logbook": {
+      "zone": "plugins",
+      "path": "public_plugin/logbook",
+      "description": "Comprehensive activity log: subscribes to all well-known bus events + log.entry, records compact timestamped/typed summaries into a bounded ring AND a persistent per-agent activity.jsonl, and exposes a log.fetch tool (query by time window + type/level/ok) so the agent can self-diagnose failures. Folds fetch results back next frame; data-carrying (private).",
+      "depends_on_contracts": [
+        "plugin",
+        "event-system",
+        "context",
+        "llm"
+      ],
+      "implements_contracts": [],
+      "status": "done",
+      "overview": "overviews/nodes/logbook.md"
     }
   },
   "contracts": {

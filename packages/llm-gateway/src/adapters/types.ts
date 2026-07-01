@@ -16,4 +16,9 @@ export interface AdapterCfg {
   reasoningEffort?: string;
   /** Context-window size in tokens — METADATA only, never sent on the wire. */
   contextLength?: number;
+  /**
+   * Per-request deadline in ms. A hung request aborts and surfaces as a failure
+   * (so `retry` can react) instead of stalling the agent. 0 disables the timeout.
+   */
+  timeoutMs?: number;
 }

@@ -118,6 +118,13 @@ export const SCRIPT = `
   var currentLevel = "";   // log level filter
   var currentView = "overview";
 
+  // ---- Logs source mode (live ⇄ query) ----
+  // logSource: "live" mirrors the in-memory ring (unchanged behavior); "query"
+  // shows the result of GET /api/agents/:id/query and live-tails matching records.
+  var logSource = "live";
+  var logRange = "live";       // "live" | "all" | "<sinceMs>"
+  var logTypes = {};            // kind -> true (selected). empty object = all (no type filter).
+
   function freshState(id) {
     return {
       id: id,
@@ -127,9 +134,19 @@ export const SCRIPT = `
       prompts: {},      // corrId -> { sent, received }
       promptOrder: [],  // corrIds in arrival order
       frames: [],       // [{ seq, at, label, records:[] }]
-      logs: []
+      logs: [],
+      queryRecords: [], // last query result (oldest→newest), live-tailed in query mode
+      queryTotal: 0,    // server-reported filtered count BEFORE the limit tail
+      queryRan: false   // a query has been run for this selection
     };
   }
+
+  // The dashboard kind values captured by the server (incl. context.full). Drives
+  // the Logs type multi-select; "log" stays first so the common pick is at the top.
+  var ALL_KINDS = [
+    "log", "agent.start", "tick", "gather", "prompt.sent", "prompt.received",
+    "input", "output", "tool.result", "context.full"
+  ];
 
   var KIND_CLASS = {
     "agent.start": "k-start",
@@ -141,12 +158,13 @@ export const SCRIPT = `
     "output": "k-output",
     "tool.result": "k-tool",
     "conversation": "k-conv",
+    "context.full": "k-gather",
     "log": "k-log"
   };
   var KIND_ICON = {
     "agent.start": "stars", "tick": "tick", "gather": "layers", "prompt.sent": "send",
     "prompt.received": "receive", "input": "chat", "output": "chat", "tool.result": "wrench",
-    "conversation": "journal", "log": "terminal"
+    "conversation": "journal", "context.full": "layers", "log": "terminal"
   };
 
   function summarize(rec) {
@@ -185,6 +203,11 @@ export const SCRIPT = `
       }
       case "tick": return "seq=" + (get(p, ["data", "seq"]));
       case "gather": return "seq=" + (get(p, ["data", "seq"]));
+      case "context.full": {
+        var ov = get(p, ["data", "overBy"]);
+        var rd = get(p, ["data", "round"]);
+        return "overBy=" + (ov != null ? ov : "?") + (rd != null ? (", round=" + rd) : "");
+      }
       case "agent.start": return get(p, ["data", "agentId"]) || "";
       case "conversation": { var msgs = get(p, ["data", "messages"]); return (Array.isArray(msgs) ? msgs.length : 0) + " turns"; }
       default: return "";
@@ -395,40 +418,97 @@ export const SCRIPT = `
   var logLevelSeg = \$("logLevel");
   var logPid = \$("logPid");
   var logFollow = \$("logFollow");
+  var logsPanel = document.querySelector(".panel--logs");
+  var logSourceSeg = \$("logSource");
+  var logRangeSel = \$("logRange");
+  var logTypesEl = \$("logTypes");
+  var logTypesBtn = \$("logTypesBtn");
+  var logTypesLbl = \$("logTypesLbl");
+  var logTypesPop = \$("logTypesPop");
+  var logRunBtn = \$("logRunBtn");
+  var logQueryMeta = \$("logQueryMeta");
   function pinLogs() { logsBody.scrollTop = logsBody.scrollHeight; }
+
+  // The active level/pid filters as a small predicate, reused by both render paths.
+  function logLevelFilter() { return currentLevel; }
+  function logPidFilter() { return logPid.value.trim().toLowerCase(); }
+
+  // Append ONE log record's row (live-mode render + query-mode log rows share this).
+  // Returns true when a row was actually appended (passed level/pid filters).
+  function appendLogRow(rec, lvl, pidF) {
+    var lp = rec.payload;
+    var row = document.createElement("div");
+    if (lp && lp.__truncated) {
+      // Truncated: level/pid are gone, so it can't be filtered — surface it raw.
+      if (lvl || pidF) return false;
+      row.className = "log";
+      row.innerHTML = '<span class="lvl">?</span><span class="pid">?</span>'
+        + '<span class="txt">⚠ truncated (' + lp.bytes + ' bytes)</span>';
+      logsBody.appendChild(row);
+      return true;
+    }
+    var d = get(lp, ["data"]) || {};
+    if (lvl && d.level !== lvl) return false;
+    if (pidF && String(d.pluginId || "").toLowerCase().indexOf(pidF) === -1) return false;
+    var isCore = String(d.pluginId || "").indexOf("core:") === 0;
+    row.className = "log lvl-" + esc(d.level || "");
+    row.innerHTML = '<span class="lvl ' + esc(d.level || "") + '">' + esc(d.level || "?") + '</span>'
+      + '<span class="pid' + (isCore ? " core" : "") + '">' + esc(d.pluginId || "?") + '</span>'
+      + '<span class="txt">' + esc(d.text || "") + '</span>';
+    logsBody.appendChild(row);
+    return true;
+  }
+
+  // A compact row for a NON-log record returned by a query (kind + summary).
+  function appendQueryEventRow(rec) {
+    var row = document.createElement("div");
+    row.className = "ev " + (KIND_CLASS[rec.kind] || "");
+    var ico = KIND_ICON[rec.kind] || "box";
+    row.innerHTML = '<span class="seq">#' + rec.seq + '</span>'
+      + '<span class="time">' + fmtTime(rec.at) + '</span>'
+      + '<span class="ico">' + icon(ico) + '</span>'
+      + '<span class="kind">' + esc(rec.kind) + '</span>'
+      + '<span class="sum">' + esc(summarize(rec)) + '</span>';
+    logsBody.appendChild(row);
+  }
+
   function renderLogs(s) {
     if (!s) return;
     logsBody.innerHTML = "";
-    var lvl = currentLevel;
-    var pidF = logPid.value.trim().toLowerCase();
+    var lvl = logLevelFilter();
+    var pidF = logPidFilter();
     var shown = 0;
-    for (var i = 0; i < s.logs.length; i++) {
-      var lp = s.logs[i].payload;
-      var row = document.createElement("div");
-      if (lp && lp.__truncated) {
-        // Truncated: level/pid are gone, so it can't be filtered — surface it raw.
-        if (lvl || pidF) continue;
-        row.className = "log";
-        row.innerHTML = '<span class="lvl">?</span><span class="pid">?</span>'
-          + '<span class="txt">⚠ truncated (' + lp.bytes + ' bytes)</span>';
-        logsBody.appendChild(row);
-        shown++;
-        continue;
+
+    if (logSource === "query") {
+      if (!s.queryRan) {
+        logsBody.innerHTML = '<div class="empty">Run a query to see persisted records.</div>';
+        logQueryMeta.textContent = "";
+        return;
       }
-      var d = get(lp, ["data"]) || {};
-      if (lvl && d.level !== lvl) continue;
-      if (pidF && String(d.pluginId || "").toLowerCase().indexOf(pidF) === -1) continue;
-      var isCore = String(d.pluginId || "").indexOf("core:") === 0;
-      row.className = "log lvl-" + esc(d.level || "");
-      row.innerHTML = '<span class="lvl ' + esc(d.level || "") + '">' + esc(d.level || "?") + '</span>'
-        + '<span class="pid' + (isCore ? " core" : "") + '">' + esc(d.pluginId || "?") + '</span>'
-        + '<span class="txt">' + esc(d.text || "") + '</span>';
-      logsBody.appendChild(row);
-      shown++;
+      // queryRecords already passed the server (or client-mirror) type/time filter;
+      // the level seg + pid input still narrow log rows further, client-side.
+      for (var qi = 0; qi < s.queryRecords.length; qi++) {
+        var qr = s.queryRecords[qi];
+        if (qr.kind === "log") { if (appendLogRow(qr, lvl, pidF)) shown++; }
+        else { appendQueryEventRow(qr); shown++; }
+      }
+      if (!shown) logsBody.innerHTML = '<div class="empty">No matching records.</div>';
+      var total = s.queryTotal;
+      logQueryMeta.textContent = "showing " + s.queryRecords.length + " of " + total
+        + (s.queryRecords.length < total ? " (capped)" : "");
+      if (followOn(logFollow)) pinLogs();
+      return;
+    }
+
+    // LIVE mode (unchanged behavior): render from the per-agent log records.
+    logQueryMeta.textContent = "";
+    for (var i = 0; i < s.logs.length; i++) {
+      if (appendLogRow(s.logs[i], lvl, pidF)) shown++;
     }
     if (!shown) logsBody.innerHTML = '<div class="empty">No matching logs.</div>';
     if (followOn(logFollow)) pinLogs();
   }
+
   logLevelSeg.addEventListener("click", function (e) {
     var btn = e.target.closest ? e.target.closest("button") : null;
     if (!btn) return;
@@ -445,6 +525,200 @@ export const SCRIPT = `
   logsBody.addEventListener("scroll", function () {
     var atBottom = (logsBody.scrollHeight - logsBody.scrollTop - logsBody.clientHeight) < 24;
     if (!atBottom && followOn(logFollow)) logFollow.classList.remove("on");
+  });
+
+  // ---- Logs query mode: client-side mirror of server filterRecords ----
+  // Faithful reimplementation of public_plugin/inspector/query.ts so the SSE
+  // live-tail decides membership EXACTLY as the /query endpoint would. Kept inline
+  // (not embedded via .toString()) because the server fn references module helpers.
+  var QHARD_MAX = 5000;
+  function isFiniteNum(v) { return typeof v === "number" && isFinite(v); }
+  function clientFilter(records, q, now) {
+    if (now == null) now = Date.now();
+    var types = (q.types && q.types.length) ? q.types : [];
+    var levels = (q.levels && q.levels.length) ? q.levels : [];
+    var hasTypes = types.length > 0;
+    var hasLevels = levels.length > 0;
+    var lo = -Infinity, hi = Infinity;
+    if (isFiniteNum(q.fromTs) || isFiniteNum(q.untilTs)) {
+      if (isFiniteNum(q.fromTs)) lo = q.fromTs;
+      if (isFiniteNum(q.untilTs)) hi = q.untilTs;
+    } else if (isFiniteNum(q.sinceMs) && q.sinceMs > 0) {
+      lo = now - q.sinceMs;
+    }
+    var hasTime = lo !== -Infinity || hi !== Infinity;
+    var out;
+    if (!hasTime && !hasTypes && !hasLevels) {
+      // NO-OP: pass every input through unchanged (incl. garbage), no inspection.
+      out = records.slice();
+    } else {
+      out = [];
+      for (var i = 0; i < records.length; i++) {
+        var rec = records[i];
+        // A non-object record cannot satisfy any active filter → exclude (no throw).
+        if (!rec || typeof rec !== "object") continue;
+        var at = typeof rec.at === "number" ? rec.at : 0;
+        if (at < lo || at > hi) continue;
+        var isLog = rec.kind === "log";
+        // levels NON-EMPTY: level gate is the sole authority for logs (independent of
+        // types); a non-log is kept only if types includes its kind. levels EMPTY:
+        // only the type gate applies (to all kinds incl. logs).
+        if (hasLevels) {
+          if (isLog) {
+            var lv = get(rec.payload, ["data", "level"]);
+            if (levels.indexOf(String(lv)) === -1) continue;
+          } else if (!(hasTypes && types.indexOf(rec.kind) !== -1)) {
+            continue;
+          }
+        } else if (hasTypes) {
+          if (types.indexOf(rec.kind) === -1) continue;
+        }
+        out.push(rec);
+      }
+    }
+    if (q.limit === undefined) {
+      return out.length > QHARD_MAX ? out.slice(out.length - QHARD_MAX) : out;
+    }
+    var lim = Math.min(Math.max(0, Math.floor(q.limit)), QHARD_MAX);
+    if (lim === 0) return [];
+    return out.length > lim ? out.slice(out.length - lim) : out;
+  }
+
+  // The current query the Logs panel describes (range preset + selected types).
+  // Empty types selection means all (no type filter sent / mirrored).
+  function buildLogQuery() {
+    var q = {};
+    var sel = [];
+    for (var i = 0; i < ALL_KINDS.length; i++) if (logTypes[ALL_KINDS[i]]) sel.push(ALL_KINDS[i]);
+    if (sel.length) q.types = sel;
+    if (logRange !== "live" && logRange !== "all") {
+      var n = Number(logRange);
+      if (isFinite(n) && n > 0) q.sinceMs = n;
+    }
+    return q;
+  }
+  function logQueryString(q) {
+    var parts = [];
+    if (token) parts.push("token=" + encodeURIComponent(token));
+    if (q.sinceMs != null) parts.push("sinceMs=" + encodeURIComponent(q.sinceMs));
+    if (q.fromTs != null) parts.push("fromTs=" + encodeURIComponent(q.fromTs));
+    if (q.untilTs != null) parts.push("untilTs=" + encodeURIComponent(q.untilTs));
+    if (q.types) for (var i = 0; i < q.types.length; i++) parts.push("type=" + encodeURIComponent(q.types[i]));
+    return parts.length ? ("?" + parts.join("&")) : "";
+  }
+  function runLogQuery() {
+    if (!state || logSource !== "query") return;
+    var id = state.id;
+    var q = buildLogQuery();
+    logQueryMeta.textContent = "running…";
+    api("/api/agents/" + encodeURIComponent(id) + "/query" + logQueryString(q))
+      .then(function (r) {
+        if (r.status === 401) { showLock(); throw new Error("401"); }
+        if (!r.ok) throw new Error("query " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (!state || state.id !== id || logSource !== "query") return;
+        state.queryRecords = (data && data.records) || [];
+        state.queryTotal = (data && typeof data.total === "number") ? data.total : state.queryRecords.length;
+        state.queryRan = true;
+        renderLogs(state);
+      })
+      .catch(function (e) {
+        if (String(e.message) === "401") return;
+        logQueryMeta.textContent = "error: " + e.message;
+      });
+  }
+
+  // Live-tail: in query mode, a new SSE record joins queryRecords iff it matches
+  // the active query (same predicate the server used). Caps the retained array.
+  function queryTail(s, rec) {
+    if (!s.queryRan) return;
+    var q = buildLogQuery();
+    if (clientFilter([rec], q).length === 0) return;
+    s.queryRecords.push(rec);
+    s.queryTotal++;
+    if (s.queryRecords.length > CAP_LOGS) s.queryRecords.shift();
+  }
+
+  // Reflect the live⇄query source onto the panel (CSS reveals the query bar).
+  function setLogSource(src) {
+    logSource = src;
+    if (logsPanel) logsPanel.setAttribute("data-src", src);
+    var bs = logSourceSeg.querySelectorAll("button");
+    for (var i = 0; i < bs.length; i++) bs[i].classList.toggle("active", bs[i].getAttribute("data-src") === src);
+    if (src === "query" && state && !state.queryRan) runLogQuery();
+    if (state) renderLogs(state);
+  }
+  logSourceSeg.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest("button") : null;
+    if (!btn) return;
+    var src = btn.getAttribute("data-src");
+    if (!src || src === logSource) return;
+    setLogSource(src);
+  });
+  logRangeSel.addEventListener("change", function () {
+    logRange = logRangeSel.value;
+    if (state && logSource === "query") runLogQuery();
+  });
+  logRunBtn.addEventListener("click", function () { runLogQuery(); });
+
+  // type multi-select (dependency-free popover with all/none actions)
+  function logTypesSummary() {
+    var sel = [];
+    for (var i = 0; i < ALL_KINDS.length; i++) if (logTypes[ALL_KINDS[i]]) sel.push(ALL_KINDS[i]);
+    if (!sel.length) return "all";
+    if (sel.length === 1) return sel[0];
+    return sel.length + " selected";
+  }
+  function buildTypesPop() {
+    var html = '<div class="tms-actions"><button type="button" data-act="all">all</button>'
+      + '<button type="button" data-act="none">none</button></div>';
+    for (var i = 0; i < ALL_KINDS.length; i++) {
+      var k = ALL_KINDS[i];
+      var on = !!logTypes[k];
+      html += '<label class="' + (on ? "on" : "") + '"><input type="checkbox" data-kind="' + esc(k) + '"'
+        + (on ? " checked" : "") + '/>' + esc(k) + '</label>';
+    }
+    logTypesPop.innerHTML = html;
+  }
+  if (logTypesBtn) {
+    logTypesBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var open = logTypesEl.classList.toggle("open");
+      if (open) buildTypesPop();
+    });
+  }
+  if (logTypesPop) {
+    logTypesPop.addEventListener("click", function (e) {
+      var act = e.target.getAttribute && e.target.getAttribute("data-act");
+      if (act) {
+        logTypes = {};
+        if (act === "all") for (var i = 0; i < ALL_KINDS.length; i++) logTypes[ALL_KINDS[i]] = true;
+        buildTypesPop();
+        logTypesLbl.textContent = logTypesSummary();
+        if (state && logSource === "query") runLogQuery();
+        return;
+      }
+    });
+    logTypesPop.addEventListener("change", function (e) {
+      var cb = e.target;
+      if (!cb || !cb.getAttribute) return;
+      var k = cb.getAttribute("data-kind");
+      if (!k) return;
+      if (cb.checked) logTypes[k] = true; else delete logTypes[k];
+      var lab = cb.closest ? cb.closest("label") : null;
+      if (lab) lab.classList.toggle("on", cb.checked);
+      logTypesLbl.textContent = logTypesSummary();
+      if (state && logSource === "query") runLogQuery();
+    });
+  }
+  // Close the type popover on an outside click.
+  document.addEventListener("click", function (e) {
+    if (logTypesEl && logTypesEl.classList.contains("open")
+      && e.target.closest && !e.target.closest("#logTypes")) {
+      logTypesEl.classList.remove("open");
+    }
   });
 
   // ---- panel: per-frame timeline ----
@@ -582,6 +856,13 @@ export const SCRIPT = `
     appendEventRow(rec);
     if ((rec.kind === "prompt.sent" || rec.kind === "prompt.received") && rec.corrId) dirty.prompts = true;
     if (rec.kind === "log") dirty.logs = true;
+    // Query mode live-tails: a new record matching the active query is appended to
+    // the result set (client mirror of filterRecords) and the Logs panel re-renders.
+    if (logSource === "query") {
+      var before = s.queryRecords.length;
+      queryTail(s, rec);
+      if (s.queryRecords.length !== before) dirty.logs = true;
+    }
     dirty.frames = true; // every record joins (or opens) a frame
     scheduleFlush();
   }
@@ -598,6 +879,9 @@ export const SCRIPT = `
     \$("cEvents").textContent = "0";
     \$("cLogs").textContent = "0";
     \$("cFrames").textContent = "0";
+    // Clear the Logs query result + meta on agent switch (state.queryRecords is
+    // freshly recreated by freshState; this clears any stale on-screen meta).
+    if (logQueryMeta) logQueryMeta.textContent = "";
   }
 
   // ---- selection / connection ----
@@ -730,6 +1014,9 @@ export const SCRIPT = `
           eventsBody.insertBefore(d, eventsBody.firstChild);
         }
         openStream(id);
+        // If the Logs panel is in Query mode, auto-run the query for this agent so
+        // a switch repopulates the result set (and re-enables the live-tail).
+        if (logSource === "query") runLogQuery();
         if (switching) animateAgentSwitch();
       })
       .catch(function (e) {

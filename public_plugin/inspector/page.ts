@@ -147,6 +147,10 @@ export const PAGE = `<!doctype html>
           <div class="hc">${pexp()}</div>
         </header>
         <div class="toolbar">
+          <div class="seg" id="logSource">
+            <button type="button" data-src="live" class="active">Live</button>
+            <button type="button" data-src="query">Query</button>
+          </div>
           <label class="chk on" id="logFollow"><span class="box">${icon("check")}</span><span class="lbl">auto-follow</span></label>
           <div class="levelseg" id="logLevel">
             <button type="button" data-lvl="" class="active">all</button>
@@ -157,6 +161,24 @@ export const PAGE = `<!doctype html>
           </div>
           <span class="filter-ico">${icon("search")}</span>
           <input class="tin" id="logPid" placeholder="pluginId…" />
+        </div>
+        <div class="toolbar toolbar2 query-only" id="logQueryBar">
+          <label class="qf-label">range</label>
+          <select class="tsel" id="logRange">
+            <option value="live">live (no time filter)</option>
+            <option value="300000">last 5 min</option>
+            <option value="900000">last 15 min</option>
+            <option value="3600000">last 1 hour</option>
+            <option value="21600000">last 6 hours</option>
+            <option value="86400000">last 24 hours</option>
+            <option value="all">all</option>
+          </select>
+          <div class="typems" id="logTypes">
+            <button type="button" class="typems-btn" id="logTypesBtn">types: <b id="logTypesLbl">all</b></button>
+            <div class="typems-pop" id="logTypesPop"></div>
+          </div>
+          <button type="button" class="btn ghost qf-run" id="logRunBtn">Run query</button>
+          <span class="qf-meta" id="logQueryMeta"></span>
         </div>
         <div class="body" id="logs"><div class="empty">No logs yet.</div></div>
       </section>

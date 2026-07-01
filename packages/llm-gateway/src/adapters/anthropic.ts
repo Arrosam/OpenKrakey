@@ -14,6 +14,8 @@ import type {
   ToolCall,
 } from "../../../../contracts/llm";
 import type { AdapterCfg } from "./types";
+import { buildToolNameMap, type ToolNameMap } from "./tool-names";
+import { fetchWithTimeout } from "./http";
 
 /** Map one ContentPart onto an Anthropic content block. */
 function mapContentPart(part: ContentPart): unknown {
@@ -80,7 +82,7 @@ function assistantTextBlocks(content: string | ContentPart[]): unknown[] {
  * Map our messages onto Anthropic messages (role user/assistant only). system
  * messages are hoisted out separately (see {@link chat}) and never appear here.
  */
-function mapMessages(messages: Message[]): unknown[] {
+function mapMessages(messages: Message[], toolNames: ToolNameMap): unknown[] {
   const out: unknown[] = [];
   for (const m of messages) {
     if (m.role === "system") continue;
@@ -103,7 +105,7 @@ function mapMessages(messages: Message[]): unknown[] {
         ...m.toolCalls.map((tc) => ({
           type: "tool_use",
           id: tc.id,
-          name: tc.name,
+          name: toolNames.encode(tc.name),
           input: tc.arguments,
         })),
       ];
@@ -130,10 +132,10 @@ function hoistSystem(messages: Message[]): string | undefined {
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
-/** Map our tool defs onto Anthropic tool defs. */
-function mapTools(tools: ToolDef[]): unknown[] {
+/** Map our tool defs onto Anthropic tool defs (wire-legal names). */
+function mapTools(tools: ToolDef[], toolNames: ToolNameMap): unknown[] {
   return tools.map((t) => ({
-    name: t.name,
+    name: toolNames.encode(t.name),
     description: t.description,
     input_schema: t.parameters ?? { type: "object" },
   }));
@@ -174,10 +176,11 @@ export async function chat(
 ): Promise<LLMResponse> {
   const url = `${cfg.baseURL ?? "https://api.anthropic.com"}/v1/messages`;
 
+  const toolNames = buildToolNameMap(req.tools);
   const body: Record<string, unknown> = {
     model: req.model ?? cfg.model,
     max_tokens: req.maxTokens ?? cfg.maxTokens ?? 4096,
-    messages: mapMessages(req.messages),
+    messages: mapMessages(req.messages, toolNames),
   };
   const hoisted = hoistSystem(req.messages);
   const system =
@@ -185,7 +188,7 @@ export async function chat(
       ? `${req.system}\n${hoisted}`
       : (req.system ?? hoisted);
   if (system !== undefined) body.system = system;
-  if (req.tools !== undefined) body.tools = mapTools(req.tools);
+  if (req.tools !== undefined) body.tools = mapTools(req.tools, toolNames);
   const temperature = req.temperature ?? cfg.temperature;
   if (temperature !== undefined) body.temperature = temperature;
   const topP = req.topP ?? cfg.topP;
@@ -195,7 +198,7 @@ export async function chat(
   // reasoningEffort is deliberately NOT wired for Anthropic: the Messages API has
   // no effort enum — it uses `thinking: { budget_tokens }`, a different mechanism.
 
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     method: "POST",
     headers: {
       "x-api-key": cfg.apiKey,
@@ -203,7 +206,7 @@ export async function chat(
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
-  });
+  }, cfg.timeoutMs);
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -224,7 +227,7 @@ export async function chat(
     .filter((b) => b.type === "tool_use")
     .map((b) => ({
       id: b.id ?? "",
-      name: b.name ?? "",
+      name: toolNames.decode(b.name ?? ""),
       arguments: b.input,
     }));
 

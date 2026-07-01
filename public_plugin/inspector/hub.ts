@@ -16,6 +16,8 @@
 import * as http from "node:http";
 import { bearerToken, queryToken, cookieToken, tokenOk } from "../../shared/http-auth";
 import { PAGE } from "./page";
+import type { EventStore } from "./store";
+import { filterRecords, type RecordQuery } from "./query";
 
 /** The wire record the dashboard (and any observer) reads. Shape is contract. */
 export interface EventRecord {
@@ -43,6 +45,8 @@ export interface AgentReg {
   count: number;
   dropped: number;
   sseClients: Set<http.ServerResponse>;
+  /** Per-agent persisted JSONL store (null when persistence is disabled). */
+  store: EventStore | null;
 }
 
 /**
@@ -96,6 +100,29 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
     "content-length": Buffer.byteLength(text),
   });
   res.end(text);
+}
+
+/**
+ * Parse the /query search params into a RecordQuery. Numeric params are parsed
+ * leniently (a non-number yields `undefined`, which `filterRecords` treats as
+ * "absent"); `type` and `level` are repeatable (searchParams.getAll). An empty
+ * `type`/`level` list stays empty (inert), never undefined.
+ */
+function parseQuery(sp: URLSearchParams): RecordQuery {
+  const num = (key: string): number | undefined => {
+    const raw = sp.get(key);
+    if (raw === null || raw === "") return undefined;
+    const n = Number(raw);
+    return isFinite(n) ? n : undefined;
+  };
+  return {
+    sinceMs: num("sinceMs"),
+    fromTs: num("fromTs"),
+    untilTs: num("untilTs"),
+    types: sp.getAll("type"),
+    levels: sp.getAll("level"),
+    limit: num("limit"),
+  };
 }
 
 // ---- the single request router (handles ALL agents) -------------------------
@@ -201,6 +228,22 @@ function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void
         // Do NOT replay the ring here — the page backfills via /snapshot first.
         return;
       }
+
+      // GET /api/agents/:id/query?... — filter the in-memory ring (R6: own reg).
+      if (method === "GET" && sub === "query") {
+        if (!reg) {
+          sendJson(res, 404, { error: "unknown agent" });
+          return;
+        }
+        const q = parseQuery(url.searchParams);
+        const all = snapshotRing(reg);
+        const filtered = filterRecords(all, { ...q, limit: undefined });
+        const total = filtered.length; // count BEFORE the limit tail
+        const records =
+          q.limit === undefined ? filtered : filterRecords(all, q);
+        sendJson(res, 200, { records, total, dropped: reg.dropped });
+        return;
+      }
     }
 
     sendJson(res, 404, { error: "not found" });
@@ -257,6 +300,10 @@ export function pushRecord(reg: AgentReg, rec: EventRecord, bufferSize: number):
   }
   reg.count++;
 
+  // Persist (best-effort, fire-and-forget; the store swallows its own errors and
+  // is a no-op when persistence is disabled). Separate from the ring/SSE path.
+  if (reg.store) reg.store.append(rec);
+
   // Fan out to this agent's live SSE clients only (R6). Skip building/serializing
   // the frame entirely when nobody is listening (the common case — the dashboard
   // usually isn't open); the ring append above always happens regardless.
@@ -276,15 +323,45 @@ export function pushRecord(reg: AgentReg, rec: EventRecord, bufferSize: number):
 
 // ---- hub lifecycle (refcounted) ---------------------------------------------
 
+/**
+ * Seed a fresh AgentReg's ring from a restored window via the existing FIFO path,
+ * but WITHOUT re-persisting (restored records keep their persisted seq). Bounded
+ * to `bufferSize`: a window larger than the ring just keeps the most-recent tail.
+ */
+function seedRing(reg: AgentReg, restore: EventRecord[], bufferSize: number): void {
+  for (let i = 0; i < restore.length; i++) {
+    // Re-use the ring's FIFO append/eviction logic by inlining it here so we can
+    // skip store.append (pushRecord would re-persist). Drop-oldest at capacity.
+    while (reg.count > 0 && reg.count >= bufferSize) {
+      reg.head = (reg.head + 1) % reg.buf.length;
+      reg.count--;
+      reg.dropped++;
+    }
+    if (reg.buf.length < bufferSize) {
+      reg.buf.push(restore[i]);
+    } else {
+      reg.buf[(reg.head + reg.count) % reg.buf.length] = restore[i];
+    }
+    reg.count++;
+  }
+}
+
 /** Register an agent; the FIRST registration creates + listens the server. */
 export async function hubRegister(
   agentId: string,
-  cfg: { port: number; host: string; token: string },
+  cfg: { port: number; host: string; token: string; bufferSize?: number },
+  opts?: { store?: EventStore | null; restore?: EventRecord[] },
 ): Promise<{ reg: AgentReg; boundPort: number; token: string; created: boolean }> {
   let reg = hub.agents.get(agentId);
   if (!reg) {
-    reg = { buf: [], head: 0, count: 0, dropped: 0, sseClients: new Set() };
+    reg = { buf: [], head: 0, count: 0, dropped: 0, sseClients: new Set(), store: opts?.store ?? null };
     hub.agents.set(agentId, reg);
+    // Seed the ring from the restored window (no re-persist). Bound to the ring
+    // size; the FIFO path keeps the most-recent tail if the window is larger.
+    const restore = opts?.restore;
+    if (restore && restore.length) {
+      seedRing(reg, restore, cfg.bufferSize && cfg.bufferSize > 0 ? cfg.bufferSize : restore.length);
+    }
   }
   hub.refs++;
 
@@ -319,6 +396,8 @@ export async function hubRegister(
 export function hubDeregister(agentId: string): void {
   const reg = hub.agents.get(agentId);
   if (reg) {
+    // Best-effort: trim the persisted file to its cap on the way out.
+    reg.store?.compactSync();
     for (const client of reg.sseClients) {
       try {
         client.end();

@@ -22,6 +22,8 @@ interface ApiDeps {
   defaultPath: string;
   publicPluginDir: string;
   llmPath: string;
+  /** Restart the runtime so saved config applies. Wired to `krakey restart`. */
+  restart: () => void | Promise<void>;
 }
 
 type Handler = (
@@ -163,6 +165,17 @@ export function createApiHandler(deps: ApiDeps): Handler {
       guard(async () => {
         const payload = await assembleSchema({ publicPluginDir: deps.publicPluginDir });
         sendJson(res, 200, payload);
+      });
+      return;
+    }
+
+    // POST /api/restart — restart the runtime so a saved config is applied. Runs
+    // `krakey restart` (stop the tracked background daemon(s), then start fresh) —
+    // the same lifecycle the CLI drives, so config-web owns no process logic itself.
+    if (method === "POST" && pathname === "/api/restart") {
+      guard(async () => {
+        await deps.restart();
+        sendJson(res, 200, { ok: true });
       });
       return;
     }

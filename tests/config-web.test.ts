@@ -211,6 +211,8 @@ interface TempConfig {
   agentsDir: string;
   defaultPath: string;
   llmPath: string;
+  /** Spy: incremented each time the server's injected restart() runs. */
+  restartCalls: { n: number };
   cleanup(): Promise<void>;
 }
 
@@ -237,6 +239,7 @@ async function makeTempConfig(): Promise<TempConfig> {
     agentsDir,
     defaultPath,
     llmPath,
+    restartCalls: { n: 0 },
     cleanup: () => rm(dir, { recursive: true, force: true }),
   };
 }
@@ -262,6 +265,7 @@ async function startServer(tc: TempConfig): Promise<ServerHandle> {
     defaultPath: tc.defaultPath,
     publicPluginDir: PUBLIC_PLUGIN_DIR,
     llmPath: tc.llmPath,
+    restart: () => { tc.restartCalls.n++; },
   });
   assert.ok(handle && typeof handle === "object", "startServer must resolve a handle");
   assert.equal(typeof handle.port, "number", "handle.port must be a number");
@@ -399,6 +403,26 @@ test("server: GET /api/default?token -> 200 the Default Setting", async () => {
     const setting = (await res.json()) as { intervalMs: number; plugins: string[] };
     assert.equal(setting.intervalMs, 1000, "the stored default intervalMs is returned");
     assert.deepEqual(setting.plugins, [], "the stored default plugin list is returned");
+  });
+});
+
+// --- B7b: POST /api/restart invokes the injected runtime restart ------------
+test("server: POST /api/restart?token -> 200 and invokes restart() exactly once", async () => {
+  await withServer(async (h, tc) => {
+    assert.equal(tc.restartCalls.n, 0, "restart not called before the request");
+    const res = await fetch(api(h, "/api/restart"), { method: "POST" });
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { ok?: boolean };
+    assert.equal(body.ok, true);
+    assert.equal(tc.restartCalls.n, 1, "the runtime restart was triggered once");
+  });
+});
+
+test("server: POST /api/restart WITHOUT a token -> 401 and restart() is NOT called", async () => {
+  await withServer(async (h, tc) => {
+    const res = await fetch(base(h) + "/api/restart", { method: "POST" });
+    assert.equal(res.status, 401, "the control endpoint is token-gated");
+    assert.equal(tc.restartCalls.n, 0, "an unauthorized request never restarts the runtime");
   });
 });
 

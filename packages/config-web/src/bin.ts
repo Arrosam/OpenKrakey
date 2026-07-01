@@ -6,12 +6,33 @@
  */
 import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { PATHS } from "../../../shared/config";
 
 import { startServer } from "./server";
 
 const cwd = process.cwd();
+
+// The `krakey` CLI bin (resolved from THIS file, not cwd). POST /api/restart runs
+// `krakey restart` through it — stop the tracked background runtime, then start a
+// fresh one — the same lifecycle `krakey restart` drives from the terminal.
+// NOT detached: `krakey restart` is short-lived (it stops the old daemon and spawns
+// the new one as its OWN detached child, then exits), and a DETACHED tsx child here
+// fails to run on Windows. We just fire-and-forget it (unref'd, output ignored);
+// this long-lived server easily outlives its ~2s run.
+const cliBin = fileURLToPath(new URL("../../cli/src/bin.ts", import.meta.url));
+function restartRuntime(): void {
+  const child = spawn(process.execPath, ["--import", "tsx", cliBin, "restart"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.on("error", () => {
+    /* best-effort: a failed restart spawn must never crash the config server */
+  });
+  child.unref();
+}
 
 function parsePort(raw: string | undefined): number {
   const s = (raw ?? "").trim();
@@ -35,6 +56,7 @@ const { url } = await startServer({
   defaultPath: resolve(cwd, PATHS.defaultPath),
   publicPluginDir: resolve(cwd, PATHS.publicPluginDir),
   llmPath: resolve(cwd, PATHS.llmPath),
+  restart: restartRuntime,
 });
 
 console.log("✦ Config console: " + url);

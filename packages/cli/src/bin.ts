@@ -54,6 +54,11 @@ const REPO_ROOT = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 // Per-install runtime state (PID list + log). Git-ignored; created on demand.
 const STATE_DIR = join(REPO_ROOT, ".krakey");
 const PID_FILE = join(STATE_DIR, "run.pid");
+// Dashboard (console + config-web) pids live SEPARATELY from the runtime's: they
+// are torn down by `krakey stop` but NOT by `krakey restart` — so clicking the
+// config UI's "restart to apply" (which runs `krakey restart`) never kills the very
+// Console the user is looking at.
+const DASH_PID_FILE = join(STATE_DIR, "dashboard.pid");
 const LOG_FILE = join(STATE_DIR, "krakey.log");
 
 const DEFAULT_DASHBOARD_PORT = "7716";
@@ -69,9 +74,9 @@ commands:
   krakey providers    edit AI services (providers, endpoints, keys)
   krakey run          launch the runtime in the foreground (Ctrl+C to stop)
   krakey start        launch the runtime in the background (daemon)
-  krakey stop         stop background runtime instances
+  krakey stop         stop the background runtime AND dashboard
   krakey restart      restart the background runtime (stop, then start)
-  krakey dashboard    open the unified Console in your browser — recommended setup  [port]
+  krakey dashboard    open the unified Console in the browser, in the background — recommended setup  [port]
   krakey uninstall    remove Krakey entirely from this machine  [--yes]
   krakey update       pull the latest version and re-run the installer
   krakey version      print the version
@@ -104,10 +109,10 @@ function ensureStateDir(): void {
   mkdirSync(STATE_DIR, { recursive: true });
 }
 
-/** Read the PID list (one pid per line), tolerating a missing/garbled file. */
-function readPids(): number[] {
-  if (!existsSync(PID_FILE)) return [];
-  return readFileSync(PID_FILE, "utf8")
+/** Read a PID list file (one pid per line), tolerating a missing/garbled file. */
+function readPids(file: string): number[] {
+  if (!existsSync(file)) return [];
+  return readFileSync(file, "utf8")
     .split("\n")
     .map((line) => Number(line.trim()))
     .filter((n) => Number.isInteger(n) && n > 0);
@@ -140,15 +145,23 @@ function killTree(pid: number): void {
 }
 
 /**
- * Stop every recorded background instance and clear the PID file. Returns how
- * many were targeted. Shared by `stop` and the best-effort step of `uninstall`.
+ * Kill every pid recorded in `file`, then clear it. Returns how many were
+ * targeted. The list is cleared regardless — the recorded pids are no longer ours.
+ */
+function stopPidFile(file: string): number {
+  const pids = readPids(file);
+  for (const pid of pids) killTree(pid);
+  if (existsSync(file)) writeFileSync(file, "", "utf8");
+  return pids.length;
+}
+
+/**
+ * Stop the background RUNTIME (boot) instances only — the daemons `krakey start`
+ * records in PID_FILE. Used by `restart` (which must NOT touch the dashboard) and
+ * the best-effort step of `uninstall`.
  */
 function stopAll(): number {
-  const pids = readPids();
-  for (const pid of pids) killTree(pid);
-  // Clear the list regardless — the recorded pids are no longer ours to track.
-  if (existsSync(PID_FILE)) writeFileSync(PID_FILE, "", "utf8");
-  return pids.length;
+  return stopPidFile(PID_FILE);
 }
 
 /**
@@ -222,11 +235,13 @@ switch (parsed.kind) {
     break;
 
   case "stop": {
-    const stopped = stopAll();
+    // Stop EVERYTHING krakey backgrounded: the runtime daemon(s) AND the dashboard
+    // (console + config-web). `restart` deliberately stops only the runtime.
+    const stopped = stopPidFile(PID_FILE) + stopPidFile(DASH_PID_FILE);
     console.log(
       stopped === 0
         ? "krakey: no running instances"
-        : `krakey: stopped ${stopped} instance${stopped === 1 ? "" : "s"}`,
+        : `krakey: stopped ${stopped} instance${stopped === 1 ? "" : "s"} (runtime + dashboard)`,
     );
     break;
   }
@@ -248,8 +263,9 @@ switch (parsed.kind) {
     // (Config 7717 · Chat 7718 · Inspector 7719). We always launch config-web so
     // the Config panel is usable for first-run setup BEFORE any agent is running;
     // Chat + Inspector belong to the runtime and only fill in once you `krakey
-    // start`. The Console runs in the foreground (Ctrl+C reaches it); config-web
-    // runs in the background and is torn down when the Console exits.
+    // start`. BOTH the Console and config-web run as BACKGROUND daemons (so the
+    // terminal is freed immediately) and are PID-tracked in DASH_PID_FILE so
+    // `krakey stop` tears them down — but `krakey restart` does not.
     const port = parsed.port !== undefined ? parsed.port : DEFAULT_DASHBOARD_PORT;
     const url = `http://127.0.0.1:${port}`;
 
@@ -257,6 +273,11 @@ switch (parsed.kind) {
     // The same token is handed to the Console via the Config URL so the embedded
     // Config panel authenticates against the config-web API.
     const token = process.env.CONFIG_WEB_TOKEN || randomBytes(24).toString("base64url");
+
+    ensureStateDir();
+    // A fresh dashboard replaces any prior one — otherwise re-running would leave
+    // orphaned console/config-web processes fighting over the ports.
+    stopPidFile(DASH_PID_FILE);
 
     // Probe whether a runtime is up — Chat (7718) and Inspector (7719) are served
     // by it. "Running" = the port answers with ANY HTTP response; a refused
@@ -285,8 +306,12 @@ switch (parsed.kind) {
       );
     }
 
-    // Launch config-web (7717) in the background so Config is reachable for
-    // pre-run setup. Keep the handle so we can tear it down on exit.
+    // Both surfaces are DETACHED background daemons, logged to LOG_FILE and PID-
+    // tracked. Detached spawn of a `--import tsx` child only runs on Windows when
+    // stdio goes to a real fd (not "ignore") — mirror startBackground's pattern.
+    const logFd = openSync(LOG_FILE, "a");
+
+    // config-web (7717) — background so Config is reachable for pre-run setup.
     const cfg = spawn(process.execPath, ["--import", "tsx", configWebBin], {
       env: {
         ...process.env,
@@ -294,47 +319,40 @@ switch (parsed.kind) {
         CONFIG_WEB_HOST: "127.0.0.1",
         CONFIG_WEB_TOKEN: token,
       },
-      stdio: "ignore",
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
       windowsHide: true,
     });
+    cfg.unref();
+    if (cfg.pid !== undefined) appendFileSync(DASH_PID_FILE, `${cfg.pid}\n`, "utf8");
 
-    // Tear down config-web when the dashboard goes away — it must not linger.
-    // On Windows a child does NOT die with its parent, so this is required.
-    const stopCfg = (): void => {
-      if (cfg.pid !== undefined) killTree(cfg.pid);
-      else cfg.kill();
-    };
-
-    // Launch the Console (foreground) wired to all three surfaces. Every framed URL
-    // carries its `?token=` (Config's minted here; Chat/Inspector's pinned in config
-    // by ensureSurfaceTokens) so all three panels authenticate.
-    const consoleChild = spawn(
-      process.execPath,
-      ["--import", "tsx", consoleBin],
-      {
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          CONSOLE_PORT: port,
-          CONFIG_WEB_URL: "http://127.0.0.1:7717/?token=" + encodeURIComponent(token),
-          WEB_CHAT_URL: surfaceUrl(surfaces.chat, 7718),
-          INSPECTOR_URL: surfaceUrl(surfaces.inspector, 7719),
-        },
+    // The unified Console — also background, wired to all three surfaces. Every
+    // framed URL carries its `?token=` (Config's minted here; Chat/Inspector's
+    // pinned in config by ensureSurfaceTokens) so all three panels authenticate.
+    const consoleChild = spawn(process.execPath, ["--import", "tsx", consoleBin], {
+      env: {
+        ...process.env,
+        CONSOLE_PORT: port,
+        CONFIG_WEB_URL: "http://127.0.0.1:7717/?token=" + encodeURIComponent(token),
+        WEB_CHAT_URL: surfaceUrl(surfaces.chat, 7718),
+        INSPECTOR_URL: surfaceUrl(surfaces.inspector, 7719),
       },
-    );
-    process.on("SIGINT", stopCfg);
-    consoleChild.on("error", (err) => {
-      console.error(`krakey: failed to launch ${consoleBin}: ${err.message}`);
-      stopCfg();
-      process.exitCode = 1;
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      windowsHide: true,
     });
-    consoleChild.on("close", (code) => {
-      stopCfg();
-      process.exitCode = code ?? 1;
-    });
+    consoleChild.unref();
+    if (consoleChild.pid !== undefined) appendFileSync(DASH_PID_FILE, `${consoleChild.pid}\n`, "utf8");
 
-    // Give the Console ~1.5s to bind before pointing the browser at it.
-    setTimeout(() => openBrowser(url), 1500);
+    console.log(`krakey: dashboard running in background (console pid ${consoleChild.pid ?? "?"}, config pid ${cfg.pid ?? "?"})`);
+    console.log(`        ${url}`);
+    console.log(`        log:  ${LOG_FILE}`);
+    console.log(`        stop: krakey stop`);
+
+    // Hold this process only long enough for the Console to bind, then open the
+    // browser and exit — the detached daemons live on, the terminal is freed.
+    await new Promise((r) => setTimeout(r, 1500));
+    openBrowser(url);
     break;
   }
 
@@ -372,8 +390,9 @@ switch (parsed.kind) {
       }
     }
 
-    // 1) Best-effort: stop any running instances first.
+    // 1) Best-effort: stop any running instances first (runtime + dashboard).
     stopAll();
+    stopPidFile(DASH_PID_FILE);
 
     // 2) Remove the PATH footprint anchored to THIS install.
     const binDir = join(REPO_ROOT, "bin");
