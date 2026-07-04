@@ -17,10 +17,11 @@ fires off any tools, and goes back to sleep — frame after frame. You talk to i
 web chat; run one agent or many, each isolated with its own files on disk.
 
 <div align="center">
-<img src="assets/demo-chat.png" alt="Krakey web chat — an agent replying to you on its next frame" width="48%" />
-&nbsp;
-<img src="assets/demo-inspector.png" alt="Krakey Inspector — the live bus: composed prompt, frame events, per-frame timeline, and logs" width="48%" />
-<br/><sub><i>Talk to an agent in the local web chat (left); it replies on its next frame. The read-only Inspector (right) shows the live bus — the plugin-composed prompt, the frame's events, the per-frame timeline, and the activity log.</i></sub>
+<img src="assets/demo-chat.png" alt="Krakey web chat — an agent replying to you on its next frame" width="100%" />
+<br/><sub><i>Talk to an agent in the local web chat — it replies on its next frame.</i></sub>
+<br/><br/>
+<img src="assets/demo-inspector.png" alt="Krakey Inspector — the live bus: composed prompt, frame events, per-frame timeline, and logs" width="100%" />
+<br/><sub><i>The read-only Inspector shows the live bus — the plugin-composed prompt, the frame's events, the per-frame timeline, and the activity log.</i></sub>
 </div>
 
 **Why it's different**
