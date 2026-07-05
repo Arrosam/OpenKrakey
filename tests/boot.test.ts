@@ -48,6 +48,10 @@ import * as bootModule from "../packages/boot/src";
 import { createCommunicatorLibrary } from "../packages/llm-gateway/src";
 import type { AgentDefinition, AgentHandle } from "../contracts/agent";
 import type { CommunicatorLibrary } from "../contracts/llm";
+// RESTART_EXIT_CODE is the shared constant boot.requestRestart exits with. Tests
+// pin the exit code THROUGH this import (never the literal 75) so a drift in the
+// constant is caught here and in cli/daemon that watch for it — same source.
+import { RESTART_EXIT_CODE } from "../shared/config";
 
 // ---------------------------------------------------------------------------
 // per-test temp sandbox + started-handle bookkeeping
@@ -687,8 +691,13 @@ test("run report: omitted report sink changes nothing (back-compat)", async () =
 
 // ===========================================================================
 // EXT — requestRestart: a GRACEFUL restart stops EVERY agent (teardown → flush
-// best-effort state) BEFORE re-execing (spawn) and exiting. The re-exec/exit are
-// INJECTED here so the test never actually spawns a child or exits the process.
+// best-effort state) BEFORE handing the process back to its supervisor by
+// exiting with RESTART_EXIT_CODE — there is NO in-process re-exec/spawn anymore
+// (spawnReplacement is deleted). Whatever launched boot (the cli `krakey run`
+// loop / the `krakey start` daemon) watches for RESTART_EXIT_CODE and re-execs
+// boot itself. The exit is INJECTED via hooks.exit so the test never actually
+// exits the process; delayMs is accepted but IGNORED (deprecated).
+// hooks shape: { exit?: (code: number) => void } — no `spawn` key.
 // Resolved defensively: red on a missing export, never an import crash.
 // ===========================================================================
 
@@ -710,31 +719,55 @@ test("requestRestart: exported as a function from the boot node", () => {
   assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
 });
 
-test("requestRestart: stops every handle BEFORE re-exec (spawn), spawn BEFORE exit, forwarding delayMs", async () => {
+test("requestRestart: stops EVERY handle BEFORE the exit hook fires, exiting with RESTART_EXIT_CODE", async () => {
   assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
   const order: string[] = [];
   const handles = [fakeHandle("a", order), fakeHandle("b", order)];
-  let spawnedMs = -1;
   let exitCode = -1;
+  // delayMs (1234) is deprecated: accepted but ignored. Pass it to prove the
+  // signature still takes it, but assert nothing about it.
   await requestRestart(handles, 1234, {
-    spawn: (ms: number) => { spawnedMs = ms; order.push("spawn"); },
     exit: (c: number) => { exitCode = c; order.push("exit"); },
   });
-  assert.ok(order.indexOf("stop:a") < order.indexOf("spawn"), "agent a torn down before re-exec");
-  assert.ok(order.indexOf("stop:b") < order.indexOf("spawn"), "agent b torn down before re-exec");
-  assert.ok(order.indexOf("spawn") < order.indexOf("exit"), "replacement spawned before this process exits");
-  assert.equal(spawnedMs, 1234, "delayMs is forwarded to the replacement");
-  assert.equal(exitCode, 0, "exits with code 0");
+  // Both agents are torn down BEFORE the exit hook fires (order-sensitive).
+  assert.ok(order.indexOf("stop:a") !== -1, "agent a was stopped");
+  assert.ok(order.indexOf("stop:b") !== -1, "agent b was stopped");
+  assert.ok(order.indexOf("exit") !== -1, "the exit hook fired");
+  assert.ok(order.indexOf("stop:a") < order.indexOf("exit"), "agent a torn down before exit");
+  assert.ok(order.indexOf("stop:b") < order.indexOf("exit"), "agent b torn down before exit");
+  // The exit hook receives the shared restart exit code (pinned via import).
+  assert.equal(exitCode, RESTART_EXIT_CODE, "exits with RESTART_EXIT_CODE");
 });
 
-test("requestRestart: a handle whose stop() rejects does NOT block the re-exec (allSettled)", async () => {
+test("requestRestart: a handle whose stop() rejects does NOT block the others nor the exit hook (allSettled)", async () => {
   assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
   const order: string[] = [];
-  const handles = [fakeHandle("ok", order), fakeHandle("bad", order, { throwOnStop: true })];
-  let spawned = false;
-  let exited = false;
+  // The rejecting handle is placed FIRST so a naive await (not allSettled) would
+  // stop before "ok" ever gets torn down — allSettled must let both run.
+  const handles = [fakeHandle("bad", order, { throwOnStop: true }), fakeHandle("ok", order)];
+  let exitCode = -1;
   await assert.doesNotReject(() =>
-    requestRestart(handles, 0, { spawn: () => { spawned = true; }, exit: () => { exited = true; } }),
+    requestRestart(handles, 0, { exit: (c: number) => { exitCode = c; order.push("exit"); } }),
   );
-  assert.ok(spawned && exited, "still re-execs + exits even when a teardown throws");
+  // The good handle still stopped despite its sibling rejecting...
+  assert.ok(order.indexOf("stop:ok") !== -1, "the non-rejecting handle still stopped");
+  assert.ok(order.indexOf("stop:bad") !== -1, "the rejecting handle's stop() was still invoked");
+  // ...and the exit hook still fired, after the teardown, with the restart code.
+  assert.ok(order.indexOf("exit") !== -1, "the exit hook still fired");
+  assert.ok(order.indexOf("stop:ok") < order.indexOf("exit"), "good handle torn down before exit");
+  assert.equal(exitCode, RESTART_EXIT_CODE, "exits with RESTART_EXIT_CODE even when a teardown throws");
+});
+
+test("requestRestart: exits with RESTART_EXIT_CODE (value pinned through the shared/config export)", async () => {
+  assert.equal(typeof requestRestart, "function", "requestRestart not implemented yet");
+  // Independently pin the contract's exit code against the single source of truth
+  // in shared/config. The test asserts equality against the IMPORT, never the
+  // literal 75 — a drift in the constant surfaces here (and in cli/daemon that
+  // watch for the same code), not as a silently diverged magic number.
+  const order: string[] = [];
+  let exitCode: number | undefined;
+  await requestRestart([fakeHandle("solo", order)], 0, {
+    exit: (c: number) => { exitCode = c; },
+  });
+  assert.equal(exitCode, RESTART_EXIT_CODE, "the exit hook is called with the shared restart code");
 });
