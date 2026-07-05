@@ -376,14 +376,15 @@ test("web-search: instanceUrl and localUrl are url fields", () => {
 });
 
 // ===========================================================================
-// 8. browser — 12 keys + targeted type assertion
+// 8. browser — 14 keys + targeted type/option assertions
 // ===========================================================================
-test("browser: schema is contract-valid and covers exactly its thirteen keys", () => {
+test("browser: schema is contract-valid and covers exactly its fourteen keys", () => {
   assertValidConfigSchema(BROWSER_SCHEMA, "BROWSER_SCHEMA");
   assertKeysExactly(
     BROWSER_SCHEMA as ConfigSchema,
     [
       "headless",
+      "headlessMode",
       "chromePath",
       "remoteDebugPort",
       "navigationTimeoutMs",
@@ -404,4 +405,16 @@ test("browser: schema is contract-valid and covers exactly its thirteen keys", (
 test("browser: headless is a boolean field", () => {
   const f = field(BROWSER_SCHEMA as ConfigSchema, "headless", "BROWSER_SCHEMA");
   assert.equal(f.type, "boolean", "browser.headless must be type 'boolean'");
+});
+
+test("browser: headlessMode is an enum whose option values are exactly ['new','old','off'] (default 'new')", () => {
+  const f = field(BROWSER_SCHEMA as ConfigSchema, "headlessMode", "BROWSER_SCHEMA");
+  assert.equal(f.type, "enum", "browser.headlessMode must be type 'enum'");
+  assert.ok(Array.isArray(f.options), "browser.headlessMode must declare options");
+  assert.deepEqual(
+    (f.options as Array<{ value: string | number }>).map((o) => o.value).sort(),
+    ["new", "off", "old"],
+    "browser.headlessMode option values must be exactly ['new','old','off']",
+  );
+  assert.equal(f.default, "new", "browser.headlessMode default must be 'new'");
 });
