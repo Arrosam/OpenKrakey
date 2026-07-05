@@ -101,6 +101,16 @@ export const agentPaths = (agentsDir: string, id: string) => ({
   pluginsDir: `${agentsDir}/${id}/plugins`,
 });
 
+/**
+ * The exit code that tells whichever process launched boot to relaunch it.
+ * boot.requestRestart exits with this code after tearing every agent down;
+ * the cli's `krakey run` loop and the `krakey start` daemon supervisor watch
+ * for it and re-exec boot (any other exit code is terminal and propagates).
+ * cli and boot share no import relationship beyond this constants module —
+ * never inline the literal.
+ */
+export const RESTART_EXIT_CODE = 75;
+
 // ---------------------------------------------------------------------------
 // Provider catalogue — UI-facing knowledge about the gateway's adapters.
 // The cli renders selects/hints from this table so a config can never name a
