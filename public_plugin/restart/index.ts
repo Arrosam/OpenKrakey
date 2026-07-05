@@ -16,7 +16,7 @@
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
 import type { ToolDef, Message } from "../../contracts/llm";
-import { Actions, Events } from "../../shared/actions";
+import { Actions } from "../../shared/actions";
 import { RESTART_SCHEMA } from "./config-schema";
 import { readMarker, writeMarkerSync, deleteMarker, type RestartMarker } from "./marker";
 
@@ -73,15 +73,15 @@ const createRestart: PluginFactory = (): Plugin => {
       // restart it asked for has completed — then immediately flip the marker to
       // completed so a later reboot never re-shows the same notice.
       let observation: RestartMarker | null = null;
-      const prev = readMarker(ctx.dataDir);
+      const prev = readMarker(ctx.dataDir, ctx.agentId);
       const age = prev ? Date.now() - prev.requestedAt : 0;
       const fresh = prev != null && prev.completed === false && age <= maxAgeMs && age >= -60000;
       if (fresh && prev) {
         observation = prev;
-        writeMarkerSync(ctx.dataDir, { ...prev, completed: true });
+        writeMarkerSync(ctx.dataDir, ctx.agentId, { ...prev, completed: true });
       } else {
         // Absent / already completed / stale / corrupt: drop it (safe no-op when absent).
-        deleteMarker(ctx.dataDir);
+        deleteMarker(ctx.dataDir, ctx.agentId);
       }
 
       const off = ctx.actions.register("restart.now", async (params: unknown) => {
@@ -117,7 +117,7 @@ const createRestart: PluginFactory = (): Plugin => {
         }
         // Drop a breadcrumb the fresh copy reads on the next boot so it can tell the
         // agent this exact request completed. Best-effort — writeMarkerSync never throws.
-        writeMarkerSync(ctx.dataDir, {
+        writeMarkerSync(ctx.dataDir, ctx.agentId, {
           requestedAt: Date.now(),
           reason: typeof reason === "string" ? reason : "",
           completed: false,
@@ -150,13 +150,17 @@ const createRestart: PluginFactory = (): Plugin => {
       const priority = typeof cfg.guidancePriority === "number" ? cfg.guidancePriority : 5800;
       ctx.setBlock({ id: "restart.guidance", target: "system", priority, render: () => guidanceText });
 
-      // A ONE-SHOT message block registered ONLY on a fresh restart: it injects a
+      // A PERSISTENT message block registered ONLY on a fresh restart: it injects a
       // single message telling the agent the request it made has completed, so it
       // stops trying to restart for it. When the marker is NOT fresh (absent /
       // completed / stale / corrupt) the block is never registered at all — the
-      // block store returns undefined for its id. Once registered, it renders [] the
-      // moment `observation` is cleared (below, on the first LLM return), so the
-      // notice never repeats.
+      // block store returns undefined for its id. Once registered it renders the SAME
+      // message on EVERY frame for the whole boot session; its only removal is
+      // teardown. That the notice never spans MORE than one boot is guaranteed by the
+      // completed:true flip above — NOT by clearing it after the first frame. (A live
+      // test showed a one-shot notice loses the race with web-chat's lingering
+      // "unanswered" status: the model re-derives "I never restarted" on frame 2 and
+      // reboots again.)
       if (fresh) {
         ctx.setBlock({
           id: "restart.observation",
@@ -182,11 +186,6 @@ const createRestart: PluginFactory = (): Plugin => {
           },
         });
       }
-      // One-shot: after the first LLM round-trip that saw the notice, drop it so the
-      // block renders [] from then on. (Harmless when the block was never registered.)
-      const offReturn = ctx.events.on(Events.LLM_RETURN, () => {
-        observation = null;
-      });
 
       try {
         await ctx.actions.invoke("llm.register_tool", RESTART_TOOL);
@@ -196,7 +195,7 @@ const createRestart: PluginFactory = (): Plugin => {
 
       // Only wire the observation removeBlock when we actually registered the block —
       // never call removeBlock for an id that was never set (fresh === false).
-      unsubs = [off, () => ctx.removeBlock("restart.guidance"), offReturn];
+      unsubs = [off, () => ctx.removeBlock("restart.guidance")];
       if (fresh) unsubs.push(() => ctx.removeBlock("restart.observation"));
       ctx.print("restart: self-restart tool ready" + (dryRun ? " (dry run)" : ""));
     },

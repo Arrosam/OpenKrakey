@@ -5,6 +5,10 @@
  * requested, so it can tell the agent "the restart you asked for is done" once
  * (and never re-show it, never loop on it).
  *
+ * PER-AGENT: `restart` is a PUBLIC plugin, so its dataDir is SHARED across every
+ * agent that loads it. The marker filename therefore carries the agentId, so two
+ * agents in one dataDir keep fully independent markers and never collide.
+ *
  * PURE + best-effort: every filesystem op is swallowed. A missing, unreadable,
  * malformed, or shape-invalid marker is simply "no marker" — losing it only
  * means the completed-notice is skipped, never a crash. Only depends on node's
@@ -24,31 +28,31 @@ export interface RestartMarker {
   command?: string[];
 }
 
-/** Where the marker file lives inside the plugin's dataDir. */
-export function markerPath(dataDir: string): string {
-  return join(dataDir, "restart-marker.json");
+/** Where this agent's marker file lives inside the plugin's (shared) dataDir. */
+export function markerPath(dataDir: string, agentId: string): string {
+  return join(dataDir, `restart-marker.${agentId}.json`);
 }
 
-/** Write the marker, best-effort. Never throws. */
-export function writeMarkerSync(dataDir: string, marker: RestartMarker): void {
+/** Write this agent's marker, best-effort. Never throws. */
+export function writeMarkerSync(dataDir: string, agentId: string, marker: RestartMarker): void {
   try {
     mkdirSync(dataDir, { recursive: true });
-    writeFileSync(markerPath(dataDir), JSON.stringify(marker), "utf8");
+    writeFileSync(markerPath(dataDir, agentId), JSON.stringify(marker), "utf8");
   } catch {
     // best-effort: losing the marker only skips the completed notice.
   }
 }
 
 /**
- * Read the marker back. Returns null on ANYTHING that isn't a well-shaped
+ * Read this agent's marker back. Returns null on ANYTHING that isn't a well-shaped
  * marker: missing file, JSON parse error, non-object, or a bad field
  * (requestedAt must be a finite number, completed a boolean, reason a string).
  * `command`, when present, is passed through untouched.
  */
-export function readMarker(dataDir: string): RestartMarker | null {
+export function readMarker(dataDir: string, agentId: string): RestartMarker | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(markerPath(dataDir), "utf8"));
+    parsed = JSON.parse(readFileSync(markerPath(dataDir, agentId), "utf8"));
   } catch {
     return null;
   }
@@ -60,10 +64,10 @@ export function readMarker(dataDir: string): RestartMarker | null {
   return m as unknown as RestartMarker;
 }
 
-/** Delete the marker, best-effort. A no-op when it is absent. Never throws. */
-export function deleteMarker(dataDir: string): void {
+/** Delete this agent's marker, best-effort. A no-op when it is absent. Never throws. */
+export function deleteMarker(dataDir: string, agentId: string): void {
   try {
-    unlinkSync(markerPath(dataDir));
+    unlinkSync(markerPath(dataDir, agentId));
   } catch {
     // best-effort: absent (or unremovable) is fine.
   }
