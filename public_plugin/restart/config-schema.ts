@@ -7,4 +7,6 @@ export const RESTART_SCHEMA: ConfigSchema = [
     help: "When on, restart.now reports what it WOULD do but does not actually restart. Useful for testing." },
   { key: "guidance", label: "Guidance override", type: "text", placeholder: "(uses built-in guidance)", help: "Overrides the restart guidance shown to the LLM." },
   { key: "guidancePriority", label: "Guidance block priority", type: "number", default: 5800, min: 0, step: 100 },
+  { key: "completedNoticeMaxAgeMs", label: "Restart-completed notice max age", type: "number", default: 300000, min: 0, step: 1000, unit: "ms",
+    help: "How recent a restart marker must be for the restart-completed notice to show on the next boot. Older markers are treated as stale and ignored." },
 ];
