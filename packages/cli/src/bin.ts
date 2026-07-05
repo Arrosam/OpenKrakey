@@ -18,7 +18,6 @@ import {
   readFileSync,
   readlinkSync,
   unlinkSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -30,6 +29,7 @@ import { PATHS } from "../../../shared/config";
 import { parseCommand } from "./dispatcher";
 import { createCli } from "./index";
 import { runInteractiveLoop } from "./pages";
+import { rotateLog, stopPidFile, superviseLoop } from "./supervisor";
 import { ensureSurfaceTokens, surfaceUrl } from "./surfaces";
 
 // Version comes from the repo-root package.json, resolved relative to this file
@@ -43,6 +43,9 @@ const pkg = JSON.parse(
 const bootBin = fileURLToPath(new URL("../../boot/src/index.ts", import.meta.url));
 const consoleBin = fileURLToPath(new URL("../../console/src/bin.ts", import.meta.url));
 const configWebBin = fileURLToPath(new URL("../../config-web/src/bin.ts", import.meta.url));
+// The supervisor process `krakey start` detaches; it relaunches boot on
+// RESTART_EXIT_CODE. Lives in THIS package, resolved from this file's location.
+const supervisorBin = fileURLToPath(new URL("./supervisor-entry.ts", import.meta.url));
 
 // The OpenKrakey install root (three levels up from packages/cli/src/bin.ts).
 // Lifecycle state and the install scripts live relative to this, never cwd.
@@ -86,22 +89,29 @@ new here? run 'krakey dashboard' for the guided browser setup (the Console).`;
 /**
  * Launch a sibling bin the way `npm test` runs tsx — `node --import tsx <bin>`.
  * The child shares this process group, so it handles Ctrl+C itself; we keep the
- * parent alive and just mirror the child's exit code. Used for FOREGROUND
- * children (run, dashboard's console server).
+ * parent alive and just mirror the child's exit code. Used for the FOREGROUND
+ * runtime (`krakey run`), supervised: a boot that exits with RESTART_EXIT_CODE
+ * is relaunched in place; the first terminal code becomes this process's exit
+ * code. The SIGINT no-op keeps Ctrl+C handled by the child, not us.
  */
-function spawnChild(binPath: string, extraArgs: string[], env?: NodeJS.ProcessEnv): void {
-  const child = spawn(process.execPath, ["--import", "tsx", binPath, ...extraArgs], {
-    stdio: "inherit",
-    env: env ?? process.env,
-  });
+async function spawnChild(binPath: string, extraArgs: string[], env?: NodeJS.ProcessEnv): Promise<void> {
   process.on("SIGINT", () => {});
-  child.on("error", (err) => {
-    console.error(`krakey: failed to launch ${binPath}: ${err.message}`);
-    process.exitCode = 1;
+  const launch = (): Promise<number | null> =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, ["--import", "tsx", binPath, ...extraArgs], {
+        stdio: "inherit",
+        env: env ?? process.env,
+      });
+      child.on("error", (err) => {
+        console.error(`krakey: failed to launch ${binPath}: ${err.message}`);
+        resolve(1);
+      });
+      child.on("close", (code) => resolve(code));
+    });
+  const code = await superviseLoop(launch, {
+    onRestart: () => console.log("krakey: restarting…"),
   });
-  child.on("close", (code) => {
-    process.exitCode = code ?? 1;
-  });
+  process.exitCode = code;
 }
 
 /** Ensure `.krakey/` exists so the PID list and log can be written. */
@@ -109,73 +119,35 @@ function ensureStateDir(): void {
   mkdirSync(STATE_DIR, { recursive: true });
 }
 
-/** Read a PID list file (one pid per line), tolerating a missing/garbled file. */
-function readPids(file: string): number[] {
-  if (!existsSync(file)) return [];
-  return readFileSync(file, "utf8")
-    .split("\n")
-    .map((line) => Number(line.trim()))
-    .filter((n) => Number.isInteger(n) && n > 0);
-}
-
-/**
- * Kill a whole process tree cross-platform, ignoring "already gone" errors.
- * On win32, taskkill /T tears down the tree. Elsewhere the detached child is a
- * process-group leader, so a negative pid signals the group; if that group is
- * gone we fall back to the bare pid. ESRCH ("no such process") is ignored.
- */
-function killTree(pid: number): void {
-  if (process.platform === "win32") {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ESRCH") {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch (err2) {
-        if ((err2 as NodeJS.ErrnoException).code !== "ESRCH") throw err2;
-      }
-    } else {
-      throw err;
-    }
-  }
-}
-
-/**
- * Kill every pid recorded in `file`, then clear it. Returns how many were
- * targeted. The list is cleared regardless — the recorded pids are no longer ours.
- */
-function stopPidFile(file: string): number {
-  const pids = readPids(file);
-  for (const pid of pids) killTree(pid);
-  if (existsSync(file)) writeFileSync(file, "", "utf8");
-  return pids.length;
-}
-
 /**
  * Stop the background RUNTIME (boot) instances only — the daemons `krakey start`
  * records in PID_FILE. Used by `restart` (which must NOT touch the dashboard) and
- * the best-effort step of `uninstall`.
+ * the best-effort step of `uninstall`. Returns how many recorded pids were still
+ * live when killed (see supervisor.stopPidFile).
  */
 function stopAll(): number {
-  return stopPidFile(PID_FILE);
+  return stopPidFile(PID_FILE).alive;
 }
 
 /**
  * Launch the runtime DETACHED — log to .krakey/krakey.log, record the pid, and
  * return immediately (the child is unref'd so it outlives this process). Shared
  * by `start` and `restart`.
+ *
+ * The detached child is the SUPERVISOR (not boot directly): it inherits the log
+ * fds via stdio and relaunches boot on RESTART_EXIT_CODE. PID_FILE records the
+ * supervisor's pid — killTree tears down its whole tree (boot included).
  */
 function startBackground(): void {
+  // Rotate the previous run's log to krakey.log.old FIRST, before anything reopens
+  // it — a fresh daemon starts with a clean log; the prior one is preserved as .old.
+  rotateLog(LOG_FILE);
   ensureStateDir();
   // Pin stable tokens for the runtime's token-gated surfaces BEFORE boot reads the
   // configs, so `krakey dashboard` can authenticate the framed Chat/Inspector panels.
   ensureSurfaceTokens(resolve(process.cwd(), PATHS.agentsDir));
   const logFd = openSync(LOG_FILE, "a");
-  const child = spawn(process.execPath, ["--import", "tsx", bootBin], {
+  const child = spawn(process.execPath, ["--import", "tsx", supervisorBin, "--boot", bootBin], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
     windowsHide: true,
@@ -226,7 +198,9 @@ switch (parsed.kind) {
     // Foreground runtime — boot all configured agents, Ctrl+C to stop.
     // Pin surface tokens first so a later `krakey dashboard` can authenticate Chat/Inspector.
     ensureSurfaceTokens(resolve(process.cwd(), PATHS.agentsDir));
-    spawnChild(bootBin, []);
+    // Supervised in-process: relaunches boot on RESTART_EXIT_CODE, mirrors the
+    // terminal exit code. Awaited so process.exitCode is set before we fall through.
+    await spawnChild(bootBin, []);
     break;
 
   case "start":
@@ -237,12 +211,22 @@ switch (parsed.kind) {
   case "stop": {
     // Stop EVERYTHING krakey backgrounded: the runtime daemon(s) AND the dashboard
     // (console + config-web). `restart` deliberately stops only the runtime.
-    const stopped = stopPidFile(PID_FILE) + stopPidFile(DASH_PID_FILE);
-    console.log(
-      stopped === 0
-        ? "krakey: no running instances"
-        : `krakey: stopped ${stopped} instance${stopped === 1 ? "" : "s"} (runtime + dashboard)`,
-    );
+    const runtime = stopPidFile(PID_FILE);
+    const dash = stopPidFile(DASH_PID_FILE);
+    // aliveTotal = pids that were actually running when killed; staleTotal = pids
+    // recorded in the files that had already died (stale entries we just cleaned up).
+    const aliveTotal = runtime.alive + dash.alive;
+    const staleTotal =
+      runtime.targeted - runtime.alive + (dash.targeted - dash.alive);
+    if (aliveTotal === 0 && staleTotal === 0) {
+      console.log("krakey: no running instances");
+    } else if (aliveTotal === 0) {
+      console.log("krakey: was not running (stale pid file removed)");
+    } else {
+      console.log(
+        `krakey: stopped ${aliveTotal} instance${aliveTotal === 1 ? "" : "s"} (runtime + dashboard)`,
+      );
+    }
     break;
   }
 
