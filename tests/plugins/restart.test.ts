@@ -25,18 +25,35 @@ import {
 //
 // F1 (restart-completed observability): the LIVE branch drops a persisted marker
 // on disk before invoking core.restart; on the NEXT boot the plugin's setup reads
-// that marker and, when FRESH, injects a one-shot 'restart completed' observation
+// that marker and, when FRESH, injects a PERSISTENT 'restart completed' observation
 // message so the model knows its restart succeeded and does NOT loop restart.now.
 // These tests are written from the pinned surface BEFORE it exists and go RED on
 // main (no marker.ts, no observation block, no note fields) — they turn green once
 // the F1 change lands. Every test uses its OWN fresh mkdtemp dataDir so marker
 // files never collide.
+//
+// DESIGN REVISION (post live re-test — a one-shot notice let the model re-derive
+// "I never restarted" on frame 2 and reboot again):
+//   * PERSISTENCE — the observation block is NOT one-shot. Once a fresh marker
+//     registers it, it renders the SAME single [restart completed] message on EVERY
+//     frame for the whole boot session (NO Events.LLM_RETURN clearing); it is
+//     removed only at teardown. The marker's completed:true flip guarantees only ONE
+//     boot ever shows it, so it cannot loop across reboots.
+//   * PER-AGENT MARKER — `restart` is a SHARED public plugin, so its dataDir is
+//     shared across agents; two agents would collide on one marker file. The marker
+//     helpers therefore key by agentId:
+//       markerPath(dataDir, agentId)   -> dataDir/restart-marker.<agentId>.json
+//       writeMarkerSync(dataDir, agentId, marker)
+//       readMarker(dataDir, agentId)   -> RestartMarker | null
+//       deleteMarker(dataDir, agentId)
+//     The plugin uses ctx.agentId. Our harness sets agentId = "a", so every
+//     marker-touching test passes AGENT_ID explicitly.
 // ---------------------------------------------------------------------------
 
 const RESTART = "restart.now";
 const GUIDANCE = "restart.guidance";
 const OBSERVATION = "restart.observation";
-const DEFAULT_MAX_AGE_MS = 300000; // config completedNoticeMaxAgeMs default
+const AGENT_ID = "a"; // the agentId makeCtx sets on the PluginContext
 
 const mod: any = await import("../../public_plugin/restart/index.ts").then((m) => m, () => null);
 function plugin(): any {
@@ -127,7 +144,7 @@ test("restart.now (dryRun): returns the plan WITHOUT restarting, with a node lau
   assert.equal(res.command[0], process.execPath, "command starts with the node executable");
   // F1: dryRun must NOT persist a marker.
   assert.equal(
-    fs.existsSync(markerPath(dataDir)),
+    fs.existsSync(markerPath(dataDir, AGENT_ID)),
     false,
     "dryRun must NOT write a restart marker to disk",
   );
@@ -164,8 +181,10 @@ test("restart.now (live): writes a marker { completed:false } with requestedAt �
   await sys.actions.invoke(RESTART, { reason: "loading a new plugin" });
   const after = Date.now();
 
-  assert.equal(fs.existsSync(markerPath(dataDir)), true, "live restart must persist a marker file");
-  const m = readMarker(dataDir);
+  const path = markerPath(dataDir, AGENT_ID);
+  assert.equal(fs.existsSync(path), true, "live restart must persist a marker file");
+  assert.match(path, /restart-marker\.a\.json$/, "the marker filename must include the agentId");
+  const m = readMarker(dataDir, AGENT_ID);
   assert.ok(m, "marker must read back as a valid RestartMarker");
   assert.equal(m!.completed, false, "the freshly written marker must be completed:false");
   assert.equal(m!.reason, "loading a new plugin", "marker must carry the given reason");
@@ -182,7 +201,7 @@ test("restart.now (live): marker writes BEFORE core.restart is invoked (observab
   let markerAtInvokeTime: RestartMarker | null = null;
   sys.actions.register("core.restart", async () => {
     // The marker must already be on disk by the time core.restart runs.
-    markerAtInvokeTime = readMarker(dataDir);
+    markerAtInvokeTime = readMarker(dataDir, AGENT_ID);
     return { restarting: true };
   });
   await sys.actions.invoke(RESTART, {});
@@ -204,7 +223,7 @@ test("restart.now (live) with reason omitted: marker.reason is the empty string"
   const { sys, dataDir } = await setup({});
   sys.actions.register("core.restart", async () => ({ restarting: true }));
   await sys.actions.invoke(RESTART, {});
-  const m = readMarker(dataDir);
+  const m = readMarker(dataDir, AGENT_ID);
   assert.ok(m, "marker present");
   assert.equal(m!.reason, "", "an omitted reason persists as the empty string");
 });
@@ -224,7 +243,7 @@ test("restart.now (degrade): writes NO marker and carries a non-empty note menti
   const { sys, dataDir } = await setup({});
   const res: any = await sys.actions.invoke(RESTART, {});
   assert.equal(
-    fs.existsSync(markerPath(dataDir)),
+    fs.existsSync(markerPath(dataDir, AGENT_ID)),
     false,
     "the degrade path must NOT write a restart marker",
   );
@@ -240,7 +259,7 @@ test("restart.now (degrade): writes NO marker and carries a non-empty note menti
 test("setup with a FRESH marker: registers the 'restart.observation' messages block at priority 250", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 5000; // 5s ago — well within the 5-min window
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store } = await setup({}, dataDir);
   const b = store.get(OBSERVATION);
@@ -253,7 +272,7 @@ test("setup with a FRESH marker: the observation renders ONE {role:'user', name:
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 5000;
   const iso = new Date(requestedAt).toISOString();
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store } = await setup({}, dataDir);
   const msgs = await renderMessages(store.get(OBSERVATION)!);
@@ -271,7 +290,7 @@ test("setup with a FRESH marker: the observation renders ONE {role:'user', name:
 test("setup with a FRESH marker whose reason is '': the completed message OMITS the reason clause", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 5000;
-  writeMarkerSync(dataDir, { requestedAt, reason: "", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "", completed: false });
 
   const { store } = await setup({}, dataDir);
   const msgs = await renderMessages(store.get(OBSERVATION)!);
@@ -285,41 +304,61 @@ test("setup with a FRESH marker whose reason is '': the completed message OMITS 
 test("setup with a FRESH marker: rewrites the on-disk marker to completed:true (state transition)", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 5000;
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   await setup({}, dataDir);
-  const m = readMarker(dataDir);
+  const m = readMarker(dataDir, AGENT_ID);
   assert.ok(m, "marker must still exist after a fresh-marker setup");
   assert.equal(m!.completed, true, "setup must flip the fresh marker to completed:true");
   assert.equal(m!.requestedAt, requestedAt, "requestedAt must be preserved when marking completed");
 });
 
 // ===========================================================================
-// F1 — setup() one-shot: after LLM_RETURN the observation renders []
+// F1 (REVISED) — PERSISTENCE: the observation is NOT one-shot. It renders the same
+// single [restart completed] message on EVERY frame for the whole boot session;
+// Events.LLM_RETURN must NOT clear it. (Only teardown removes it, and the disk
+// marker's completed:true flip guarantees just ONE boot ever shows it.)
 // ===========================================================================
 
-test("setup FRESH then LLM_RETURN: the observation block renders [] (one-shot; shown once then retired)", async () => {
+test("setup FRESH then repeated LLM_RETURN: the observation STILL renders the same single completed message (NOT one-shot)", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 5000;
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  const iso = new Date(requestedAt).toISOString();
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store, sys } = await setup({}, dataDir);
   const block = store.get(OBSERVATION);
-  assert.ok(block, "observation block present before the return");
+  assert.ok(block, "observation block present after setup");
 
-  // First render shows the message...
+  // Frame 1: renders the completed message.
   const first = await renderMessages(block!);
-  assert.equal(first.length, 1, "renders the completed message before llm.return");
+  assert.equal(first.length, 1, "frame 1 renders the completed message");
+  assert.match(messageText(first[0]), /\[restart completed\]/i, "frame 1 message is the completed notice");
 
-  // ...then a single frame's llm.return retires it.
-  sys.events.emit(Events.LLM_RETURN, { at: Date.now(), data: {} });
-  await Promise.resolve();
+  // Several frames' llm.return must NOT clear the notice (the bug we are guarding against).
+  for (let i = 0; i < 3; i++) {
+    sys.events.emit(Events.LLM_RETURN, { at: Date.now(), data: {} });
+    await Promise.resolve();
+  }
 
-  // Re-fetch (the block may be removed, or may render []): either way it contributes nothing.
-  const after = store.get(OBSERVATION);
-  const rendered = after ? await after.render() : [];
-  assert.ok(Array.isArray(rendered), "after llm.return the observation must render an array");
-  assert.equal((rendered as Message[]).length, 0, "after llm.return the observation contributes no messages");
+  // The block is still registered and still renders the SAME single message.
+  const afterBlock = store.get(OBSERVATION);
+  assert.ok(afterBlock, "the observation block must remain registered across frames (removed only at teardown)");
+  const later = await renderMessages(afterBlock!);
+  assert.equal(later.length, 1, "the observation still renders exactly one message after repeated llm.return");
+  const text = messageText(later[0]);
+  assert.match(text, /\[restart completed\]/i, "it is still the same [restart completed] notice");
+  assert.ok(text.includes(iso), "it still carries the original requestedAt ISO time");
+});
+
+test("teardown removes the persistent observation block", async () => {
+  const dataDir = freshDataDir();
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt: Date.now() - 5000, reason: "loading a new plugin", completed: false });
+
+  const { p, store } = await setup({}, dataDir);
+  assert.ok(store.get(OBSERVATION), "observation present before teardown");
+  await p.teardown();
+  assert.equal(store.get(OBSERVATION), undefined, "teardown must remove the observation block");
 });
 
 // ===========================================================================
@@ -328,12 +367,12 @@ test("setup FRESH then LLM_RETURN: the observation block renders [] (one-shot; s
 
 test("setup with a completed:true marker: NO observation block and the marker file is deleted", async () => {
   const dataDir = freshDataDir();
-  writeMarkerSync(dataDir, { requestedAt: Date.now() - 5000, reason: "loading a new plugin", completed: true });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt: Date.now() - 5000, reason: "loading a new plugin", completed: true });
 
   const { store } = await setup({}, dataDir);
   assert.equal(store.get(OBSERVATION), undefined, "a completed marker must NOT register an observation block");
   assert.equal(
-    fs.existsSync(markerPath(dataDir)),
+    fs.existsSync(markerPath(dataDir, AGENT_ID)),
     false,
     "a completed marker must be deleted on setup",
   );
@@ -346,12 +385,12 @@ test("setup with a completed:true marker: NO observation block and the marker fi
 test("setup with a STALE marker (10 min old, default max 5 min): NO block and the marker is deleted", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 10 * 60 * 1000; // 10 minutes ago
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store } = await setup({}, dataDir); // default completedNoticeMaxAgeMs = 300000 (5 min)
   assert.equal(store.get(OBSERVATION), undefined, "a stale marker must NOT register an observation block");
   assert.equal(
-    fs.existsSync(markerPath(dataDir)),
+    fs.existsSync(markerPath(dataDir, AGENT_ID)),
     false,
     "a stale marker must be deleted on setup",
   );
@@ -360,7 +399,7 @@ test("setup with a STALE marker (10 min old, default max 5 min): NO block and th
 test("setup with a future-skewed marker (requestedAt = now + 30s): still FRESH (clock-skew tolerance)", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() + 30 * 1000; // 30s in the future — inside the -60000ms skew window
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store } = await setup({}, dataDir);
   const b = store.get(OBSERVATION);
@@ -371,12 +410,12 @@ test("setup with a future-skewed marker (requestedAt = now + 30s): still FRESH (
 test("setup honours a custom completedNoticeMaxAgeMs: a 30s-old marker is STALE when max is 10000ms", async () => {
   const dataDir = freshDataDir();
   const requestedAt = Date.now() - 30 * 1000; // 30s ago
-  writeMarkerSync(dataDir, { requestedAt, reason: "loading a new plugin", completed: false });
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt, reason: "loading a new plugin", completed: false });
 
   const { store } = await setup({ completedNoticeMaxAgeMs: 10000 }, dataDir); // 10s window
   assert.equal(store.get(OBSERVATION), undefined, "a marker older than the configured window must be treated as stale");
   assert.equal(
-    fs.existsSync(markerPath(dataDir)),
+    fs.existsSync(markerPath(dataDir, AGENT_ID)),
     false,
     "the stale marker must be deleted on setup",
   );
@@ -395,30 +434,30 @@ test("setup with NO marker file: no observation block and no throw (absent = no-
 test("setup with a CORRUPT marker file ('{not json'): no block, no throw, and readMarker returns null", async () => {
   const dataDir = freshDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(markerPath(dataDir), "{not json", "utf8");
+  fs.writeFileSync(markerPath(dataDir, AGENT_ID), "{not json", "utf8");
 
   // setup must not throw on a corrupt marker.
   const { store } = await setup({}, dataDir);
   assert.equal(store.get(OBSERVATION), undefined, "a corrupt marker must not register an observation block");
-  assert.equal(readMarker(dataDir), null, "readMarker must return null for a corrupt file");
+  assert.equal(readMarker(dataDir, AGENT_ID), null, "readMarker must return null for a corrupt file");
 });
 
 test("setup with a SHAPE-INVALID marker (missing fields): no block, no throw", async () => {
   const dataDir = freshDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
   // Valid JSON but not a RestartMarker (no requestedAt/completed).
-  fs.writeFileSync(markerPath(dataDir), JSON.stringify({ hello: "world" }), "utf8");
+  fs.writeFileSync(markerPath(dataDir, AGENT_ID), JSON.stringify({ hello: "world" }), "utf8");
 
   const { store } = await setup({}, dataDir);
   assert.equal(store.get(OBSERVATION), undefined, "a shape-invalid marker must not register an observation block");
-  assert.equal(readMarker(dataDir), null, "readMarker must return null for a shape-invalid file");
+  assert.equal(readMarker(dataDir, AGENT_ID), null, "readMarker must return null for a shape-invalid file");
 });
 
 // ===========================================================================
 // F1 — marker.ts helpers (direct unit coverage of the pinned surface)
 // ===========================================================================
 
-test("marker helpers: writeMarkerSync then readMarker round-trips a RestartMarker", () => {
+test("marker helpers: writeMarkerSync then readMarker round-trips a RestartMarker (per agentId)", () => {
   const dataDir = freshDataDir();
   const marker: RestartMarker = {
     requestedAt: 1_700_000_000_000,
@@ -426,38 +465,63 @@ test("marker helpers: writeMarkerSync then readMarker round-trips a RestartMarke
     completed: false,
     command: [process.execPath, "x.js"],
   };
-  writeMarkerSync(dataDir, marker);
-  const back = readMarker(dataDir);
+  writeMarkerSync(dataDir, AGENT_ID, marker);
+  const back = readMarker(dataDir, AGENT_ID);
   assert.deepEqual(back, marker, "readMarker must round-trip exactly what writeMarkerSync wrote");
 });
 
-test("marker helpers: markerPath is dataDir/restart-marker.json", () => {
+test("marker helpers: markerPath is dataDir/restart-marker.<agentId>.json", () => {
   const dataDir = freshDataDir();
-  assert.equal(markerPath(dataDir), join(dataDir, "restart-marker.json"));
+  assert.equal(markerPath(dataDir, "a"), join(dataDir, "restart-marker.a.json"));
+  assert.equal(markerPath(dataDir, "beta"), join(dataDir, "restart-marker.beta.json"));
 });
 
 test("marker helpers: readMarker on a missing file returns null (no throw)", () => {
   const dataDir = freshDataDir(); // nothing written
-  assert.equal(readMarker(dataDir), null, "missing marker reads back as null");
+  assert.equal(readMarker(dataDir, AGENT_ID), null, "missing marker reads back as null");
 });
 
 test("marker helpers: writeMarkerSync creates the directory recursively when absent", () => {
   const base = freshDataDir();
   const nested = join(base, "deep", "nested"); // does not exist yet
   const marker: RestartMarker = { requestedAt: Date.now(), reason: "", completed: false };
-  writeMarkerSync(nested, marker); // must mkdir -p
-  assert.equal(fs.existsSync(markerPath(nested)), true, "writeMarkerSync must create missing parent dirs");
-  assert.deepEqual(readMarker(nested), marker, "the marker must read back after a recursive write");
+  writeMarkerSync(nested, AGENT_ID, marker); // must mkdir -p
+  assert.equal(fs.existsSync(markerPath(nested, AGENT_ID)), true, "writeMarkerSync must create missing parent dirs");
+  assert.deepEqual(readMarker(nested, AGENT_ID), marker, "the marker must read back after a recursive write");
 });
 
 test("marker helpers: deleteMarker removes an existing marker and is a no-op when absent", () => {
   const dataDir = freshDataDir();
-  writeMarkerSync(dataDir, { requestedAt: Date.now(), reason: "", completed: true });
-  assert.equal(fs.existsSync(markerPath(dataDir)), true, "precondition: marker exists");
-  deleteMarker(dataDir);
-  assert.equal(fs.existsSync(markerPath(dataDir)), false, "deleteMarker removes the file");
+  writeMarkerSync(dataDir, AGENT_ID, { requestedAt: Date.now(), reason: "", completed: true });
+  assert.equal(fs.existsSync(markerPath(dataDir, AGENT_ID)), true, "precondition: marker exists");
+  deleteMarker(dataDir, AGENT_ID);
+  assert.equal(fs.existsSync(markerPath(dataDir, AGENT_ID)), false, "deleteMarker removes the file");
   // Best-effort: a second delete on an absent file must not throw.
-  assert.doesNotThrow(() => deleteMarker(dataDir), "deleteMarker on an absent file must be a no-op");
+  assert.doesNotThrow(() => deleteMarker(dataDir, AGENT_ID), "deleteMarker on an absent file must be a no-op");
+});
+
+test("marker helpers: two agentIds sharing one dataDir keep INDEPENDENT markers (multi-agent isolation)", () => {
+  const dataDir = freshDataDir(); // ONE shared public-plugin dataDir
+  const markerA: RestartMarker = { requestedAt: 111, reason: "agent A", completed: false };
+  const markerB: RestartMarker = { requestedAt: 222, reason: "agent B", completed: true };
+
+  writeMarkerSync(dataDir, "alpha", markerA);
+  writeMarkerSync(dataDir, "bravo", markerB);
+
+  // Distinct files on disk — no collision.
+  assert.notEqual(
+    markerPath(dataDir, "alpha"),
+    markerPath(dataDir, "bravo"),
+    "each agentId must map to a distinct marker path",
+  );
+  // Each agent reads back ONLY its own marker.
+  assert.deepEqual(readMarker(dataDir, "alpha"), markerA, "agent alpha reads its own marker");
+  assert.deepEqual(readMarker(dataDir, "bravo"), markerB, "agent bravo reads its own marker");
+
+  // Deleting one agent's marker leaves the other's intact.
+  deleteMarker(dataDir, "alpha");
+  assert.equal(readMarker(dataDir, "alpha"), null, "alpha's marker is gone after its own delete");
+  assert.deepEqual(readMarker(dataDir, "bravo"), markerB, "bravo's marker survives alpha's delete");
 });
 
 // ===========================================================================
