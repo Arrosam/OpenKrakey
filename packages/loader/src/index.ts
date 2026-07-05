@@ -13,11 +13,11 @@ import { pathToFileURL } from "node:url";
 
 import type { Loader } from "../../../contracts/loader";
 import type { Plugin, PluginContext } from "../../../contracts/plugin";
-import type { EventSystem } from "../../../contracts/event-system";
+import type { EventSystem, EventBus, ActionBus, Unsub } from "../../../contracts/event-system";
 import type { Orchestrator } from "../../../contracts/orchestrator";
 import type { AgentDefinition } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
-import { DependencyError, PluginLoadError } from "../../../shared/errors";
+import { PluginLoadError } from "../../../shared/errors";
 import { type Logger, consoleLogger, tagged } from "../../../shared/logging";
 import { Events } from "../../../shared/actions";
 
@@ -143,10 +143,23 @@ export function createLoader(deps: LoaderDeps): Loader {
     }
 
     // 2. PASS 1 — import + validate every plugin (one instance per Agent via its
-    //    factory), collecting the full load set before any setup runs.
+    //    factory), collecting the full load set before any setup runs. A plugin
+    //    whose import/instantiation throws is SKIPPED (not rethrown): warn on both
+    //    sinks (naming the id + underlying error) and drop it from the load set —
+    //    its siblings still load (skip-and-continue).
+    const skipped = new Set<string>();
     const loadSet: Array<{ id: string; plugin: Plugin; dataDir: string }> = [];
     for (const [id, { codeDir, dataDir }] of resolved) {
-      const plugin = await importPlugin(id, codeDir);
+      let plugin: Plugin;
+      try {
+        plugin = await importPlugin(id, codeDir);
+      } catch (err) {
+        const detail = "plugin '" + id + "' failed to import and will be SKIPPED: " + err;
+        log.warn(detail);
+        pushLogEntry("warn", "core:loader", detail);
+        skipped.add(id);
+        continue;
+      }
       loadSet.push({ id, plugin, dataDir });
     }
 
@@ -170,26 +183,63 @@ export function createLoader(deps: LoaderDeps): Loader {
     //    that unblock others. Declared order is preserved among plugins ready
     //    together, so independents keep their order. If a full scan finds nothing
     //    ready while plugins remain, the leftover deps are genuinely unsatisfiable
-    //    (a cycle, or a missing provider) — fail loudly, exactly as a strict-order
-    //    check would have. All-or-nothing: ANY throw here tears down the plugins
-    //    already set up. Pass 1 needs no rollback — nothing is set up yet.
+    //    (a cycle, a skipped/missing provider) — SKIP the first still-pending plugin
+    //    (warn, naming the id + the unmet requirement) and re-sweep; cascades resolve
+    //    one plugin at a time. A plugin whose setup() throws is likewise SKIPPED, not
+    //    rolled back — plugins already set up STAY UP (skip-and-continue).
     const isMet = (req: string): boolean =>
       req.includes(".") ? deps.events.actions.has(req) : available.has(req);
     const firstUnmet = (plugin: Plugin): string | undefined =>
       (plugin.manifest.requires ?? []).find((req) => !isMet(req));
 
-    // Build the PluginContext for one plugin and run its setup.
+    // Build the PluginContext for one plugin and run its setup. Every mutating
+    // surface a plugin touches through its ctx is TRACKED so that, if its setup()
+    // throws AFTER a partial registration, we can UNDO exactly that plugin's
+    // side-effects before the sweep continues — otherwise a leaked action/listener
+    // would falsely satisfy a dependent's `requires` (and a half-initialized
+    // handler could later run against never-finished state). Tracking is a few
+    // cheap closures per plugin; on success nothing is undone.
     const setUp = async (id: string, plugin: Plugin, dataDir: string): Promise<void> => {
+      const unsubs: Unsub[] = [];
+      const blockIds = new Set<string>();
+      // Thin pass-throughs to the real buses that also collect the Unsub each
+      // register/on returns; all other bus methods delegate unchanged.
+      const trackedActions: ActionBus = {
+        register: (action, handler) => {
+          const unsub = deps.events.actions.register(action, handler);
+          unsubs.push(unsub);
+          return unsub;
+        },
+        invoke: (action, params) => deps.events.actions.invoke(action, params),
+        has: (action) => deps.events.actions.has(action),
+        list: () => deps.events.actions.list(),
+      };
+      const trackedEvents: EventBus = {
+        emit: (event, payload) => deps.events.events.emit(event, payload),
+        on: (event, handler) => {
+          const unsub = deps.events.events.on(event, handler);
+          unsubs.push(unsub);
+          return unsub;
+        },
+      };
       const ctx: PluginContext = {
         agentId: deps.agentId,
-        events: deps.events.events,
-        actions: deps.events.actions,
+        events: trackedEvents,
+        actions: trackedActions,
         config: deps.def.config?.[id] ?? {},
         dataDir,
         llm: deps.library,
-        setBlock: (b) => deps.orchestrator.setBlock(b),
+        // Remember blocks this plugin adds (balance against its own removes) so
+        // an undo removes only blocks it still owns, never another plugin's.
+        setBlock: (b) => {
+          blockIds.add(b.id);
+          deps.orchestrator.setBlock(b);
+        },
         getBlock: (bid) => deps.orchestrator.getBlock(bid),
-        removeBlock: (bid) => deps.orchestrator.removeBlock(bid),
+        removeBlock: (bid) => {
+          blockIds.delete(bid);
+          return deps.orchestrator.removeBlock(bid);
+        },
         listBlocks: () => deps.orchestrator.listBlocks(),
         // Diagnostics go to the host Logger tagged with the plugin id; the
         // user-facing print goes VERBATIM to the print sink. Both are also
@@ -213,32 +263,63 @@ export function createLoader(deps: LoaderDeps): Loader {
           pushLogEntry("print", id, text);
         },
       };
-      await plugin.setup(ctx);
+      try {
+        await plugin.setup(ctx);
+      } catch (err) {
+        // Partial registration is now undone (each op isolated) BEFORE we return
+        // to the sweep — so the leaked action/listener is gone before any
+        // dependent's readiness is re-evaluated. We do NOT call the plugin's own
+        // teardown(): a plugin that threw mid-setup is in an undefined state.
+        for (const unsub of unsubs) {
+          try {
+            unsub();
+          } catch {
+            // isolated — a failed unsub must not abort the rest of the undo
+          }
+        }
+        for (const bid of blockIds) {
+          try {
+            deps.orchestrator.removeBlock(bid);
+          } catch {
+            // isolated — see above
+          }
+        }
+        throw err;
+      }
       loaded.push({ plugin, ctx });
     };
 
-    try {
-      const pending = [...loadSet];
-      while (pending.length > 0) {
-        // Earliest plugin (declared order) whose requirements are ALL met now.
-        const idx = pending.findIndex(({ plugin }) => firstUnmet(plugin) === undefined);
-        if (idx === -1) {
-          // Nothing can make progress — a dependency cycle or a missing provider.
-          // Report a representative culprit the way the old strict check would.
-          const { id, plugin } = pending[0];
-          throw new DependencyError(
-            "plugin '" + id + "' requires '" + firstUnmet(plugin) + "' which is not available",
-          );
-        }
-        const { id, plugin, dataDir } = pending.splice(idx, 1)[0];
-        await setUp(id, plugin, dataDir);
+    const pending = [...loadSet];
+    while (pending.length > 0) {
+      // Earliest plugin (declared order) whose requirements are ALL met now.
+      const idx = pending.findIndex(({ plugin }) => firstUnmet(plugin) === undefined);
+      if (idx === -1) {
+        // Nothing can make progress — a cycle, or a provider that was skipped /
+        // never declared. Skip the FIRST still-pending plugin (naming the id + the
+        // specific unmet requirement) and re-sweep; a dependent of a skipped
+        // provider is skipped on a later pass, one plugin at a time. This
+        // converges in <= pending.length passes.
+        const { id, plugin } = pending.shift()!;
+        const req = firstUnmet(plugin);
+        const detail =
+          "plugin '" + id + "' requires '" + req + "' which no loaded plugin provides — SKIPPED";
+        log.warn(detail);
+        pushLogEntry("warn", "core:loader", detail);
+        skipped.add(id);
+        continue;
       }
-    } catch (err) {
-      // Surface load/dependency failures on the bus too, so the inspector's
-      // Logs feed shows them. Mirror before rollback; load stays all-or-nothing.
-      pushLogEntry("error", "core:loader", "load failed: " + err);
-      await rollback();
-      throw err;
+      const { id, plugin, dataDir } = pending.splice(idx, 1)[0];
+      try {
+        await setUp(id, plugin, dataDir);
+      } catch (err) {
+        // setup() threw/rejected: SKIP this plugin (it is NOT pushed into
+        // loaded[], so its never-run teardown is never invoked) and CONTINUE —
+        // plugins already set up stay up (no rollback).
+        const detail = "plugin '" + id + "' failed to set up and will be SKIPPED: " + err;
+        log.warn(detail);
+        pushLogEntry("warn", "core:loader", detail);
+        skipped.add(id);
+      }
     }
   }
 
