@@ -15,8 +15,11 @@
  *   runs many agents in one process). It is inspector's OWN hub (not web's), on its
  *   own port, bound to LOOPBACK (127.0.0.1) with a per-process session TOKEN.
  *
- *   It is STRICTLY READ-ONLY — it EMITS NOTHING on the bus (no input.message, no
- *   clock.fire_now, no actions) and there is NO POST route. It SUBSCRIBES to all
+ *   It EMITS NOTHING on the bus (no input.message, no clock.fire_now, no actions).
+ *   It is otherwise read-only over HTTP with ONE exception: the token-gated
+ *   POST /api/agents/:id/clear (clear-logs), which mutates only inspector's OWN
+ *   capture state (the per-agent ring + persisted events.jsonl) — it never emits.
+ *   It SUBSCRIBES to all
  *   well-known `Events.*` and pushes a `Record` { seq, at, kind, agentId, corrId?,
  *   payload } into a bounded per-agent in-memory ring (default bufferSize 1000,
  *   FIFO drop-oldest, tracking `dropped`).
@@ -35,11 +38,18 @@
  *   order). Each handler is wrapped so a malformed payload never throws / breaks fan-out.
  *
  *   HTTP routes (all /api + / are token-gated EXCEPT GET / serves the page WITHOUT a
- *   token; READ-ONLY — no POST):
+ *   token; read-only apart from the single POST /clear below):
  *     - GET /                          -> 200 text/html dashboard page (token-free)
  *     - GET /api/agents                -> { agents: string[] } (online ids)
  *     - GET /api/agents/:id/snapshot   -> { records: Record[], dropped: number }; unknown id -> 404
  *     - GET /api/agents/:id/stream     -> SSE; each new record as { type:"record", record }; unknown id -> 404
+ *     - POST /api/agents/:id/clear     -> 200 { cleared:true, agentId:id }; unknown/malformed id -> 404;
+ *                                         GET/DELETE to /clear -> 404 (single method); missing/wrong
+ *                                         token -> 401 BEFORE any mutation (existing /api/agents/* gate).
+ *                                         Effect: clears that agent's in-memory ring (snapshot/query
+ *                                         afterwards return zero records) AND truncates its persisted
+ *                                         events.jsonl via the store's serialized write chain; highestSeq
+ *                                         is NOT reset (seq stays monotonic); SSE clients stay connected.
  *   R6: a record emitted on agent A's bus appears in A's snapshot/stream but NOT B's.
  *   Lifecycle: first setup binds the server; last teardown closes it (port freed).
  *
@@ -64,6 +74,12 @@ const EVENT_SYSTEM_URL = pathToFileURL(
 ).href;
 const PLUGIN_URL = pathToFileURL(
   path.resolve(REPO, "public_plugin", "inspector", "index.ts"),
+).href;
+// The per-agent persisted store module — imported DIRECTLY (in-process, via tsx)
+// by the EventStore.clear() unit test below, which needs to drive the serialized
+// write chain (append → clear → append) and re-load the file to observe truncation.
+const STORE_URL = pathToFileURL(
+  path.resolve(REPO, "public_plugin", "inspector", "store.ts"),
 ).href;
 
 let TMP: string;
@@ -123,14 +139,22 @@ const E = {
 const AGENTS = (process.env.INS_AGENTS || "alice,bob").split(",").filter(Boolean);
 // Optional per-agent bufferSize, comma-aligned with AGENTS (e.g. "3,1000").
 const BUFS = (process.env.INS_BUFS || "").split(",");
+// Optional per-agent persist flag, comma-aligned with AGENTS (e.g. "false,true").
+// Absent/blank ⇒ leave config.inspector.persist unset (defaults ON per the config
+// slice). "false"/"0"/"off" ⇒ persist:false (in-memory-only, store null).
+const PERSIST = (process.env.INS_PERSIST || "").split(",");
 const instances = {};
 
-function makeCtx(agentId, port, bufferSize){
+function makeCtx(agentId, port, bufferSize, persist){
   const sys = createEventSystem();
   const blocks = new Map();
   const inspectorCfg = { port };
   if (bufferSize !== undefined && bufferSize !== "" && bufferSize !== null) {
     inspectorCfg.bufferSize = Number(bufferSize);
+  }
+  if (persist !== undefined && persist !== "" && persist !== null) {
+    const p = String(persist).toLowerCase();
+    inspectorCfg.persist = !(p === "false" || p === "0" || p === "off" || p === "no");
   }
   return { sys, ctx: {
     agentId,
@@ -155,7 +179,7 @@ if (!mod || typeof mod.default !== "function") { emit("NOT_IMPLEMENTED"); proces
 let isFirst = true;
 let bi = 0;
 for (const a of AGENTS) {
-  const { sys, ctx } = makeCtx(a, isFirst ? 0 : 7718, BUFS[bi]);
+  const { sys, ctx } = makeCtx(a, isFirst ? 0 : 7718, BUFS[bi], PERSIST[bi]);
   isFirst = false; bi++;
   const plugin = mod.default();
   await plugin.setup(ctx);
@@ -265,6 +289,8 @@ interface Child {
   proc: ChildProcess;
   port: number;
   token: string;
+  /** The shared inspector dataDir; persisted files live at <dataDir>/<id>/events.jsonl. */
+  dataDir: string;
   lines: string[];
   send(cmd: string): void;
   waitFor(pred: (lines: string[]) => boolean, ms?: number): Promise<boolean>;
@@ -272,7 +298,17 @@ interface Child {
   notImplemented: boolean;
 }
 
-async function startChild(agents: string[], bufs?: number[]): Promise<Child> {
+/**
+ * @param bufs    optional per-agent bufferSize, comma-aligned with `agents`.
+ * @param persist optional per-agent persist flag (boolean), comma-aligned with
+ *                `agents`; omit an entry (or the whole array) to leave persist at
+ *                its config default (ON). Pass `false` for an in-memory-only agent.
+ */
+async function startChild(
+  agents: string[],
+  bufs?: number[],
+  persist?: boolean[],
+): Promise<Child> {
   const dataDir = fs.mkdtempSync(path.join(TMP, "data-"));
   const scriptPath = path.join(fs.mkdtempSync(path.join(TMP, "child-")), "inspector-harness.mts");
   fs.writeFileSync(scriptPath, CHILD, "utf8");
@@ -284,6 +320,7 @@ async function startChild(agents: string[], bufs?: number[]): Promise<Child> {
       INS_AGENTS: agents.join(","),
       INS_DATADIR: dataDir,
       INS_BUFS: bufs ? bufs.join(",") : "",
+      INS_PERSIST: persist ? persist.map((p) => String(p)).join(",") : "",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -327,6 +364,7 @@ async function startChild(agents: string[], bufs?: number[]): Promise<Child> {
     proc,
     port: 0,
     token: "",
+    dataDir,
     lines,
     send: (cmd) => {
       try {
@@ -499,6 +537,40 @@ const flat = (s: any): string => {
     return String(s);
   }
 };
+
+/** GET /api/agents/:id/query (authed); returns the documented { records, total, dropped } shape. */
+async function query(
+  c: Child,
+  id: string,
+): Promise<{ status: number; records: any[]; total: number; dropped: number }> {
+  const res = await fetch(api(c, "/api/agents/" + id + "/query"));
+  if (res.status !== 200) return { status: res.status, records: [], total: 0, dropped: 0 };
+  const body = (await res.json()) as { records: any[]; total: number; dropped: number };
+  return {
+    status: res.status,
+    records: body.records || [],
+    total: typeof body.total === "number" ? body.total : 0,
+    dropped: body.dropped || 0,
+  };
+}
+
+/**
+ * POST /api/agents/:id/clear WITH the session token (authed). Returns the parsed
+ * status + body so a test can assert the { cleared:true, agentId } contract.
+ */
+async function clear(
+  c: Child,
+  id: string,
+): Promise<{ status: number; body: any }> {
+  const res = await fetch(api(c, "/api/agents/" + id + "/clear"), { method: "POST" });
+  let body: any = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
+  }
+  return { status: res.status, body };
+}
 
 // ===========================================================================
 // Scenario 1 — PluginFactory / manifest shape (positive + structure)
@@ -1501,6 +1573,434 @@ test("inspector: the ring evicts oldest-first at capacity, preserves order, and 
       minRetained,
       "the oldest retained record (evt-" + (N - SIZE) + ") must carry the lowest of the retained seqs: " + flat(seqs),
     );
+  } finally {
+    await c.close();
+  }
+});
+
+// ###########################################################################
+// CLEAR-LOGS (added) — edge tests for the NEW token-gated
+//   POST /api/agents/:id/clear  =>  200 { cleared:true, agentId:id }
+// route and the EventStore.clear() it drives. Written from the APPROVED SPEC
+// ONLY; RED until the feature lands. They reuse the SAME child-process harness
+// (startChild / assertUp / base / api / snapshot / query / clear / sendAndWait)
+// as every test above — a real node:http server on an ephemeral port with a
+// pinned+printed session token.
+//
+// Contract under test (spec):
+//   - POST /clear (authed)                => 200 { cleared:true, agentId:id }
+//   - unknown / malformed id              => 404 (no throw)
+//   - GET or DELETE to /clear             => 404 (single method)
+//   - missing/wrong token                 => 401 BEFORE any mutation (the existing
+//                                            /api/agents/* gate; no new auth code)
+//   - effect: the agent's in-memory ring is emptied (snapshot & query return zero)
+//     AND its persisted events.jsonl is truncated on the store's SERIALIZED write
+//     chain; highestSeq is NOT reset (seq stays monotonic); SSE clients stay
+//     connected and records captured AFTER the clear flow normally.
+//   - persist:false (store null) and a path-hostile id (filePath null) still 200.
+// ###########################################################################
+
+// ===========================================================================
+// Clear-A — POST /clear without a token -> 401 BEFORE any mutation
+// (the pre-existing records survive; the 401 gate runs before the ring is touched)
+// ===========================================================================
+
+test("inspector(clear): POST /clear WITHOUT a token -> 401 and does NOT mutate the ring (records survive)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // Seed some records so we can prove a rejected clear left them untouched.
+    await sendAndWait(c, "in alice KEEP-1", "in");
+    await sendAndWait(c, "in alice KEEP-2", "in");
+    const seeded = await waitSnapshot(
+      c,
+      "alice",
+      (rs) => rs.some((r) => /KEEP-1/.test(flat(r.payload))) && rs.some((r) => /KEEP-2/.test(flat(r.payload))),
+    );
+    assert.ok(seeded.length >= 2, "the two seed records are present before the clear attempt");
+
+    // POST /clear with NO token — must be rejected by the existing /api/agents/* gate.
+    const noTok = await fetch(base(c) + "/api/agents/alice/clear", { method: "POST" });
+    assert.equal(noTok.status, 401, "POST /clear requires the token (401 before any mutation)");
+    // And a WRONG token is likewise rejected before mutating.
+    const badTok = await fetch(base(c) + "/api/agents/alice/clear?token=not-the-real-token", {
+      method: "POST",
+    });
+    assert.equal(badTok.status, 401, "a wrong token is rejected on /clear");
+
+    // Give any (erroneous) mutation a chance to land, then prove nothing was cleared.
+    await new Promise((r) => setTimeout(r, 150));
+    const after = await snapshot(c, "alice");
+    assert.equal(after.status, 200, "the authed snapshot is still reachable");
+    assert.ok(
+      after.records.some((r) => /KEEP-1/.test(flat(r.payload))) &&
+        after.records.some((r) => /KEEP-2/.test(flat(r.payload))),
+      "the 401'd clear must NOT have emptied the ring — the pre-existing records survive: " + flat(after.records),
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Clear-B — authed POST /clear -> 200 { cleared:true, agentId }; snapshot & query
+// afterwards return zero records
+// ===========================================================================
+
+test("inspector(clear): authed POST /clear -> 200 {cleared:true, agentId}, then snapshot=[] and query={records:[],total:0}", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // Seed a mix of records.
+    await sendAndWait(c, "in alice PRE-A", "in");
+    await sendAndWait(c, "out alice PRE-B", "out");
+    await sendAndWait(c, "log alice info core:x PRE-C", "log");
+    const seeded = await waitSnapshot(c, "alice", (rs) => rs.length >= 3);
+    assert.ok(seeded.length >= 3, "three records are captured before the clear");
+
+    // Authed clear.
+    const cleared = await clear(c, "alice");
+    assert.equal(cleared.status, 200, "an authed POST /clear returns 200");
+    assert.deepEqual(
+      cleared.body,
+      { cleared: true, agentId: "alice" },
+      "the clear body is exactly { cleared:true, agentId:'alice' }: " + flat(cleared.body),
+    );
+
+    // The in-memory ring is now empty via BOTH read surfaces.
+    const snapAfter = await snapshot(c, "alice");
+    assert.equal(snapAfter.status, 200, "snapshot is still reachable after the clear (agent stays online)");
+    assert.deepEqual(snapAfter.records, [], "snapshot.records is empty after the clear: " + flat(snapAfter.records));
+
+    const qAfter = await query(c, "alice");
+    assert.equal(qAfter.status, 200, "query is still reachable after the clear");
+    assert.deepEqual(qAfter.records, [], "query.records is empty after the clear: " + flat(qAfter.records));
+    assert.equal(qAfter.total, 0, "query.total is 0 after the clear (got " + qAfter.total + ")");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Clear-C — unknown id -> 404; malformed / URI-hostile id -> 404 (no throw)
+// ===========================================================================
+
+test("inspector(clear): POST /clear for an UNKNOWN agent id -> 404", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const res = await fetch(api(c, "/api/agents/ghost/clear"), { method: "POST" });
+    assert.equal(res.status, 404, "clearing an unknown agent is 404");
+    // Body shape, per spec, is the standard unknown-agent error.
+    let body: any = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* tolerate a non-JSON 404 body */
+    }
+    if (body) {
+      assert.equal(body.error, "unknown agent", "the 404 body reports 'unknown agent': " + flat(body));
+    }
+  } finally {
+    await c.close();
+  }
+});
+
+test("inspector(clear): POST /clear with a MALFORMED percent-encoded id -> 404 (no crash)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // "%" is a truncated percent-escape; decoding the :id segment must not throw
+    // out of the handler — it resolves to a normal unknown-id 404.
+    const malformed = await probe(api(c, "/api/agents/%/clear"), { method: "POST" });
+    assert.ok(
+      malformed.ok,
+      "POST /api/agents/%/clear must answer, not drop the connection (net error: " + (malformed.error || "") + ")",
+    );
+    assert.equal(malformed.status, 404, "a malformed percent-encoded id resolves to 404, got " + malformed.status);
+
+    // Crash detector: the server is still healthy afterwards.
+    const after = await probe(api(c, "/api/agents"));
+    assert.ok(after.ok, "the server survives the malformed /clear id (subsequent request dropped: " + (after.error || "") + ")");
+    assert.equal(after.status, 200, "a normal request after the malformed /clear id returns 200 (server survived)");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Clear-D — /clear is a SINGLE method: GET and DELETE to /clear -> 404
+// ===========================================================================
+
+test("inspector(clear): GET /api/agents/:id/clear -> 404 (clear is POST-only)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // Authed GET to /clear (token present so we test the METHOD gate, not auth).
+    const res = await fetch(api(c, "/api/agents/alice/clear"));
+    assert.equal(res.status, 404, "GET /clear is not a route (clear is POST-only)");
+  } finally {
+    await c.close();
+  }
+});
+
+test("inspector(clear): DELETE /api/agents/:id/clear -> 404 (clear is POST-only)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const res = await fetch(api(c, "/api/agents/alice/clear"), { method: "DELETE" });
+    assert.equal(res.status, 404, "DELETE /clear is not a route (clear is POST-only)");
+
+    // And a wrong method left the ring intact: seed, DELETE, still there.
+    await sendAndWait(c, "in alice DEL-KEEP", "in");
+    const recs = await waitSnapshot(c, "alice", (rs) => rs.some((r) => /DEL-KEEP/.test(flat(r.payload))));
+    assert.ok(
+      recs.some((r) => /DEL-KEEP/.test(flat(r.payload))),
+      "a DELETE to /clear is a no-op 404 — captured records are unaffected",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Clear-E — a persist:false agent still clears (200, no throw; store is null)
+// ===========================================================================
+
+test("inspector(clear): a persist:false agent -> POST /clear still 200 and empties the ring (store null, no throw)", async () => {
+  // persist:false ⇒ EventStore.load returns an in-memory-only store (reg.store null).
+  const c = await startChild(["alice"], undefined, [false]);
+  try {
+    assertUp(c);
+    await sendAndWait(c, "in alice NOPERSIST-1", "in");
+    await sendAndWait(c, "in alice NOPERSIST-2", "in");
+    const seeded = await waitSnapshot(c, "alice", (rs) => rs.length >= 2);
+    assert.ok(seeded.length >= 2, "records are captured in-memory even with persistence off");
+
+    const cleared = await clear(c, "alice");
+    assert.equal(cleared.status, 200, "clear on a persist:false agent still returns 200 (no store to truncate)");
+    assert.deepEqual(
+      cleared.body,
+      { cleared: true, agentId: "alice" },
+      "the clear body is unchanged for a persist:false agent: " + flat(cleared.body),
+    );
+
+    const after = await snapshot(c, "alice");
+    assert.deepEqual(after.records, [], "the ring is emptied even with no persisted store: " + flat(after.records));
+
+    // The child must not have reported any thrown handler error from the clear.
+    assert.ok(
+      !c.lines.some((l) => l.startsWith("ERR:")),
+      "clearing a persist:false agent must not throw: " + flat(c.lines.filter((l) => l.startsWith("ERR:"))),
+    );
+    // Server still healthy.
+    const roster = await fetch(api(c, "/api/agents")).then((r) => r.status);
+    assert.equal(roster, 200, "the server survives a persist:false clear");
+  } finally {
+    await c.close();
+  }
+});
+
+// ===========================================================================
+// Clear-F — EventStore.clear() UNIT test (import the store module directly).
+// Pins: after append+flush the file has lines; clear+flush truncates it to empty
+// and window() (fresh re-load) returns []; the interleaved append -> clear ->
+// append order is enforced by the SAME serialized promise chain (only the
+// post-clear append survives on disk). Best-effort clear() never throws, and
+// works for persist:false (store null path) and a path-hostile id (filePath null).
+// ===========================================================================
+
+test("inspector(clear): EventStore.clear() truncates the file on the serialized chain; a re-load window() returns []", async () => {
+  const mod = (await import(STORE_URL).catch(() => null)) as any;
+  assert.ok(mod && typeof mod.EventStore === "function", "the store module must export an EventStore class");
+  const { EventStore } = mod;
+
+  const dataDir = fs.mkdtempSync(path.join(TMP, "store-clear-"));
+  const cfg = { maxPersistedEntries: 5000, retentionMs: 0, persist: true };
+  const agentId = "alice";
+  const filePath = path.join(dataDir, agentId, "events.jsonl");
+
+  const mk = (seq: number, at: number, text: string) => ({
+    seq,
+    at,
+    kind: "log",
+    agentId,
+    payload: { data: { level: "info", pluginId: "core:test", text } },
+  });
+
+  // 1) Fresh store, append three records, flush → the file exists with 3 lines.
+  const store = await EventStore.load(dataDir, agentId, cfg);
+  store.append(mk(1, Date.now(), "L1"));
+  store.append(mk(2, Date.now(), "L2"));
+  store.append(mk(3, Date.now(), "L3"));
+  await store.flush();
+
+  const before = fs.readFileSync(filePath, "utf8");
+  const beforeLines = before.split("\n").filter((l) => l.length > 0);
+  assert.equal(beforeLines.length, 3, "the file holds the three appended lines before clear: " + flat(beforeLines));
+
+  // 2) clear() must exist and truncate on the SAME chain. It empties in-memory
+  //    state immediately; the disk truncate is queued — flush() awaits it.
+  assert.equal(typeof store.clear, "function", "EventStore must expose a clear(): void method");
+  store.clear();
+  await store.flush();
+
+  const after = fs.readFileSync(filePath, "utf8");
+  const afterLines = after.split("\n").filter((l) => l.length > 0);
+  assert.equal(afterLines.length, 0, "the file is truncated to zero lines after clear+flush: " + flat(afterLines));
+
+  // 3) A FRESH re-load of the same file returns an empty restored window.
+  const reloaded = await EventStore.load(dataDir, agentId, cfg);
+  assert.deepEqual(reloaded.window(), [], "a re-loaded store window() is empty after a clear");
+});
+
+test("inspector(clear): interleaved append -> clear -> append leaves ONLY the post-clear append on disk (serialized-chain order)", async () => {
+  const mod = (await import(STORE_URL).catch(() => null)) as any;
+  assert.ok(mod && typeof mod.EventStore === "function", "the store module must export an EventStore class");
+  const { EventStore } = mod;
+
+  const dataDir = fs.mkdtempSync(path.join(TMP, "store-order-"));
+  const cfg = { maxPersistedEntries: 5000, retentionMs: 0, persist: true };
+  const agentId = "alice";
+  const filePath = path.join(dataDir, agentId, "events.jsonl");
+
+  const mk = (seq: number, text: string) => ({
+    seq,
+    at: Date.now(),
+    kind: "log",
+    agentId,
+    payload: { data: { level: "info", pluginId: "core:test", text } },
+  });
+
+  const store = await EventStore.load(dataDir, agentId, cfg);
+
+  // Queue a PRE-clear append, then clear, then a POST-clear append — WITHOUT
+  // awaiting in between, so all three ride the single serialized chain. The spec
+  // pins the ordering: appends queued BEFORE the clear land before the truncate;
+  // appends AFTER the clear run after it. Net on-disk result = only PRE-clear got
+  // truncated away; only the POST-clear line survives.
+  store.append(mk(1, "PRE-CLEAR"));
+  store.clear();
+  store.append(mk(2, "POST-CLEAR"));
+  await store.flush();
+
+  const text = fs.readFileSync(filePath, "utf8");
+  const lines = text.split("\n").filter((l) => l.length > 0);
+  assert.equal(lines.length, 1, "exactly one line survives the append→clear→append sequence: " + flat(lines));
+  assert.match(lines[0], /POST-CLEAR/, "the surviving line is the POST-clear append: " + flat(lines));
+  assert.ok(!/PRE-CLEAR/.test(text), "the PRE-clear append (queued before clear) was truncated away by the clear");
+
+  // A fresh re-load sees exactly the post-clear record.
+  const reloaded = await EventStore.load(dataDir, agentId, cfg);
+  const win = reloaded.window();
+  assert.equal(win.length, 1, "the re-loaded window holds exactly the post-clear record: " + flat(win));
+  assert.match(flat(win[0]), /POST-CLEAR/, "the re-loaded record is the post-clear append");
+});
+
+test("inspector(clear): EventStore.clear() is a best-effort no-op that never throws for persist:false and a path-hostile id", async () => {
+  const mod = (await import(STORE_URL).catch(() => null)) as any;
+  assert.ok(mod && typeof mod.EventStore === "function", "the store module must export an EventStore class");
+  const { EventStore } = mod;
+
+  const dataDir = fs.mkdtempSync(path.join(TMP, "store-noop-"));
+
+  // persist:false ⇒ in-memory-only store (filePath null). clear() must not throw.
+  const offStore = await EventStore.load(dataDir, "alice", {
+    maxPersistedEntries: 5000,
+    retentionMs: 0,
+    persist: false,
+  });
+  assert.equal(typeof offStore.clear, "function", "EventStore must expose clear() even when persistence is off");
+  offStore.clear(); // must not throw
+  await offStore.flush();
+  assert.deepEqual(offStore.window(), [], "a persist:false store's window stays empty after clear");
+
+  // A path-hostile agentId degrades to in-memory-only (filePath null). clear()
+  // must still be a safe no-op (never touch the disk, never throw).
+  const hostileStore = await EventStore.load(dataDir, "../escape", {
+    maxPersistedEntries: 5000,
+    retentionMs: 0,
+    persist: true,
+  });
+  hostileStore.clear(); // must not throw
+  await hostileStore.flush();
+  assert.deepEqual(hostileStore.window(), [], "a path-hostile store's window stays empty after clear");
+  // Nothing escaped the dataDir.
+  assert.ok(
+    !fs.existsSync(path.join(dataDir, "..", "escape")) && !fs.existsSync(path.join(dataDir, "escape")),
+    "a path-hostile id never created a file on disk",
+  );
+});
+
+// ===========================================================================
+// Clear-G — after a clear, NEWLY captured events flow normally into /snapshot
+// (post-clear capture is unaffected; highestSeq stays monotonic so new seqs are
+// strictly greater than the pre-clear ones — the counter is NOT reset).
+// ===========================================================================
+
+test("inspector(clear): after a clear, newly-captured events appear in /snapshot (capture flows normally)", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    // Seed, capture the pre-clear max seq, then clear.
+    await sendAndWait(c, "in alice OLD-1", "in");
+    await sendAndWait(c, "in alice OLD-2", "in");
+    const pre = await waitSnapshot(c, "alice", (rs) => rs.length >= 2);
+    const preMaxSeq = Math.max(...pre.map((r) => r.seq));
+
+    const cleared = await clear(c, "alice");
+    assert.equal(cleared.status, 200, "the clear succeeds");
+    const empty = await snapshot(c, "alice");
+    assert.deepEqual(empty.records, [], "the ring is empty immediately after the clear");
+
+    // Capture a NEW event post-clear — it must land in the snapshot.
+    await sendAndWait(c, "in alice NEW-AFTER-CLEAR", "in");
+    const recs = await waitSnapshot(c, "alice", (rs) =>
+      rs.some((r) => /NEW-AFTER-CLEAR/.test(flat(r.payload))),
+    );
+    const fresh = recs.find((r) => /NEW-AFTER-CLEAR/.test(flat(r.payload)));
+    assert.ok(fresh, "a post-clear event is captured and visible in /snapshot: " + flat(recs));
+    // The ring restarts from this one record (nothing stale carried over).
+    assert.ok(
+      !recs.some((r) => /OLD-1|OLD-2/.test(flat(r.payload))),
+      "no pre-clear record reappears after the clear: " + flat(recs),
+    );
+    // seq is NOT reset — the post-clear record's seq is strictly greater than the
+    // highest pre-clear seq (the monotonic counter survives the clear).
+    assert.ok(
+      typeof fresh.seq === "number" && fresh.seq > preMaxSeq,
+      "the post-clear seq (" + fresh.seq + ") must exceed the pre-clear max (" + preMaxSeq + ") — highestSeq is not reset",
+    );
+  } finally {
+    await c.close();
+  }
+});
+
+test("inspector(clear): a live SSE client stays connected across a clear and receives post-clear records", async () => {
+  const c = await startChild(["alice"]);
+  try {
+    assertUp(c);
+    const s = await openSSE(c, "alice");
+    assert.equal(s.status, 200, "the stream opens for alice");
+
+    // A pre-clear record streams to the client.
+    await sendAndWait(c, "in alice SSE-PRE", "in");
+    assert.ok(
+      await waitEvents(s.events, (e) => e.some((x) => x.type === "record" && /SSE-PRE/.test(flat(x.record)))),
+      "the pre-clear record arrives over SSE",
+    );
+
+    // Clear — per spec, SSE clients STAY connected.
+    const cleared = await clear(c, "alice");
+    assert.equal(cleared.status, 200, "the clear succeeds while an SSE client is attached");
+
+    // A post-clear record must still reach the SAME (still-open) SSE connection.
+    await sendAndWait(c, "in alice SSE-POST", "in");
+    assert.ok(
+      await waitEvents(s.events, (e) => e.some((x) => x.type === "record" && /SSE-POST/.test(flat(x.record)))),
+      "the post-clear record reaches the still-connected SSE client (clear did not close streams): " + flat(s.events),
+    );
+    s.close();
   } finally {
     await c.close();
   }
