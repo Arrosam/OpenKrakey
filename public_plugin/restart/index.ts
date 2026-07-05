@@ -6,7 +6,8 @@
  * does NOT own process lifecycle — it invokes the core `core.restart` action
  * (Actions.CORE_RESTART, provided by the composition root), which stops every Agent
  * GRACEFULLY (running each plugin's teardown, so best-effort state is flushed) before
- * re-execing. That is the whole point versus a raw process.exit: a restart no longer
+ * boot exits with RESTART_EXIT_CODE and the krakey supervisor relaunches. That is the
+ * whole point versus a raw process.exit: a restart no longer
  * loses, e.g., web-chat read-receipts. `dryRun` reports the plan without restarting;
  * if the core seam is absent (not running under boot), restart.now degrades to a
  * no-op + warning rather than exiting the process itself.
@@ -23,7 +24,8 @@ const RESTART_TOOL: ToolDef = {
   description:
     "Restart the whole Krakey runtime. THIS is how newly-added plugins are loaded and changed config is " +
     "applied — the runtime reads plugins and config only at startup, so after you write a new plugin or edit " +
-    "config, call restart.now to bring it live. A fresh copy starts in this one's place; the chat and inspector " +
+    "config, call restart.now to bring it live. The runtime exits and the krakey supervisor immediately starts " +
+    "a fresh copy in its place — new plugins and config apply on the way up; the chat and inspector " +
     "briefly drop while it cycles. Use deliberately, only when you intend to reload.",
   parameters: {
     type: "object",
@@ -34,8 +36,10 @@ const RESTART_TOOL: ToolDef = {
 
 /**
  * The exact command that launched this runtime (node + execArgv + script + args).
- * Kept here only so `dryRun` can REPORT the plan; the real re-exec lives in the core
- * (boot.spawnReplacement) — the plugin never spawns a process itself.
+ * Kept here only so `dryRun` can REPORT the plan; the plugin never spawns a process
+ * itself. boot does not re-exec either: it exits with RESTART_EXIT_CODE (see
+ * shared/config) and the krakey supervisor (the `krakey run` foreground loop / the
+ * `krakey start` daemon supervisor) relaunches this same command.
  */
 function launchCommand(): { exe: string; args: string[] } {
   return { exe: process.execPath, args: [...process.execArgv, ...process.argv.slice(1)] };
@@ -66,9 +70,10 @@ const createRestart: PluginFactory = (): Plugin => {
           return { restarting: false, dryRun: true, command: [exe, ...args], delayMs };
         }
         // The CORE owns process lifecycle: invoke the GRACEFUL core.restart action so
-        // every plugin's teardown runs (flushing best-effort state) before the
-        // re-exec — never a raw process.exit from a plugin. Degrade (don't restart) if
-        // the seam isn't present, e.g. not running under boot.
+        // every plugin's teardown runs (flushing best-effort state) before boot exits
+        // with RESTART_EXIT_CODE and the krakey supervisor relaunches — never a raw
+        // process.exit from a plugin. Degrade (don't restart) if the seam isn't
+        // present, e.g. not running under boot.
         if (!ctx.actions.has(Actions.CORE_RESTART)) {
           ctx.log.warn(
             "restart: core.restart is unavailable — cannot restart (is the runtime started by boot?)",
@@ -85,8 +90,10 @@ const createRestart: PluginFactory = (): Plugin => {
           ? cfg.guidance
           : "<restart.guidance> You can restart yourself with restart.now. The runtime loads plugins and " +
             "config ONLY at startup, so after you add or edit a plugin or change config, call restart.now to " +
-            "apply it. Restarting briefly drops the chat and inspector while the runtime cycles — use it " +
-            "deliberately. </restart.guidance>";
+            "apply it. The runtime exits and the krakey supervisor immediately starts a fresh copy — new " +
+            "plugins and config apply on the way up. Restarting briefly drops the chat and inspector while the " +
+            "runtime cycles — use it deliberately. (The delayMs config is legacy and ignored by the current " +
+            "mechanism; the supervisor applies its own short delay.) </restart.guidance>";
       const priority = typeof cfg.guidancePriority === "number" ? cfg.guidancePriority : 5800;
       ctx.setBlock({ id: "restart.guidance", target: "system", priority, render: () => guidanceText });
 
