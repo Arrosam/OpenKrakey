@@ -1257,15 +1257,26 @@ test("ctx-transition: successive rounds within a frame shed PROPORTIONALLY (1 th
   assert.deepEqual(tags, [3, 4], "q0,q1,q2 shed across the two escalating rounds");
 });
 
-test("ctx-transition: LLM_RETURN RESETS pressure — entries recorded after it are NOT pre-shed", async () => {
+// NEW behavior (spec J / Finding J): the llm.return handler now ALSO clears the
+// results ring (`results = []; pressureRound = 0`) — one-shot delivery. This test
+// was rewritten from the OLD "the unshed survivor q2 is retained across the reset"
+// assertion (same treatment as the browser suite's 'does NOT restore
+// already-dropped' rewrite): the survivor is no longer retained — the return
+// empties the ring, so only entries recorded AFTER the return remain.
+test("ctx-transition: LLM_RETURN empties the ring — the unshed survivor is dropped, only post-return entries render", async () => {
   const N = 3;
   const { store, sys } = await setupWithEntries(N);
   emitContextFull(sys, 2); // drop q0,q1 -> only q2 left
   assert.deepEqual(await survivingTags(store, N), [2], "two oldest shed this frame");
 
-  emitLlmReturn(sys); // frame ends; pressure resets
+  emitLlmReturn(sys); // frame ends; llm.return DROPS the whole ring + resets pressure
+  assert.deepEqual(
+    await renderMsgs(resultsBlock(store)),
+    [],
+    "llm.return empties the results ring (one-shot delivery)",
+  );
 
-  // A fresh frame records a new entry; it must appear in full (no carried-over shed).
+  // A fresh frame records a new entry; the ring started empty, so ONLY qNEW renders.
   emitToolResult(sys, {
     name: SEARCH,
     ok: true,
@@ -1277,20 +1288,45 @@ test("ctx-transition: LLM_RETURN RESETS pressure — entries recorded after it a
   });
   const msgs = await renderMsgs(resultsBlock(store));
   const joined = msgs.map((m) => String(m.content)).join("\n");
-  assert.match(joined, /\bqNEW\b/, "the post-reset entry renders");
-  // q2 (recorded before the reset, never shed) is still in the ring too.
-  assert.match(joined, /\bq2\b/, "the unshed survivor is retained across the reset");
+  assert.equal(msgs.length, 1, "ring started empty after the return; only the post-return entry renders");
+  assert.match(joined, /\bqNEW\b/, "the post-return entry renders");
+  assert.ok(!/\bq2\b/.test(joined), "the pre-return survivor q2 was cleared by the return — not retained");
 });
 
-test("ctx-transition: after LLM_RETURN, a NEW round:1 sheds the current oldest again (pressure re-armed)", async () => {
+// NEW behavior (spec J): rewritten from the OLD assertion that frame-1 survivors
+// (q1,q2) persisted past the return so a frame-2 round:1 could shed q1. Now
+// llm.return empties the ring AND zeroes pressure; the frame-2 round:1 sheds one
+// current-oldest from the NEW (post-return) buffer, proving the counter reset.
+test("ctx-transition: after LLM_RETURN clears the ring, a fresh round:1 sheds one current-oldest from the NEW buffer", async () => {
   const N = 3;
   const { store, sys } = await setupWithEntries(N); // q0,q1,q2
-  emitContextFull(sys, 1); // q0 gone
-  emitLlmReturn(sys); // reset for next frame
-  emitContextFull(sys, 1); // next frame's pressure: drop the new oldest (q1)
-  const tags = await survivingTags(store, N);
-  assert.ok(!tags.includes(0) && !tags.includes(1), "q0 (frame1) and q1 (frame2) both shed");
-  assert.deepEqual(tags, [2], "only the newest survivor remains");
+  emitContextFull(sys, 1); // q0 gone -> survivors [q1,q2]
+  emitLlmReturn(sys); // frame boundary: clears the ring AND resets pressure
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "llm.return empties the ring");
+
+  // Frame 2: two fresh entries, then a fresh round:1 sheds exactly one current-oldest
+  // (qA) — NOT two from stale accumulated pressure.
+  for (const q of ["qA", "qB"]) {
+    emitToolResult(sys, {
+      name: SEARCH,
+      ok: true,
+      data: {
+        endpoint: "http://localhost:8080",
+        query: q,
+        results: [{ title: q, url: `https://a/${q}`, snippet: q }],
+      },
+    });
+  }
+  emitContextFull(sys, 1); // drop the current-oldest (qA) only
+  const msgs = await renderMsgs(resultsBlock(store));
+  const joined = msgs.map((m) => String(m.content)).join("\n");
+  assert.equal(msgs.length, 1, "one fresh entry shed by round:1, one survives (pressure reset — not carried)");
+  assert.ok(!/\bqA\b/.test(joined), "frame-2 round:1 drops the current-oldest (qA)");
+  assert.match(joined, /\bqB\b/, "the newer fresh entry survives");
+  assert.ok(
+    !/\bq1\b/.test(joined) && !/\bq2\b/.test(joined),
+    "frame-1 entries were cleared by the return — not restored",
+  );
 });
 
 test("ctx-transition: an entry dropped by pressure does NOT reappear on the next render (persistent within frame)", async () => {
@@ -1349,10 +1385,64 @@ test("ctx-pressure (negative): a malformed payload (missing data) does not throw
   assert.equal(msgs.length, N, "a malformed context.full leaves the ring intact");
 });
 
-test("ctx-pressure (negative): LLM_RETURN with no preceding pressure is a harmless no-op", async () => {
+// NEW behavior (spec J): rewritten from the OLD "a bare reset leaves the ring
+// untouched (msgs.length === N)" assertion. Under one-shot delivery, llm.return
+// ALWAYS empties the ring — even with no preceding pressure — so the block becomes
+// []. The handler still must not throw.
+test("ctx-pressure (negative): LLM_RETURN with no preceding pressure still empties the ring (one-shot), no throw", async () => {
   const N = 2;
   const { store, sys } = await setupWithEntries(N);
-  assert.doesNotThrow(() => emitLlmReturn(sys), "a bare reset must not throw");
+  assert.doesNotThrow(() => emitLlmReturn(sys), "a bare return must not throw");
   const msgs = await renderMsgs(resultsBlock(store));
-  assert.equal(msgs.length, N, "reset without pressure leaves the ring untouched");
+  assert.deepEqual(msgs, [], "llm.return empties the ring even without preceding pressure (one-shot delivery)");
+});
+
+// ===========================================================================
+// 18. one-shot results delivery (spec J / Finding J)
+// ===========================================================================
+//
+// NEW behavior: the Events.LLM_RETURN handler now ALSO clears the tool-results
+// ring (`results = []; pressureRound = 0`). One-shot delivery: results render
+// into web-search.results on the frame AFTER the tool ran; an llm.return empties
+// the ring. Frame-order guarantee: llm.return fires BEFORE this frame's
+// tool.result events, so results emitted after a return survive to the next
+// render. These tests use the section-12 emitToolResult mechanism + emitLlmReturn
+// (section 17) and observe the web-search.results MESSAGES block.
+
+test("llm.return (one-shot): >=2 own tool.results render, then llm.return empties the ring", async () => {
+  const { store, sys } = await setup({});
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("ring0") });
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("ring1") });
+  const before = await renderMsgs(resultsBlock(store));
+  assert.equal(before.length, 2, "both own results render before the return");
+
+  emitLlmReturn(sys); // one-shot delivery: drop the whole ring
+
+  const after = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(after, [], "llm.return clears the results ring");
+});
+
+test("llm.return (frame-order): results emitted AFTER the return survive to the NEXT render", async () => {
+  const { store, sys } = await setup({});
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("ring0") });
+  // Frame boundary: llm.return fires BEFORE this frame's tool.result events.
+  emitLlmReturn(sys);
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "ring empty right after the return");
+
+  // Results emitted AFTER the return must survive to the next render.
+  emitToolResult(sys, { name: SEARCH, ok: true, data: successData("ringNEW") });
+  const msgs = await renderMsgs(resultsBlock(store));
+  assert.equal(msgs.length, 1, "the post-return result survives to the next render");
+  assert.match(
+    msgs.map((m) => String(m.content)).join("\n"),
+    /\bringNEW\b/,
+    "the post-return result renders in full",
+  );
+});
+
+test("llm.return (empty ring): on an empty ring is a no-op / does not throw", async () => {
+  const { store, sys } = await setup({});
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "precondition: empty ring");
+  assert.doesNotThrow(() => emitLlmReturn(sys), "llm.return on an empty ring must not throw");
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "still empty after the return");
 });
