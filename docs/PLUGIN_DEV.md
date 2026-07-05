@@ -251,6 +251,12 @@ interface ContextBlock {
   runs every frame.
 - Register with `ctx.setBlock({...})`; **remove it in `teardown`** with `ctx.removeBlock(id)`.
 
+> **Two mistakes we keep seeing in generated plugins.** (1) A `target: "messages"` block whose `render()`
+> returns a **string** — it MUST return a `Message[]`; a string is the wrong shape and the block silently
+> contributes nothing that frame. (2) Calling a non-existent `ctx.wake()` — there is no such method
+> anywhere in the contract; the wake mechanism is invoking the clock action:
+> `ctx.actions.invoke(Actions.CLOCK_FIRE_NOW)` (guard it with `ctx.actions.has`, see §3.2 and §4.1).
+
 **Priority convention (cache-friendly).** Stable, rarely-changing system blocks go on top so the prompt
 prefix stays constant and the provider's prompt cache hits: `persona` 10000 (identity), `system-prompt`
 9000 (operating model), `web-chat.guidance` 8000, `krakeycode.guidance` 7000. Volatile/message content sits
@@ -406,6 +412,14 @@ const offResult = ctx.events.on(Events.TOOL_RESULT, (payload) => {
   if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {}); // wake the frame
 });
 
+// Results are ONE-SHOT: once the model has read this frame's fold (llm.return fired),
+// drop them. A ring re-rendered identically every frame reads as NEW output to the
+// model, which re-calls the tool to "confirm" — an infinite loop. Safe by frame order:
+// llm.return fires BEFORE this frame's tool.result events, so clearing on return drops
+// only what the model already saw; fresh results repopulate for the next frame.
+const offReturn = ctx.events.on(Events.LLM_RETURN, () => { results = []; });
+// (remember: push offResult AND offReturn into your unsubs so teardown() off()s both)
+
 // a MESSAGES block that renders recent outcomes as plain turns the model will read next frame:
 ctx.setBlock({
   id: "dice.results",
@@ -436,7 +450,13 @@ Key choices, and why:
   the Agent *see* it on its next frame; calling `clock.fire_now` makes that next frame happen *now*. Wake the
   frame only when the result is something you should react to promptly; stay silent otherwise and let the
   fold ride the next natural tick. See the table below.
-- **Bound the ring** so old results don't grow the prompt without limit.
+- **Clear the ring on `llm.return` — one-shot delivery.** A results block that re-renders identically every
+  frame reads as a *new* result to the model, which re-calls the tool to confirm it — an observed infinite
+  loop (a weak model pinged one tool 16× in a row). `llm.return` fires *before* this frame's `tool.result`
+  events, so clear-on-return can never wipe a result the model hasn't seen. If the Agent needs a durable
+  trail of what it has done, that's the `history` plugin's job — not your results ring.
+- **Bound the ring** so old results don't grow the prompt without limit (belt-and-braces on top of the
+  clear — a burst of results within one frame still shouldn't balloon).
 
 #### Important vs. quiet results — whether to wake the frame
 
