@@ -35,7 +35,7 @@ import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createAgentInstance } from "../packages/agent_instance/src";
 import type { AgentDefinition } from "../contracts/agent";
-import { Events } from "../shared/actions";
+import { Actions, Events } from "../shared/actions";
 
 // ---------------------------------------------------------------------------
 // per-test temp sandbox (all ABSOLUTE paths; both dirs start EMPTY)
@@ -934,6 +934,84 @@ export default () => ({
   assert.ok(err, "the loader must log the caught teardown error at level 'error'");
   assert.equal(typeof err.text, "string");
   assert.ok(err.text.length > 0, "the core:loader error log must carry non-empty text");
+});
+
+// ===========================================================================
+// EXT — TEARDOWN ORDER: stop() tears the agent down as
+//   clock.stop() -> await loader.teardown() -> orchestrator.stop()
+// The load-bearing CONSEQUENCE (this is what the test pins): while a PLUGIN's
+// teardown() is running, the orchestrator has NOT stopped yet, so its
+// actions are STILL registered on the actionbus — specifically
+// Actions.PROMPT_COMPOSE ("prompt.compose"), which the orchestrator registers
+// while started and unregisters on stop(). A plugin whose teardown wants to do
+// a final on-demand compose (to flush/settle) must therefore find it present.
+//
+// Black-box at the agent boundary: we only drive start()/stop(). We OBSERVE
+// via a recorder plugin (written as a module SOURCE string, so it cannot import
+// the test's constants — the action name is literal "prompt.compose") that, in
+// its teardown(), records ctx.actions.has("prompt.compose") into an exported
+// module-level array. ESM caches by resolved URL, so we re-import the SAME file
+// the loader imported and read the recorded flag back.
+//
+// RED against CURRENT main (orchestrator stops BEFORE plugins tear down):
+// teardown runs after the actions are already gone -> records false.
+// GREEN after the reorder: teardown runs while the orchestrator is still up ->
+// records true.
+// ===========================================================================
+
+/**
+ * A plugin whose teardown() records whether Actions.PROMPT_COMPOSE
+ * ("prompt.compose") is still registered on the actionbus at teardown time.
+ *
+ * NOTE the plugin contract: teardown() takes NO argument, so the plugin CAPTURES
+ * its per-Agent ctx during setup (into a closure) and probes the SAME live
+ * ActionBus at teardown time. The action name is passed literally (the module is
+ * self-contained and cannot import the test's `Actions` constant); the test
+ * asserts against Actions.*.
+ */
+function teardownComposeProbePlugin(id: string): string {
+  return `
+export const observed = { hadComposeAtTeardown: null }; // null = teardown never ran
+export default () => {
+  let captured; // the per-Agent PluginContext, captured at setup
+  return {
+    manifest: { id: ${JSON.stringify(id)}, version: "1" },
+    setup(ctx) { captured = ctx; /* keep the live ActionBus for teardown */ },
+    teardown() {
+      // While THIS teardown runs, the orchestrator must not have stopped yet, so
+      // its on-demand compose action is still registered on the actionbus.
+      observed.hadComposeAtTeardown = captured.actions.has("prompt.compose");
+    },
+  };
+};
+`;
+}
+
+test("teardown order: PROMPT_COMPOSE is STILL registered while a plugin's teardown() runs (loader tears down BEFORE the orchestrator stops)", async () => {
+  writePublicPlugin("rec-teardown-compose", teardownComposeProbePlugin("rec-teardown-compose"));
+  const agent = make(
+    // large interval so no frame noise — this is purely about stop()-time ordering
+    bareDef("teardown-compose", { intervalMs: 10_000, plugins: ["rec-teardown-compose"] }),
+    baseDeps(),
+  );
+
+  await agent.start();
+  // stop() must tear the plugin down; its teardown records the has() flag.
+  await assert.doesNotReject(() => agent.stop(), "a bare recorder plugin must tear down cleanly");
+
+  const mod = await importPublicPlugin("rec-teardown-compose");
+  assert.notEqual(
+    mod.observed.hadComposeAtTeardown,
+    null,
+    "the plugin's teardown() must have run during stop() (else the observation is meaningless)",
+  );
+  assert.equal(
+    mod.observed.hadComposeAtTeardown,
+    true,
+    "while a plugin's teardown() runs, the orchestrator must NOT yet be stopped — " +
+      Actions.PROMPT_COMPOSE +
+      " must still be registered on the actionbus (loader.teardown() precedes orchestrator.stop())",
+  );
 });
 
 // ---- Cover 6 (REGRESSION GUARD): a plugin log line is mirrored to the bus
