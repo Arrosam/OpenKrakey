@@ -9,7 +9,6 @@
  * `npm start` runs `tsx packages/boot/src/index.ts`. The exported functions let
  * tests import this module without launching anything (see the isMain guard).
  */
-import * as cp from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +18,7 @@ import { createCommunicatorLibrary } from "../../llm-gateway/src";
 
 import type { AgentDefinition, AgentHandle } from "../../../contracts/agent";
 import type { CommunicatorLibrary } from "../../../contracts/llm";
-import { PATHS, agentPaths } from "../../../shared/config";
+import { PATHS, RESTART_EXIT_CODE, agentPaths } from "../../../shared/config";
 import type { LLMConfig } from "../../../shared/config";
 import { consoleLogger } from "../../../shared/logging";
 import type { Logger } from "../../../shared/logging";
@@ -90,66 +89,46 @@ export function summaryLine(started: number, total: number): string {
   return mint(STAR) + " " + counts + " agent(s) running — Ctrl+C to stop.";
 }
 
-/** The exact command that launched this runtime (node + execArgv + script + args). */
-function launchCommand(): { exe: string; args: string[] } {
-  return { exe: process.execPath, args: [...process.execArgv, ...process.argv.slice(1)] };
-}
-
-/**
- * Spawn a DETACHED replacement that waits `delayMs` (so this process can exit and
- * free its loopback ports first), then re-runs the launch command. Cross-platform
- * via the OS shell; quoting guards paths with spaces. (Moved here from the `restart`
- * plugin so the plugin never owns process lifecycle — it only requests a restart.)
- */
-function spawnReplacement(delayMs: number): void {
-  const { exe, args } = launchCommand();
-  const cwd = process.cwd();
-  const env = process.env;
-  if (process.platform === "win32") {
-    const q = (s: string): string => '"' + s.replace(/"/g, '""') + '"';
-    const cmd = [exe, ...args].map(q).join(" ");
-    const secs = Math.max(1, Math.ceil(delayMs / 1000));
-    cp.spawn("cmd.exe", ["/c", "timeout /t " + secs + " /nobreak >nul & " + cmd], {
-      cwd, env, detached: true, stdio: "ignore", windowsHide: true,
-    }).unref();
-  } else {
-    const q = (s: string): string => "'" + s.replace(/'/g, "'\\''") + "'";
-    const cmd = [exe, ...args].map(q).join(" ");
-    cp.spawn("sh", ["-c", "sleep " + Math.max(0, delayMs) / 1000 + "; exec " + cmd], {
-      cwd, env, detached: true, stdio: "ignore",
-    }).unref();
-  }
-}
-
 /** Brief settle (ms) after teardown so the agent's final SSE frame / buffered log reaches the socket before exit. */
 const RESTART_SETTLE_MS = 200;
 
 /**
  * GRACEFUL restart of the whole runtime: stop EVERY agent — running each plugin's
  * teardown, so best-effort state (e.g. the web-chat transcript's read-receipts) is
- * flushed — BEFORE re-execing, unlike a raw `process.exit` which skips teardown.
+ * flushed — BEFORE exiting, unlike a raw `process.exit` which skips teardown. boot
+ * no longer spawns its own replacement: after teardown it exits with
+ * RESTART_EXIT_CODE, and whichever process launched boot (the `krakey run`
+ * supervised loop, or the `krakey start` daemon supervisor) relaunches it.
+ *
  * Wired into each Agent (via `createAgentInstance`'s `requestRestart`) so the
- * `restart` plugin's `core.restart` action lands here. `hooks` lets tests substitute
- * the re-exec/exit AND short-circuit the settle; the real path settles briefly so the
- * agent's last reply finishes flushing to the socket, then ends this process.
+ * `restart` plugin's `core.restart` action lands here.
+ *
+ * `delayMs` is DEPRECATED and IGNORED — the supervisor owns the relaunch delay now.
+ * The param stays only so agent_instance's `core.restart` wiring and the restart
+ * plugin's invoke keep working unchanged.
+ *
+ * `hooks.exit` is a test seam: when provided it is called SYNCHRONOUSLY with
+ * RESTART_EXIT_CODE after all stops and before this resolves (no settle, no real
+ * exit); otherwise the real path settles briefly so the agent's last reply finishes
+ * flushing to the socket, then ends this process with RESTART_EXIT_CODE.
  */
 export async function requestRestart(
   handles: AgentHandle[],
   delayMs: number,
-  hooks?: { spawn?: (delayMs: number) => void; exit?: (code: number) => void },
+  hooks?: { exit?: (code: number) => void },
 ): Promise<void> {
   await Promise.allSettled(handles.map((h) => h.stop()));
-  (hooks?.spawn ?? spawnReplacement)(delayMs);
-  // Test seam: an injected exit short-circuits — immediate, no real exit, no settle.
+  // Test seam: an injected exit fires synchronously with the restart code — no real
+  // exit, no settle — after every stop has settled and before this resolves.
   if (hooks?.exit) {
-    hooks.exit(0);
+    hooks.exit(RESTART_EXIT_CODE);
     return;
   }
   // Real path: a brief settle so teardown's final res.end() frames + any buffered log
-  // reach the socket before process.exit (which does NOT wait for pending I/O). The
-  // replacement waits delayMs (>> this) before binding, so the ports free in time.
+  // reach the socket before process.exit (which does NOT wait for pending I/O), then
+  // exit with the well-known code the supervisor watches for to relaunch boot.
   await new Promise((resolve) => setTimeout(resolve, RESTART_SETTLE_MS));
-  process.exit(0);
+  process.exit(RESTART_EXIT_CODE);
 }
 
 /**
@@ -169,8 +148,8 @@ export async function run(
     report?: (line: string) => void;
     publicPluginDir?: string;
     agentsDir?: string;
-    /** Test seam: substitute the restart re-exec/exit (see requestRestart). */
-    restartHooks?: { spawn?: (delayMs: number) => void; exit?: (code: number) => void };
+    /** Test seam: substitute the restart exit (see requestRestart). */
+    restartHooks?: { exit?: (code: number) => void };
   },
 ): Promise<AgentHandle[]> {
   const report = opts?.report;
