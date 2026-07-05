@@ -595,8 +595,13 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         }
       });
 
-      // Reset pressure once the frame's round-trip returns, for the next frame.
+      // Results are one-shot: clear the ring once the model has read them
+      // (llm.return fires after the model has composed with this frame's
+      // results). llm.return runs BEFORE this frame's tool.result events, so
+      // any results settling this frame survive to the next frame. Also reset
+      // pressure for the next frame.
       const offReturn = events.on(Events.LLM_RETURN, () => {
+        results = [];
         pressureRound = 0;
       });
 
