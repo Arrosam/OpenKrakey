@@ -13,6 +13,8 @@ import type { Message } from "../../contracts/llm";
 export interface BrowserConfig {
   chromePath: string | null;
   headless: boolean;
+  headlessMode: "new" | "old" | "off";
+  headlessModePinned: boolean;
   remoteDebugPort: number;
   navigationTimeoutMs: number;
   commandTimeoutMs: number;
@@ -29,6 +31,8 @@ export interface BrowserConfig {
 const DEFAULTS: BrowserConfig = {
   chromePath: null,
   headless: true,
+  headlessMode: "new",
+  headlessModePinned: false,
   remoteDebugPort: 0,
   navigationTimeoutMs: 30000,
   commandTimeoutMs: 10000,
@@ -57,12 +61,38 @@ function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
 
+/**
+ * Resolve the effective headless mode + whether the operator pinned it.
+ *
+ * Precedence:
+ *  1. A VALID explicit headlessMode ("new"|"old"|"off") wins → pinned = true.
+ *  2. Any other headlessMode value (invalid / wrong-typed) is ignored entirely
+ *     — treated as absent for both value and pinned.
+ *  3. Fall-through: legacy `headless === false` → "off"; otherwise "new".
+ *     These fall-throughs are never pinned.
+ */
+function resolveHeadlessMode(
+  rawMode: unknown,
+  rawHeadless: unknown,
+): { headlessMode: "new" | "old" | "off"; headlessModePinned: boolean } {
+  if (rawMode === "new" || rawMode === "old" || rawMode === "off") {
+    return { headlessMode: rawMode, headlessModePinned: true };
+  }
+  if (rawHeadless === false) {
+    return { headlessMode: "off", headlessModePinned: false };
+  }
+  return { headlessMode: "new", headlessModePinned: false };
+}
+
 export function readConfig(raw: unknown): BrowserConfig {
   const r: Record<string, unknown> =
     typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const { headlessMode, headlessModePinned } = resolveHeadlessMode(r.headlessMode, r.headless);
   return {
     chromePath: nullableString(r.chromePath),
     headless: bool(r.headless, DEFAULTS.headless),
+    headlessMode,
+    headlessModePinned,
     remoteDebugPort: finiteNumber(r.remoteDebugPort, DEFAULTS.remoteDebugPort),
     navigationTimeoutMs: finiteNumber(r.navigationTimeoutMs, DEFAULTS.navigationTimeoutMs),
     commandTimeoutMs: finiteNumber(r.commandTimeoutMs, DEFAULTS.commandTimeoutMs),

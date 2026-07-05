@@ -356,6 +356,7 @@ const createBrowser: PluginFactory = (): Plugin => {
       });
 
       const offReturn = ctx.events.on(Events.LLM_RETURN, (): void => {
+        results = [];
         pressureRound = 0;
       });
 

@@ -84,6 +84,18 @@ export function buildCdpMessage(
   return msg;
 }
 
+/**
+ * Chrome CLI flags for a given headless mode. Returns a FRESH array each call.
+ *   "new" → new headless (fast; can exit immediately on some macOS arm64 setups)
+ *   "old" → legacy headless (the fallback)
+ *   "off" → windowed (no headless flags)
+ */
+export function headlessArgs(mode: "new" | "old" | "off"): string[] {
+  if (mode === "new") return ["--headless=new", "--disable-gpu"];
+  if (mode === "old") return ["--headless", "--disable-gpu"];
+  return [];
+}
+
 export function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -109,6 +121,8 @@ export interface PageTarget {
   url: string;
 }
 
+const STDERR_TAIL_MAX = 4000;
+
 export class ChromeClient {
   private child: import("node:child_process").ChildProcess | null = null;
   private ws: WebSocket | null = null;
@@ -117,13 +131,58 @@ export class ChromeClient {
   private sessions = new Map<string, string>();
   activeTargetId: string | null = null;
   exited = false;
+  /** Set once close() runs — a teardown during a headless-fallback window must not re-spawn. */
+  private torn = false;
   private port = 0;
+  /** Tail of Chrome's stderr, capped at STDERR_TAIL_MAX chars — surfaced in launch failures. */
+  private stderrTail = "";
+  /** The headless mode this instance actually launched with (may differ from cfg after fallback). */
+  private effectiveHeadless: "new" | "old" | "off" = "new";
 
   constructor(private cfg: BrowserConfig, private dataDir: string) {}
 
   async launch(): Promise<void> {
     const bin = findChromeBinary(this.cfg.chromePath);
-    this.port = this.cfg.remoteDebugPort > 0 ? this.cfg.remoteDebugPort : await getFreePort();
+    const firstMode = this.cfg.headlessMode;
+    try {
+      await this.attemptLaunch(bin, firstMode);
+      this.effectiveHeadless = firstMode;
+      return;
+    } catch (err) {
+      // Retry EXACTLY ONCE with legacy headless when: the first attempt failed
+      // BEFORE the debugger was ready (early exit or ready-timeout), the mode was
+      // "new", and the operator did NOT pin the mode. Never fall back to "off".
+      const preReady = err instanceof Error && (err as { preReady?: boolean }).preReady === true;
+      const canFallback =
+        preReady && firstMode === "new" && !this.cfg.headlessModePinned;
+      if (!canFallback) throw err;
+
+      // Fully clean the first child before the second attempt. The first exit
+      // handler already nulls `child`; make sure any half-open ws / pending are
+      // cleared too and reset the per-attempt state.
+      this.cleanupAttempt();
+
+      // A teardown during the fallback window must not spawn again.
+      if (this.torn) throw err;
+
+      // attemptLaunch takes a fresh free port when auto-picking (remoteDebugPort===0),
+      // so the second attempt inherently gets a new port; a fixed configured port is reused.
+      await this.attemptLaunch(bin, "old");
+      this.effectiveHeadless = "old";
+    }
+  }
+
+  /**
+   * One spawn → wait-for-ready → connect cycle for a specific headless mode.
+   * Throws on failure. Pre-ready failures (early exit / ready-timeout) carry
+   * `preReady = true` so the caller can decide whether to fall back; a spawn /
+   * ENOENT failure does NOT carry that flag and must keep its existing message.
+   */
+  private async attemptLaunch(bin: string, mode: "new" | "old" | "off"): Promise<void> {
+    this.exited = false;
+    this.stderrTail = "";
+    this.port =
+      this.cfg.remoteDebugPort > 0 ? this.cfg.remoteDebugPort : await getFreePort();
     const args = [
       "--remote-debugging-port=" + this.port,
       "--user-data-dir=" + path.join(this.dataDir, "profile"),
@@ -136,11 +195,19 @@ export class ChromeClient {
       "--metrics-recording-only",
       "--safebrowsing-disable-auto-update",
       "--password-store=basic",
-      ...(this.cfg.headless ? ["--headless=new", "--disable-gpu"] : []),
+      ...headlessArgs(mode),
       "about:blank",
     ];
-    this.child = spawn(bin, args, { stdio: "ignore", detached: false });
+    this.child = spawn(bin, args, { stdio: ["ignore", "ignore", "pipe"], detached: false });
     this.child.unref();
+    // Capture Chrome's stderr tail — this handler must NEVER throw.
+    this.child.stderr?.on("data", (chunk: Buffer) => {
+      try {
+        this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL_MAX);
+      } catch {
+        /* never throw */
+      }
+    });
     this.child.on("exit", () => {
       this.exited = true;
       this.child = null;
@@ -151,7 +218,7 @@ export class ChromeClient {
       }
       for (const p of this.pending.values()) {
         clearTimeout(p.timer);
-        p.reject(new Error("browser: Chrome process exited unexpectedly"));
+        p.reject(new Error(this.enrich("browser: Chrome process exited unexpectedly")));
       }
       this.pending.clear();
       this.sessions.clear();
@@ -174,6 +241,8 @@ export class ChromeClient {
         cleanup();
         this.exited = true;
         this.child = null;
+        // Spawn / ENOENT failure — NOT a pre-ready failure; keep the message as-is
+        // (stderr tail is empty here) so the spawn-failure test keeps matching.
         reject(new Error(`browser: failed to launch Chrome (${bin}): ${err.message}`));
       };
       const cleanup = () => {
@@ -208,6 +277,11 @@ export class ChromeClient {
   private async waitForDebuggerReady(): Promise<string> {
     const deadline = Date.now() + this.cfg.commandTimeoutMs;
     for (;;) {
+      // If Chrome died before the debugger came up, fail promptly (this is the
+      // classic new-headless immediate-exit case) with the stderr tail attached.
+      if (this.exited) {
+        throw this.preReadyError("browser: Chrome exited before the debugger was ready");
+      }
       try {
         const res = await fetch("http://127.0.0.1:" + this.port + "/json/version");
         if (res.status === 200) {
@@ -218,12 +292,46 @@ export class ChromeClient {
         /* not ready yet */
       }
       if (Date.now() > deadline) {
-        throw new Error(
+        throw this.preReadyError(
           "browser: Chrome debugger not ready after " + this.cfg.commandTimeoutMs + "ms",
         );
       }
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+
+  /** Append the trimmed stderr tail to a message, only when the tail is non-empty. */
+  private enrich(msg: string): string {
+    const tail = this.stderrTail.trim();
+    return tail.length > 0 ? `${msg} — chrome stderr: ${tail}` : msg;
+  }
+
+  /** Build a pre-ready (retryable) launch error, enriched with the stderr tail. */
+  private preReadyError(msg: string): Error {
+    const e = new Error(this.enrich(msg)) as Error & { preReady?: boolean };
+    e.preReady = true;
+    return e;
+  }
+
+  /** Tear down any half-open state from a failed attempt (used between fallback attempts). */
+  private cleanupAttempt(): void {
+    try {
+      this.child?.kill();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+    }
+    this.pending.clear();
+    this.sessions.clear();
+    this.child = null;
+    this.ws = null;
   }
 
   private connectWs(url: string): Promise<void> {
@@ -346,6 +454,7 @@ export class ChromeClient {
   }
 
   async close(): Promise<void> {
+    this.torn = true;
     try {
       this.child?.kill();
     } catch {
