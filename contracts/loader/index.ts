@@ -35,14 +35,23 @@
  * requirements are met, so a dependent that is DECLARED before its action provider
  * is deferred until the provider has set up (the declared order is otherwise
  * preserved — independent plugins keep their listed order). This means a config
- * need not hand-order action dependencies correctly. If no remaining plugin can
- * have its requirements met (a dependency cycle, or a provider that was never
- * declared), load() fails with a DependencyError — the same loud failure a missing
- * dependency has always produced.
+ * need not hand-order action dependencies correctly.
  *
- * Failure: load() is all-or-nothing — if any plugin fails to import/validate/
- * setup, the plugins already set up are torn down (reverse order, isolated
- * errors) before the error is rethrown.
+ * Failure: load() skips-and-continues — one broken plugin never takes the Agent
+ * down (mirroring boot's "one bad agent never aborts the rest", one level finer):
+ * - a plugin whose import() throws is SKIPPED with a warning (the underlying
+ *   error included) and load() still resolves;
+ * - a plugin whose setup() throws/rejects is SKIPPED the same way; plugins
+ *   already set up are NOT rolled back — they stay up;
+ * - a plugin whose `requires` can never be met (its provider was skipped, never
+ *   declared, or part of a dependency cycle) is itself SKIPPED, with a warning
+ *   naming the missing requirement — skips cascade one plugin at a time, each
+ *   individually logged, never aborting the rest;
+ * - id validation failures (path separators, `.`/`..`) remain FATAL: load()
+ *   rejects before any filesystem access or import — a malformed config is an
+ *   author error surfaced loudly;
+ * - zero plugins surviving still resolves: a bare zero-plugin Agent completes
+ *   a frame (kernel invariant R3).
  */
 export interface Loader {
   /** Load + register all of this Agent's plugins. Call exactly once; a repeat call is not safe. */
