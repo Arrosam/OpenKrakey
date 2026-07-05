@@ -278,8 +278,12 @@ const createWebSearch: PluginFactory = (): Plugin => {
         }
       });
 
-      // Reset the pressure counter once a fresh round-trip returns.
+      // Results are one-shot: cleared once the model has read them (llm.return),
+      // which fires before this frame's tool.result events — so fresh results
+      // pushed by this frame survive to the next frame. Also resets the pressure
+      // counter for the fresh round-trip.
       const offReturn = ctx.events.on(Events.LLM_RETURN, () => {
+        results = [];
         pressureRound = 0;
       });
 
