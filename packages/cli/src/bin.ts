@@ -257,6 +257,10 @@ switch (parsed.kind) {
     // The same token is handed to the Console via the Config URL so the embedded
     // Config panel authenticates against the config-web API.
     const token = process.env.CONFIG_WEB_TOKEN || randomBytes(24).toString("base64url");
+    // The Console itself is token-gated the same way — session-lived per invocation,
+    // env-overridable, never persisted. Handed to the Console child and used in the
+    // browser URL so `krakey dashboard`'s own page authenticates.
+    const consoleToken = process.env.CONSOLE_TOKEN || randomBytes(24).toString("base64url");
 
     ensureStateDir();
     // A fresh dashboard replaces any prior one — otherwise re-running would leave
@@ -295,6 +299,14 @@ switch (parsed.kind) {
     // stdio goes to a real fd (not "ignore") — mirror startBackground's pattern.
     const logFd = openSync(LOG_FILE, "a");
 
+    // Compute each framed surface's tokened URL ONCE — used both to wire the Console
+    // child's env and to print the surface URLs below. Config's token is minted here;
+    // Chat/Inspector carry their pinned per-surface tokens via surfaceUrl(...).
+    const consoleUrl = `${url}/?token=` + encodeURIComponent(consoleToken);
+    const configUrl = "http://127.0.0.1:7717/?token=" + encodeURIComponent(token);
+    const chatUrl = surfaceUrl(surfaces.chat, 7718);
+    const inspectorUrl = surfaceUrl(surfaces.inspector, 7719);
+
     // config-web (7717) — background so Config is reachable for pre-run setup.
     const cfg = spawn(process.execPath, ["--import", "tsx", configWebBin], {
       env: {
@@ -317,9 +329,10 @@ switch (parsed.kind) {
       env: {
         ...process.env,
         CONSOLE_PORT: port,
-        CONFIG_WEB_URL: "http://127.0.0.1:7717/?token=" + encodeURIComponent(token),
-        WEB_CHAT_URL: surfaceUrl(surfaces.chat, 7718),
-        INSPECTOR_URL: surfaceUrl(surfaces.inspector, 7719),
+        CONSOLE_TOKEN: consoleToken,
+        CONFIG_WEB_URL: configUrl,
+        WEB_CHAT_URL: chatUrl,
+        INSPECTOR_URL: inspectorUrl,
       },
       detached: true,
       stdio: ["ignore", logFd, logFd],
@@ -329,14 +342,17 @@ switch (parsed.kind) {
     if (consoleChild.pid !== undefined) appendFileSync(DASH_PID_FILE, `${consoleChild.pid}\n`, "utf8");
 
     console.log(`krakey: dashboard running in background (console pid ${consoleChild.pid ?? "?"}, config pid ${cfg.pid ?? "?"})`);
-    console.log(`        ${url}`);
+    console.log(`        Console:   ${consoleUrl}`);
+    console.log(`        Config:    ${configUrl}`);
+    console.log(`        Chat:      ${chatUrl}`);
+    console.log(`        Inspector: ${inspectorUrl}`);
     console.log(`        log:  ${LOG_FILE}`);
     console.log(`        stop: krakey stop`);
 
     // Hold this process only long enough for the Console to bind, then open the
     // browser and exit — the detached daemons live on, the terminal is freed.
     await new Promise((r) => setTimeout(r, 1500));
-    openBrowser(url);
+    openBrowser(consoleUrl);
     break;
   }
 
