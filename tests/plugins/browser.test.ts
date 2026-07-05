@@ -545,6 +545,8 @@ test("teardown: is idempotent (double teardown does not throw)", async () => {
 const CONFIG_DEFAULTS: Record<string, unknown> = {
   chromePath: null,
   headless: true,
+  headlessMode: "new",
+  headlessModePinned: false,
   remoteDebugPort: 0,
   navigationTimeoutMs: 30000,
   commandTimeoutMs: 10000,
@@ -638,6 +640,77 @@ for (const wrong of [
     assert.equal(cfg[wrong.field], null, `${wrong.field} non-string falls back to null`);
   });
 }
+
+// ---- NEW (spec G): headlessMode / headlessModePinned resolution ----
+// Precedence: explicit valid headlessMode wins; else legacy headless===false => 'off';
+// else 'new'. Wrong-typed headlessMode falls back to 'new' with pinned=false.
+// pinned is true IFF the raw config slice actually carried a (valid) headlessMode.
+
+test("readConfig: headlessMode absent -> defaults 'new', pinned false", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({});
+  assert.equal(cfg.headlessMode, "new", "default mode is 'new'");
+  assert.equal(cfg.headlessModePinned, false, "not pinned when the field is absent");
+});
+
+for (const mode of ["new", "old", "off"] as const) {
+  test(`readConfig: explicit headlessMode '${mode}' -> '${mode}' + pinned true`, () => {
+    const m = cfgMod();
+    const cfg = m.readConfig({ headlessMode: mode });
+    assert.equal(cfg.headlessMode, mode, `explicit '${mode}' is taken verbatim`);
+    assert.equal(cfg.headlessModePinned, true, "an explicit valid mode pins the field");
+  });
+}
+
+test("readConfig: explicit headlessMode wins over legacy headless:false", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({ headless: false, headlessMode: "old" });
+  assert.equal(cfg.headlessMode, "old", "explicit headlessMode beats the legacy headless flag");
+  assert.equal(cfg.headlessModePinned, true, "still pinned (explicit mode present)");
+});
+
+test("readConfig: legacy headless:false with no headlessMode -> 'off', pinned false", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({ headless: false });
+  assert.equal(cfg.headlessMode, "off", "legacy headless:false maps to mode 'off'");
+  assert.equal(cfg.headlessModePinned, false, "derived from the legacy flag, so NOT pinned");
+});
+
+test("readConfig: legacy headless:true with no headlessMode -> 'new', pinned false", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({ headless: true });
+  assert.equal(cfg.headlessMode, "new", "headless:true keeps the default 'new'");
+  assert.equal(cfg.headlessModePinned, false, "not pinned when derived from defaults");
+});
+
+test("readConfig: wrong-typed headlessMode (42) -> falls back to 'new', pinned false", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({ headlessMode: 42 as any });
+  assert.equal(cfg.headlessMode, "new", "a non-'new|old|off' value is ignored -> 'new'");
+  assert.equal(cfg.headlessModePinned, false, "an invalid value does NOT pin the field");
+});
+
+for (const bad of [
+  { label: "unknown string", value: "true" },
+  { label: "empty string", value: "" },
+  { label: "null", value: null },
+  { label: "boolean", value: true },
+  { label: "object", value: {} },
+]) {
+  test(`readConfig: invalid headlessMode (${bad.label}) -> 'new', pinned false`, () => {
+    const m = cfgMod();
+    const cfg = m.readConfig({ headlessMode: bad.value as any });
+    assert.equal(cfg.headlessMode, "new", `${bad.label} is not a valid mode -> 'new'`);
+    assert.equal(cfg.headlessModePinned, false, `${bad.label} does not pin`);
+  });
+}
+
+test("readConfig: invalid headlessMode with legacy headless:false -> legacy wins ('off'), not pinned", () => {
+  const m = cfgMod();
+  const cfg = m.readConfig({ headless: false, headlessMode: 42 as any });
+  assert.equal(cfg.headlessMode, "off", "invalid explicit mode is ignored; legacy 'off' applies");
+  assert.equal(cfg.headlessModePinned, false, "an invalid mode never pins");
+});
 
 // ===========================================================================
 // 9. config.ts — buildDefaultGuidance  (positive)
@@ -961,6 +1034,38 @@ test("buildCdpMessage: preserves the params object as given (including empty)", 
 });
 
 // ===========================================================================
+// 15b. cdp.ts — headlessArgs  (NEW, spec G: PURE mode->flags mapping)
+//   'new' -> ['--headless=new','--disable-gpu']
+//   'old' -> ['--headless','--disable-gpu']
+//   'off' -> []
+// ===========================================================================
+
+test("headlessArgs: 'new' -> ['--headless=new','--disable-gpu']", () => {
+  const m = cdpMod();
+  assert.deepEqual(m.headlessArgs("new"), ["--headless=new", "--disable-gpu"]);
+});
+
+test("headlessArgs: 'old' -> ['--headless','--disable-gpu']", () => {
+  const m = cdpMod();
+  assert.deepEqual(m.headlessArgs("old"), ["--headless", "--disable-gpu"]);
+});
+
+test("headlessArgs: 'off' -> [] (headed, no flags)", () => {
+  const m = cdpMod();
+  assert.deepEqual(m.headlessArgs("off"), []);
+});
+
+test("headlessArgs: is pure — returns a fresh array each call (safe to mutate)", () => {
+  const m = cdpMod();
+  const a = m.headlessArgs("new");
+  const b = m.headlessArgs("new");
+  assert.notEqual(a, b, "each call returns a distinct array instance");
+  assert.deepEqual(a, b, "with identical contents");
+  a.push("--mutated");
+  assert.deepEqual(m.headlessArgs("new"), ["--headless=new", "--disable-gpu"], "mutation does not leak");
+});
+
+// ===========================================================================
 // 16. context.full -> context-pressure shedding of the browser.results ring
 //
 // NEW behavior (black-box, derived ONLY from the contract):
@@ -1133,43 +1238,104 @@ test("context.full: each emission drops `round` from the CURRENT buffer (1,2,3 =
   );
 });
 
-test("llm.return: zeroes the pressure counter but does NOT restore already-dropped entries", async () => {
+// NEW behavior (spec J): the llm.return handler ALSO clears the results ring
+// (`results = []; pressureRound = 0`). One-shot delivery — results render the
+// frame after the tool ran, then llm.return drops them. (This test was rewritten
+// from the OLD "zeroes the pressure counter but does NOT restore" assertion.)
+test("llm.return: clears the results ring (rendered block becomes []), then new results survive", async () => {
   const { store, sys } = await withRing(5);
   emitContextFull(sys, 3); // frame A: shed 3 oldest -> [3,4]
   assert.deepEqual(await survivingTags(store), [3, 4], "frame A shed 3");
 
-  emitLlmReturn(sys); // frame boundary: pressure counter resets — dropped entries stay dropped
+  emitLlmReturn(sys); // frame boundary: llm.return DROPS the whole ring
 
   assert.deepEqual(
-    await survivingTags(store),
-    [3, 4],
-    "llm.return must NOT restore the entries shed in frame A",
+    await renderMsgs(resultsBlock(store)),
+    [],
+    "llm.return empties the results ring (one-shot delivery)",
   );
 
-  // New results arrive in frame B; tags 5,6 appended after the survivors.
+  // Frame B: new results arrive AFTER the return; the ring started empty, so
+  // tags 5,6 are the only survivors and render as exactly [5,6].
   emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/5") });
   emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/6") });
-  assert.deepEqual(await survivingTags(store), [3, 4, 5, 6], "frame B buffer = survivors + new");
-
-  emitContextFull(sys, 1); // frame B emission -> drop the single current-oldest
   assert.deepEqual(
     await survivingTags(store),
-    [4, 5, 6],
-    "post-reset emission sheds per-emission from the current buffer",
+    [5, 6],
+    "ring starts empty after the return; only the newly-emitted results render",
   );
 });
 
-test("llm.return: after reset, each per-emission shed still drops `round` from the current buffer", async () => {
+// Task 2: split out the pure CONTEXT_FULL incremental-shed assertion that used to
+// cross an llm.return boundary. No return boundary here — the shed logic itself
+// (per-emission, from the current buffer) is unchanged.
+test("context.full: two same-frame emissions each drop `round` from the current buffer (no return between)", async () => {
   const { store, sys } = await withRing(5);
   emitContextFull(sys, 1); // frame A: drop 1 -> [1,2,3,4]
   assert.deepEqual(await survivingTags(store), [1, 2, 3, 4]);
-  emitLlmReturn(sys); // reset pressure counter (no restore)
-  emitContextFull(sys, 1); // frame B: drop one more current-oldest -> [2,3,4]
+  emitContextFull(sys, 1); // same frame: drop one more current-oldest -> [2,3,4]
   assert.deepEqual(
     await survivingTags(store),
     [2, 3, 4],
-    "each emission drops `round` from the current buffer regardless of frame boundary",
+    "each emission drops `round` from the current buffer",
   );
+});
+
+// ---- NEW (spec J): llm.return empties the results ring ----
+
+test("llm.return: >=2 own tool.results render, then llm.return empties the ring", async () => {
+  const { store, sys } = await setup({});
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/0") });
+  emitToolResult(sys, { name: READ_PAGE, ok: true, data: navData("https://ring/1") });
+  const before = await renderMsgs(resultsBlock(store));
+  assert.equal(before.length, 2, "both own results render before the return");
+
+  emitLlmReturn(sys); // one-shot delivery: drop the whole ring
+
+  const after = await renderMsgs(resultsBlock(store));
+  assert.deepEqual(after, [], "llm.return clears the results ring");
+});
+
+test("llm.return: results emitted AFTER the return survive to the NEXT render", async () => {
+  const { store, sys } = await setup({});
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/0") });
+  emitLlmReturn(sys); // clears the ring (frame boundary fires before this frame's results)
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "ring empty right after the return");
+
+  // Frame-order guarantee: results emitted AFTER a return survive to the next render.
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/1") });
+  emitToolResult(sys, { name: READ_PAGE, ok: true, data: navData("https://ring/2") });
+  assert.deepEqual(
+    await survivingTags(store),
+    [1, 2],
+    "post-return results render on the next frame",
+  );
+});
+
+test("llm.return: on an empty ring is a no-op / does not throw", async () => {
+  const { store, sys } = await setup({});
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "precondition: empty ring");
+  assert.doesNotThrow(() => emitLlmReturn(sys), "llm.return on an empty ring must not throw");
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "still empty after the return");
+});
+
+test("llm.return: also zeroes accumulated pressure — a later shed starts fresh from the new buffer", async () => {
+  const { store, sys } = await setup({});
+  // Frame A: fill, apply pressure, then return (ring + pressure both cleared).
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/0") });
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/1") });
+  emitContextFull(sys, 1); // drop the oldest of frame A
+  emitLlmReturn(sys); // clears ring AND pressureRound
+  assert.deepEqual(await renderMsgs(resultsBlock(store)), [], "ring empty after return");
+
+  // Frame B: three fresh results; a round:1 shed drops exactly one current-oldest,
+  // proving the pressure counter was reset (not carrying frame A's depth).
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/2") });
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/3") });
+  emitToolResult(sys, { name: NAVIGATE, ok: true, data: navData("https://ring/4") });
+  assert.deepEqual(await survivingTags(store), [2, 3, 4], "frame B buffer = the three new results");
+  emitContextFull(sys, 1);
+  assert.deepEqual(await survivingTags(store), [3, 4], "post-reset shed drops exactly one oldest");
 });
 
 test("state: render() after shedding is stable / non-mutating (idempotent reads)", async () => {
