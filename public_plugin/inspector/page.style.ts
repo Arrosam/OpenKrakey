@@ -110,6 +110,9 @@ body {
 .btn.primary:hover { background: var(--mint-bright); box-shadow: 0 10px 30px -8px var(--mint); }
 .btn.ghost { background: none; border-color: transparent; color: var(--muted); }
 .btn.ghost:hover { color: var(--text); background: var(--panel2); }
+.btn:disabled { cursor: default; opacity: .5; }
+.btn:disabled:hover { border-color: var(--line2); background: var(--panel2); color: var(--text); }
+.btn.ghost:disabled:hover { border-color: transparent; background: none; color: var(--muted); }
 .btn .btn-ic { width: 15px; height: 15px; }
 
 .pill {

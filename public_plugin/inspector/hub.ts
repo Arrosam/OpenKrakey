@@ -244,13 +244,29 @@ function routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void
         sendJson(res, 200, { records, total, dropped: reg.dropped });
         return;
       }
+
+      // POST /api/agents/:id/clear — the ONE mutating route: purge THIS agent's
+      // own ring + own persisted file (R6). Token-gated by the block above, so a
+      // 401 is already returned before we get here (before any mutation). Unknown
+      // id ⇒ 404 with the same body convention as snapshot/stream/query. Only POST
+      // mutates; GET/DELETE fall through to the block's 404.
+      if (method === "POST" && sub === "clear") {
+        if (!reg) {
+          sendJson(res, 404, { error: "unknown agent" });
+          return;
+        }
+        clearAgent(reg);
+        sendJson(res, 200, { cleared: true, agentId: id });
+        return;
+      }
     }
 
     sendJson(res, 404, { error: "not found" });
     return;
   }
 
-  // No POST, no other routes — read-only.
+  // Read-only EXCEPT the single self-purge route (POST /api/agents/:id/clear,
+  // above); no other routes/methods.
   res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
   res.end("not found");
 }
@@ -319,6 +335,21 @@ export function pushRecord(reg: AgentReg, rec: EventRecord, bufferSize: number):
     }
   }
   if (dead) for (const d of dead) reg.sseClients.delete(d);
+}
+
+/**
+ * Purge one agent's captured history: reset its ring (buf/head/count/dropped) and
+ * clear its persisted store. The live SSE clients are LEFT CONNECTED (sseClients is
+ * untouched) so a fresh stream keeps flowing after the purge. This is a self-only
+ * operation — it touches nothing but this agent's own ring + own file; no bus emit,
+ * no action registration, no call into the agent.
+ */
+export function clearAgent(reg: AgentReg): void {
+  reg.buf = [];
+  reg.head = 0;
+  reg.count = 0;
+  reg.dropped = 0;
+  reg.store?.clear();
 }
 
 // ---- hub lifecycle (refcounted) ---------------------------------------------

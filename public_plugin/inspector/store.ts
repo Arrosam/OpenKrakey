@@ -190,6 +190,29 @@ export class EventStore {
     if (needCompact) this.compact();
   }
 
+  /**
+   * Purge this agent's persisted history (best-effort, never throws). The
+   * in-memory state (restored window + line count) is emptied SYNCHRONOUSLY, and
+   * the on-disk truncate is queued on the SAME serialized chain as append/compact
+   * so ordering is well-defined: appends queued BEFORE this clear land before the
+   * truncate; appends queued AFTER it run after (and survive). `highestSeq` is NOT
+   * reset — seq stays monotonic across a clear. When filePath is null (persist:false
+   * or a path-hostile id) the truncate is a no-op but the in-memory state still clears.
+   */
+  clear(): void {
+    // Synchronous in-memory reset (observable immediately, before the disk op).
+    this.restored = [];
+    this.lineCount = 0;
+    const filePath = this.filePath;
+    this.chain = this.chain.then(async () => {
+      try {
+        if (filePath) await fs.promises.writeFile(filePath, "");
+      } catch {
+        /* swallow — best-effort */
+      }
+    });
+  }
+
   /** Async compaction: rewrite the file keeping the most-recent `cap` lines. */
   private compact(): void {
     if (!this.filePath || this.closed) return;

@@ -178,6 +178,7 @@ export const PAGE = `<!doctype html>
             <div class="typems-pop" id="logTypesPop"></div>
           </div>
           <button type="button" class="btn ghost qf-run" id="logRunBtn">Run query</button>
+          <button type="button" class="btn ghost qf-clear" id="logClearBtn" title="Delete this agent's captured log history">Clear logs</button>
           <span class="qf-meta" id="logQueryMeta"></span>
         </div>
         <div class="body" id="logs"><div class="empty">No logs yet.</div></div>

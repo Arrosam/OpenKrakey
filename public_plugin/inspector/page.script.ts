@@ -111,6 +111,12 @@ export const SCRIPT = `
     if (token) headers["Authorization"] = "Bearer " + token;
     return fetch(path, { headers: headers });
   }
+  // POST variant (same base/token handling) — used by the Clear-logs self-purge.
+  function apiPost(path) {
+    var headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    return fetch(path, { method: "POST", headers: headers });
+  }
 
   // ---- per-selection state ----
   var state = null; // { id, lastSeq, records, es, prompts, ... }
@@ -426,6 +432,7 @@ export const SCRIPT = `
   var logTypesLbl = \$("logTypesLbl");
   var logTypesPop = \$("logTypesPop");
   var logRunBtn = \$("logRunBtn");
+  var logClearBtn = \$("logClearBtn");
   var logQueryMeta = \$("logQueryMeta");
   function pinLogs() { logsBody.scrollTop = logsBody.scrollHeight; }
 
@@ -662,6 +669,48 @@ export const SCRIPT = `
     if (state && logSource === "query") runLogQuery();
   });
   logRunBtn.addEventListener("click", function () { runLogQuery(); });
+
+  // Clear logs: purge THIS agent's captured history (server ring + persisted file)
+  // via POST /api/agents/:id/clear, then reset the local per-agent state to the
+  // same empty shape freshState(id) initializes (minus id/es — same agent, SSE
+  // stays open) and repaint every panel. Fresh SSE records flow normally after.
+  if (logClearBtn) {
+    logClearBtn.addEventListener("click", function () {
+      if (!state) return;
+      if (!window.confirm("Delete this agent's captured log history? This cannot be undone.")) return;
+      var id = state.id;
+      logClearBtn.disabled = true;
+      apiPost("/api/agents/" + encodeURIComponent(id) + "/clear" + tokenQS)
+        .then(function (r) {
+          if (r.status === 401) { showLock(); throw new Error("401"); }
+          if (!r.ok) throw new Error("clear " + r.status);
+          // Selection may have changed mid-flight — only reset if still current.
+          if (!state || state.id !== id) return;
+          // Mirror freshState(id)'s collections/scalars (keep id + es intact).
+          state.lastSeq = -1;
+          state.records = [];
+          state.prompts = {};
+          state.promptOrder = [];
+          state.frames = [];
+          state.logs = [];
+          state.queryRecords = [];
+          state.queryTotal = 0;
+          state.queryRan = false;
+          // Repaint all panels empty (same sequence ingestSnapshot uses).
+          dirty.prompts = dirty.logs = dirty.frames = false;
+          renderEvents(state);
+          renderPrompts(state);
+          renderLogs(state);
+          renderFrames(state);
+          renderCounts(state);
+        })
+        .catch(function (e) {
+          if (String(e.message) === "401") return; // showLock() handled it
+          logQueryMeta.textContent = "clear failed: " + e.message;
+        })
+        .then(function () { logClearBtn.disabled = false; });
+    });
+  }
 
   // type multi-select (dependency-free popover with all/none actions)
   function logTypesSummary() {
