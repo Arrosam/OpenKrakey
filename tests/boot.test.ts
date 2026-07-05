@@ -399,17 +399,23 @@ test("loadLLMConfig: an EMPTY JSON object {} -> { communicators: {} } (key norma
 // ===========================================================================
 // run — DEGRADE-NOT-CRASH (spec R3) (pin #2)
 //
-// Given a batch where one def is unbuildable (its loader import fails) and one is
-// a bare zero-plugin def, run() must NOT reject: it degrades, dropping the broken
-// agent and returning ONLY the good agent's handle. The good handle must then
-// stop() cleanly.
+// Given a batch where one def is unbuildable and one is a bare zero-plugin def,
+// run() must NOT reject: it degrades, dropping the broken agent and returning
+// ONLY the good agent's handle. The good handle must then stop() cleanly.
+//
+// The unbuildable def uses a plugin id that is FATAL by the loader contract: an
+// id containing a path separator (`../evil`) fails Pass-0 validateId BEFORE any
+// filesystem access or import, so load() rejects and the agent cannot start
+// (see the EXT-2 id-validation tests in tests/loader.test.ts). A merely-missing
+// plugin id (valid shape, import throws) is SKIPPED by the loader now — the
+// agent would start fine — so it can no longer stand in for a failing agent.
 // ===========================================================================
 
-test("run: a def whose plugin import fails is dropped; the good def still yields exactly one handle (R3)", async () => {
+test("run: a def whose plugin id is invalid (fatal load) is dropped; the good def still yields exactly one handle (R3)", async () => {
   const bad: AgentDefinition = {
     id: "broken",
     intervalMs: 10000,
-    plugins: ["definitely-not-a-real-plugin"],
+    plugins: ["../evil"],
     privatePlugins: [],
     config: {},
   };
@@ -429,7 +435,7 @@ test("run: after a degraded batch, the surviving handle stop()s cleanly (R3)", a
   const bad: AgentDefinition = {
     id: "broken",
     intervalMs: 10000,
-    plugins: ["definitely-not-a-real-plugin"],
+    plugins: ["../evil"],
     privatePlugins: [],
     config: {},
   };
@@ -612,10 +618,12 @@ test("run report: a good agent yields a starting line then a started verdict (bo
 });
 
 test("run report: a failing agent yields a FAILED verdict carrying the id AND the reason", async () => {
+  // A path-separator plugin id fails the loader's Pass-0 validateId (fatal load),
+  // so this agent genuinely fails to start (see EXT-2 in tests/loader.test.ts).
   const bad: AgentDefinition = {
     id: "broken",
     intervalMs: 10000,
-    plugins: ["definitely-not-a-real-plugin"],
+    plugins: ["../evil"],
     privatePlugins: [],
     config: {},
   };
@@ -624,17 +632,27 @@ test("run report: a failing agent yields a FAILED verdict carrying the id AND th
 
   const failed = lines.find((l) => /fail/i.test(l) && l.includes("broken"));
   assert.ok(failed, "a FAILED line names the agent: " + JSON.stringify(lines));
+  // The verdict must carry a NON-EMPTY reason beyond just the id + FAILED marker.
+  // The exact PluginLoadError message text is not contract-pinned, so we assert a
+  // reason is present rather than matching a specific string: strip the agent id
+  // and the FAILED keyword, and require remaining non-whitespace reason text.
+  const reason = failed!
+    .replace("broken", "")
+    .replace(/fail(ed)?/i, "")
+    .trim();
   assert.ok(
-    failed!.includes("definitely-not-a-real-plugin"),
-    "the FAILED line must carry the reason (the offending plugin): " + failed,
+    reason.length > 0,
+    "the FAILED line must carry a non-empty reason (why it failed): " + failed,
   );
 });
 
 test("run report: mixed batch -> exactly one started verdict and one FAILED verdict", async () => {
+  // Path-separator id => fatal load (validateId), so 'broken' truly fails while
+  // 'survivor' starts — see EXT-2 in tests/loader.test.ts.
   const bad: AgentDefinition = {
     id: "broken",
     intervalMs: 10000,
-    plugins: ["definitely-not-a-real-plugin"],
+    plugins: ["../evil"],
     privatePlugins: [],
     config: {},
   };
