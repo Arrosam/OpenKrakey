@@ -1662,15 +1662,23 @@ test("teardown: after teardown a later trigger produces nothing", async (t) => {
 //
 // The missing-PROMPT_COMPOSE branch of sendOnce() logs a ctx.log.warn — a
 // GENUINE signal that composition is unavailable — EXCEPT during/after
-// teardown, where a coalesced/in-flight trigger racing the shutdown must NOT
-// spam that warning. Spec: teardown() sets a `stopping` flag (never reset);
-// while stopping the missing-compose branch returns early SILENTLY; while NOT
-// stopping the existing warning stays. No contract/bus change.
+// teardown, where a coalesced follow-up that re-enters sendOnce AFTER shutdown
+// must NOT spam that warning. Spec: teardown() sets a `stopping` flag (never
+// reset); while stopping the missing-compose branch returns early SILENTLY;
+// while NOT stopping the existing warning stays. No contract/bus change.
+//
+// The REAL race (per source): the first sendOnce PASSES the compose check
+// (compose IS registered) and suspends at `await communicator.chat(...)`. While
+// it is suspended a SECOND trigger coalesces (sets triggered) and teardown runs
+// mid-flight — orchestrator.stop() unregisters PROMPT_COMPOSE and the plugin's
+// teardown() sets `stopping`. When the parked chat resolves, runLoop loops (the
+// coalesced trigger) and RE-ENTERS sendOnce; THAT late compose check now sees
+// the action gone and must fall silent because `stopping` is set. A test that
+// merely triggers with compose absent cannot model this: the compose check runs
+// SYNCHRONOUSLY inside the trigger emit, before any teardown could set the flag.
 //
 // These tests swap ctx.log for a CAPTURING logger before setup (the shared
 // makeCtx harness hardcodes a no-op logger), so warn() output is observable.
-// The "compose unavailable" path is exercised exactly as §10 does it, via
-// noCompose:true (no PROMPT_COMPOSE action registered on the bus).
 // ---------------------------------------------------------------------------
 
 /** A PluginContext whose log.warn calls are recorded, replacing the no-op. */
@@ -1684,34 +1692,93 @@ function captureWarns(ctx: PluginContext): { warns: string[] } {
   return { warns };
 }
 
-test("teardown-silence: a trigger already in flight when teardown runs (PROMPT_COMPOSE unregistered) logs NO warn and does not throw", async (t) => {
-  const com = chatCommunicator({});
+/** A chat stub that parks on a manually-resolved promise, signalling entry. */
+function deferredChatCommunicator(name = "parked"): ChatStub & {
+  /** Resolves once chat() has been entered (round-trip is past the compose check). */
+  entered: Promise<void>;
+  /** Resolve the parked chat() with this response. */
+  resolveChat(res: LLMResponse): void;
+} {
+  let markEntered!: () => void;
+  const entered = new Promise<void>((r) => (markEntered = r));
+  let resolveInner: (res: LLMResponse) => void = () => {};
+  const stub = {
+    name,
+    provider: "stub",
+    model: "stub-model",
+    capabilities: ["chat"] as readonly Capability[],
+    input: ["text"],
+    output: ["text"],
+    calls: [] as LLMRequest[],
+    entered,
+    resolveChat(res: LLMResponse) {
+      resolveInner(res);
+    },
+    chat(req: LLMRequest): Promise<LLMResponse> {
+      stub.calls.push(req);
+      markEntered(); // the round-trip is now suspended past the compose check
+      return new Promise<LLMResponse>((r) => (resolveInner = r));
+    },
+  };
+  return stub;
+}
+
+test("teardown-silence: a coalesced follow-up that re-enters sendOnce after teardown (compose unregistered) logs NO warn and does not throw", async (t) => {
+  const com = deferredChatCommunicator();
   const p = plugin();
-  // noCompose:true => no prompt.compose action on the bus (the missing-compose path).
+  // Register PROMPT_COMPOSE OURSELVES so we hold the unsub (as orchestrator.stop
+  // does). makeCtx uses noCompose so it does not also register a competing one.
   const h = makeCtx(t, { llm: library([com]), noCompose: true });
+  const composeUnsub = h.actions.register(Actions.PROMPT_COMPOSE, async () => ({
+    context: { text: "CTX" },
+    messages: [] as Message[],
+  }));
   const { warns } = captureWarns(h.ctx);
   await p.setup(h.ctx);
 
-  // The teardown RACE: fire the trigger so its (async) handler is already in
-  // flight, then enter the stopping state synchronously BEFORE the handler's
-  // microtasks resolve. The in-flight frame reaches the missing-compose branch
-  // AFTER `stopping` was set — and must fall silent (no ctx.log.warn).
+  // The re-entry happens inside the plugin's detached `void runLoop(...)` chain,
+  // so a throw there surfaces as an unhandledRejection (not on our await path).
+  // Capture it for the duration of the test rather than letting it escape.
+  const rejections: unknown[] = [];
+  const onRejection = (reason: unknown) => rejections.push(reason);
+  process.on("unhandledRejection", onRejection);
+  t.after(() => process.removeListener("unhandledRejection", onRejection));
+
   let threw: unknown;
   try {
-    trigger(h.events); // starts the in-flight frame (no await/settle here)
-    await p.teardown?.(); // sets `stopping` while the frame is mid-flight
+    // #1: the first frame composes fine, then SUSPENDS at await chat().
+    trigger(h.events);
+    await com.entered; // round-trip is now in flight, past the compose check
+
+    // #2: a second trigger coalesces while #1 is parked (sets triggered).
+    trigger(h.events);
+
+    // Teardown MID-FLIGHT: orchestrator.stop() removes compose; plugin stops.
+    composeUnsub(); // PROMPT_COMPOSE now unregistered on the bus
+    await p.teardown?.(); // sets `stopping`
+
+    // Let the parked chat resolve -> runLoop loops on the coalesced trigger and
+    // RE-ENTERS sendOnce, whose late compose check must be SILENT while stopping.
+    com.resolveChat({ content: "done" });
+    await settle();
+    await settle(); // a few extra microtask turns for the re-entry to unwind
   } catch (e) {
     threw = e;
   }
-  await settle();
 
-  assert.equal(threw, undefined, "the teardown race must never throw");
+  assert.equal(threw, undefined, "the awaited teardown path must not throw");
+  assert.deepEqual(
+    rejections,
+    [],
+    `the post-teardown re-entry must not crash on torn-down state; got: ${JSON.stringify(
+      rejections.map((r) => String(r)),
+    )}`,
+  );
   assert.equal(
     warns.length,
     0,
-    `no missing-compose warning during/after teardown (the teardown race is silenced); got: ${JSON.stringify(warns)}`,
+    `the post-teardown re-entry of the missing-compose branch must be silenced; got: ${JSON.stringify(warns)}`,
   );
-  assert.equal(com.calls.length, 0, "nothing composed => nothing sent");
 });
 
 test("compose-unavailable OUTSIDE teardown STILL warns (the signal is real when not stopping)", async (t) => {
