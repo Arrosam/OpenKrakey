@@ -289,7 +289,11 @@ test("public load: a declared public plugin's setup runs exactly once", async ()
   assert.equal(mod.calls.length, 1, "setup must be called exactly once");
 });
 
-test("public load: PluginContext carries agentId === def.id and the real buses", async () => {
+test("public load: PluginContext carries agentId === def.id and buses WIRED to the Agent's own bus (behavioral, not identity)", async () => {
+  // The loader may hand each plugin a THIN TRACKED WRAPPER over the per-Agent
+  // buses (so a failed setup's partial registrations can be undone — required by
+  // skip-and-continue). So we assert the ctx buses TALK TO the Agent's bus in
+  // BOTH directions, not that they are the same object reference.
   writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1" }));
   const { loader, sys } = makeLoader(def({ id: "ag1", plugins: ["p1"] }));
   await loader.load();
@@ -297,8 +301,43 @@ test("public load: PluginContext carries agentId === def.id and the real buses",
   const ctx = (await importPlugin(publicPluginDir, "p1")).calls[0];
   assert.ok(ctx, "a ctx must have been captured");
   assert.equal(ctx.agentId, "ag1", "ctx.agentId must equal def.id");
-  assert.equal(ctx.events, sys.events, "ctx.events must be the Agent's eventbus (identity)");
-  assert.equal(ctx.actions, sys.actions, "ctx.actions must be the Agent's actionbus (identity)");
+
+  // --- events: ctx.events.emit -> a listener on sys.events receives it ---
+  let sawOnSys: unknown;
+  const unsubSys = sys.events.on("probe.up", (p) => {
+    sawOnSys = p;
+  });
+  ctx.events.emit("probe.up", { n: 1 });
+  assert.deepEqual(sawOnSys, { n: 1 }, "ctx.events.emit must reach a listener on the Agent's eventbus");
+  unsubSys();
+
+  // --- events: sys.events.emit -> a listener registered via ctx.events receives it ---
+  let sawOnCtx: unknown;
+  const unsubCtx = ctx.events.on("probe.down", (p) => {
+    sawOnCtx = p;
+  });
+  assert.equal(typeof unsubCtx, "function", "ctx.events.on must return an Unsub");
+  sys.events.emit("probe.down", { n: 2 });
+  assert.deepEqual(sawOnCtx, { n: 2 }, "a listener added via ctx.events must receive emits on the Agent's eventbus");
+  unsubCtx();
+
+  // --- actions: register via ctx.actions -> visible + invokable through sys.actions ---
+  ctx.actions.register("probe.act.up", async (params) => ({ echo: params }));
+  assert.equal(sys.actions.has("probe.act.up"), true, "an action registered via ctx must appear on the Agent's actionbus");
+  assert.deepEqual(
+    await sys.actions.invoke("probe.act.up", "PING"),
+    { echo: "PING" },
+    "invoking through the Agent's actionbus must reach the handler registered via ctx",
+  );
+
+  // --- actions: register via sys.actions -> visible + invokable through ctx.actions ---
+  sys.actions.register("probe.act.down", async (params) => ({ got: params }));
+  assert.equal(ctx.actions.has("probe.act.down"), true, "an action registered on the Agent's bus must be visible via ctx.actions");
+  assert.deepEqual(
+    await ctx.actions.invoke("probe.act.down", "PONG"),
+    { got: "PONG" },
+    "invoking through ctx.actions must reach the handler registered on the Agent's bus",
+  );
 });
 
 test("public load: ctx.dataDir === <publicPluginDir>/p1/data (public => shared location)", async () => {
@@ -701,50 +740,102 @@ test("requires: an empty requires array imposes no constraint (loads OK)", async
 });
 
 // ===========================================================================
-// Behavior 7 — invalid / unloadable modules => PluginLoadError
+// Behavior 7 — invalid / unloadable modules are SKIPPED (skip-and-continue).
+//   importPlugin covers module resolution, evaluation, shape validation and
+//   factory construction; ANY of those throwing means SKIP that plugin, warn
+//   (naming its id), leave siblings unaffected, and RESOLVE load(). A healthy
+//   sibling "ok" is loaded alongside each bad fixture to prove the skip does not
+//   abort the rest. (Pass-0 id validation stays FATAL — see EXT-2 below.)
 // ===========================================================================
 
-test("invalid module: no default export => load() rejects with PluginLoadError", async () => {
+test("invalid module: no default export => the plugin is SKIPPED with a warning; the sibling loads; load() resolves", async () => {
   // A module that exports `calls` but NO default Plugin.
   writePlugin(publicPluginDir, "bad", `export const calls = [];`);
-  const { loader } = makeLoader(def({ plugins: ["bad"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["bad", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a shapeless module must be skipped, not reject load()");
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  assert.ok(warns.some((m) => m.includes("bad")), "the skipped plugin must be named in a warning");
 });
 
-test("invalid module: default missing `manifest` => PluginLoadError", async () => {
+test("invalid module: default missing `manifest` => the plugin is SKIPPED with a warning; the sibling loads; load() resolves", async () => {
+  // A module whose default export lacks `calls`, so setup is unobservable there;
+  // the sibling's setup running is the proof the skip continued.
   writePlugin(
     publicPluginDir,
     "bad",
     `export default () => ({ async setup(_ctx) {} });`,
   );
-  const { loader } = makeLoader(def({ plugins: ["bad"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["bad", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a manifest-less plugin must be skipped, not reject load()");
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  assert.ok(warns.some((m) => m.includes("bad")), "the skipped plugin must be named in a warning");
 });
 
-test("invalid module: default missing `setup` => PluginLoadError", async () => {
+test("invalid module: default missing `setup` => the plugin is SKIPPED with a warning; the sibling loads; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "bad",
     `export default () => ({ manifest: { id: "bad", version: "1" } });`,
   );
-  const { loader } = makeLoader(def({ plugins: ["bad"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["bad", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a setup-less plugin must be skipped, not reject load()");
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  assert.ok(warns.some((m) => m.includes("bad")), "the skipped plugin must be named in a warning");
 });
 
-test("invalid module: declared public plugin directory does not exist => PluginLoadError", async () => {
+test("invalid module: declared public plugin directory does not exist => the plugin is SKIPPED with a warning; the sibling loads; load() resolves", async () => {
   // "missing" is declared but no public_plugin/missing/ exists at all.
-  const { loader } = makeLoader(def({ plugins: ["missing"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["missing", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "an unresolvable plugin dir must be skipped, not reject load()");
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  assert.ok(warns.some((m) => m.includes("missing")), "the skipped plugin must be named in a warning");
 });
 
-test("invalid module: a module whose evaluation throws => PluginLoadError", async () => {
+test("invalid module: a module whose evaluation throws => the plugin is SKIPPED with a warning (underlying error included); the sibling loads; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "boom",
     `throw new Error("module side-effect explosion");\nexport default {};`,
   );
-  const { loader } = makeLoader(def({ plugins: ["boom"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["boom", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a module whose evaluation throws must be skipped, not reject load()");
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  const warnLine = warns.find((m) => m.includes("boom"));
+  assert.ok(warnLine, "the skipped plugin must be named in a warning");
+  assert.ok(
+    warnLine!.toLowerCase().includes("explosion"),
+    "the underlying evaluation error should be included in the warning line",
+  );
 });
 
 // ===========================================================================
@@ -1314,28 +1405,51 @@ export default () => ({
 //          instantiation (R6): plugins share CODE, never live state.
 // ===========================================================================
 
-test("factory contract: a LEGACY object default export (not a factory) => PluginLoadError", async () => {
+test("factory contract: a LEGACY object default export (not a factory) => the plugin is SKIPPED with a warning; the sibling loads; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "legacy",
     `export default { manifest: { id: "legacy", version: "1" }, async setup(_ctx) {} };`,
   );
-  const { loader } = makeLoader(def({ plugins: ["legacy"] }));
-  await assert.rejects(
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["legacy", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(
     loader.load(),
-    PluginLoadError,
-    "an object default export is not a factory and must be rejected",
+    "an object default export is not a factory and must be skipped, not reject load()",
   );
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  assert.ok(warns.some((m) => m.includes("legacy")), "the skipped legacy plugin must be named in a warning");
 });
 
-test("factory contract: a factory that THROWS during construction => PluginLoadError", async () => {
+test("factory contract: a factory that THROWS during construction => the plugin is SKIPPED with a warning (underlying error included); the sibling loads; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "boomfactory",
     `export default () => { throw new Error("construction exploded"); };`,
   );
-  const { loader } = makeLoader(def({ plugins: ["boomfactory"] }));
-  await assert.rejects(loader.load(), PluginLoadError);
+  writePlugin(publicPluginDir, "ok", observablePlugin({ id: "ok" }));
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["boomfactory", "ok"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(
+    loader.load(),
+    "a factory that throws during construction must be skipped, not reject load()",
+  );
+
+  const ok = await importPlugin(publicPluginDir, "ok");
+  assert.equal(ok.calls.length, 1, "the healthy sibling still sets up");
+  const warnLine = warns.find((m) => m.includes("boomfactory"));
+  assert.ok(warnLine, "the skipped plugin must be named in a warning");
+  assert.ok(
+    warnLine!.toLowerCase().includes("construction"),
+    "the underlying construction error should be included in the warning line",
+  );
 });
 
 test("R6: two agents loading the SAME public plugin get independent instances (shared code, shared dataDir, never shared state)", async () => {
