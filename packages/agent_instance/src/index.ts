@@ -179,8 +179,16 @@ export function createAgentInstance(
     }
     if (!running) return; // start() is mid-load — it owns teardown of the in-flight load.
     clock.stop();
-    orchestrator.stop();
+    // Plugins are dependents of the orchestrator (block store + actions), so
+    // dependents-first teardown is correct: tear plugins down BEFORE stopping the
+    // orchestrator. This closes the race where an in-flight llm-core round-trip
+    // resolves AFTER prompt.compose is unregistered but BEFORE llm-core's own
+    // teardown() (which sets its stopping guard) runs in the loader's reverse-order
+    // sweep (F3). Accepted residual: a late llm.return arriving during plugin
+    // teardown may dispatch a tool call into an already-unregistered action — an
+    // isolated per-call rejection the orchestrator's dispatch catch already handles.
     await loader.teardown();
+    orchestrator.stop();
   };
 
   return { id: def.id, start, stop };
