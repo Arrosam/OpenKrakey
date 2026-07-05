@@ -161,6 +161,12 @@ const createLLMCore: PluginFactory = (): Plugin => {
   let unsubRequest: Unsub | undefined;
   let ctx: PluginContext | undefined;
   let config: LLMCoreConfig = {};
+  // Set once in teardown() and never reset (a torn-down instance is discarded). Guards the
+  // top of sendOnce(): a round-trip that was already IN FLIGHT when teardown ran re-enters
+  // sendOnce() after its network await, but teardown cleared `ctx` — so the guard bails
+  // before any `ctx!` dereference (which would throw) and before the missing-compose warning
+  // (which would be a teardown-race false positive, not a genuine signal).
+  let stopping = false;
 
   function emitReturn(reply: Reply<LLMResponse>): void {
     if (!ctx) return; // a late round-trip that resolves after teardown emits nothing
@@ -257,6 +263,11 @@ const createLLMCore: PluginFactory = (): Plugin => {
 
   /** Compose ON DEMAND, then run one round-trip. No-op (logged) if nothing to compose. */
   async function sendOnce(): Promise<void> {
+    // Teardown-race guard, FIRST — before any `ctx!` dereference. When teardown() ran while
+    // a round-trip was in flight it set `stopping` AND cleared `ctx`; runLoop then re-enters
+    // here after the network await. Bail silently: reaching `ctx!.actions` would throw, and
+    // the missing-compose warning below would be a teardown-race false positive, not a signal.
+    if (stopping) return;
     if (!ctx!.actions.has(Actions.PROMPT_COMPOSE)) {
       ctx!.log.warn("llm-core: prompt.compose is unavailable — cannot compose this frame");
       return;
@@ -441,6 +452,7 @@ const createLLMCore: PluginFactory = (): Plugin => {
     },
 
     teardown() {
+      stopping = true;
       unsubRequest?.();
       unsubRequest = undefined;
       ctx = undefined;
