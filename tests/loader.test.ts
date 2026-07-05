@@ -609,14 +609,24 @@ test("privatePlugins: missing source leaves nothing behind in the agent folder",
 // Behavior 6 — manifest.requires verification
 // ===========================================================================
 
-test("requires: an unmet requirement => load() rejects with DependencyError", async () => {
+test("requires: an unmet requirement => the plugin is SKIPPED with a warning naming it; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "p1",
     observablePlugin({ id: "p1", requires: ["nope.missing"] }),
   );
-  const { loader } = makeLoader(def({ plugins: ["p1"] }));
-  await assert.rejects(loader.load(), DependencyError);
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "an unmet requirement must skip the plugin, not reject load()");
+
+  const mod = await importPlugin(publicPluginDir, "p1");
+  assert.equal(mod.calls.length, 0, "the plugin with an unmet requirement must be skipped (never set up)");
+  assert.ok(
+    warns.some((m) => m.includes("p1") && m.includes("nope.missing")),
+    "the skip must warn, naming the plugin and its missing requirement",
+  );
 });
 
 test("requires: a dotted action name present on the actionbus => loads OK", async () => {
@@ -634,15 +644,25 @@ test("requires: a dotted action name present on the actionbus => loads OK", asyn
   assert.equal(mod.calls.length, 1, "the plugin must have been set up");
 });
 
-test("requires: a dotted action name absent from the bus => DependencyError", async () => {
+test("requires: a dotted action name absent from the bus => the plugin is SKIPPED with a warning; load() resolves", async () => {
   writePlugin(
     publicPluginDir,
     "p1",
     observablePlugin({ id: "p1", requires: ["svc.absent"] }),
   );
-  const { loader } = makeLoader(def({ plugins: ["p1"] }));
-  // Nothing registered on the bus.
-  await assert.rejects(loader.load(), DependencyError);
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  // Nothing registered on the bus, so the dotted-action requirement can never be met.
+  await assert.doesNotReject(loader.load(), "an absent dotted-action requirement must skip, not reject");
+
+  const mod = await importPlugin(publicPluginDir, "p1");
+  assert.equal(mod.calls.length, 0, "the plugin whose action requirement is unmet must be skipped");
+  assert.ok(
+    warns.some((m) => m.includes("p1") && m.includes("svc.absent")),
+    "the skip must warn, naming the plugin and the missing dotted action",
+  );
 });
 
 test("requires: an already-loaded plugin id (earlier in def.plugins) is satisfied", async () => {
@@ -656,11 +676,22 @@ test("requires: an already-loaded plugin id (earlier in def.plugins) is satisfie
   assert.equal(p1.calls.length, 1, "p1 must be set up once its dep is present");
 });
 
-test("requires: a plugin-id requirement NOT among loaded plugins => DependencyError", async () => {
-  // p1 requires "dep" but "dep" is never declared/loaded.
+test("requires: a plugin-id requirement NOT among loaded plugins => the plugin is SKIPPED with a warning; load() resolves", async () => {
+  // p1 requires "dep" but "dep" is never declared/loaded — a never-declared
+  // provider, which the contract handles by skipping the dependent (not rejecting).
   writePlugin(publicPluginDir, "p1", observablePlugin({ id: "p1", requires: ["dep"] }));
-  const { loader } = makeLoader(def({ plugins: ["p1"] }));
-  await assert.rejects(loader.load(), DependencyError);
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["p1"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a never-declared plugin-id requirement must skip, not reject");
+
+  const mod = await importPlugin(publicPluginDir, "p1");
+  assert.equal(mod.calls.length, 0, "the dependent of a never-declared provider must be skipped");
+  assert.ok(
+    warns.some((m) => m.includes("p1") && m.includes("dep")),
+    "the skip must warn, naming the plugin and the never-declared requirement",
+  );
 });
 
 test("requires: an empty requires array imposes no constraint (loads OK)", async () => {
@@ -890,77 +921,116 @@ export default () => ({
 }
 
 // ===========================================================================
-// EXT-1 — All-or-nothing rollback: a later failure tears down earlier plugins
-//          in reverse order (and that teardown really un-did setup's effects)
+// EXT-1 — Skip-and-continue (Finding C): one broken plugin never takes the
+//          Agent down. A failing plugin is SKIPPED with a warning; siblings that
+//          already set up STAY up (no rollback); load() RESOLVES. Warnings are
+//          observable via the loader's `log.warn` sink AND the bus `log.entry`
+//          mirror (loader self-diagnostics carry pluginId "core:loader").
 // ===========================================================================
 
-test("fail-fast: a later plugin's import failure rejects load() BEFORE any setup runs (zero side effects)", async () => {
+test("skip-and-continue: a later plugin's import failure is SKIPPED with a warning; the earlier good plugin still sets up; load() resolves", async () => {
   writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.act"));
   writePlugin(publicPluginDir, "zz-bad", explodingModule("zz-bad"));
 
-  // The whole load set is imported + validated BEFORE any setup runs, so
-  // zz-bad's import failure aborts the load while aa-good has had NO side
-  // effects at all — stronger than rollback (nothing to roll back).
-  const { loader, sys } = makeLoader(def({ plugins: ["aa-good", "zz-bad"] }));
-  await assert.rejects(loader.load(), "a downstream failure must reject the whole load()");
+  // Under skip-and-continue the failing zz-bad is dropped, but aa-good — declared
+  // and processed regardless of order — is set up normally. load() must resolve.
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(def({ plugins: ["aa-good", "zz-bad"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "a broken sibling must NOT reject the whole load()");
 
   const good = await importPlugin(publicPluginDir, "aa-good");
   assert.equal(
     good.state.setupCalled,
-    false,
-    "fail-fast: the earlier plugin must never have been set up when a later import fails",
+    true,
+    "skip-and-continue: the healthy plugin must be set up despite a broken sibling",
   );
   assert.equal(
     sys.actions.has("aa-good.act"),
-    false,
-    "no registration may leak from an aborted load",
+    true,
+    "the healthy plugin's setup effects (its action registration) must remain in place",
+  );
+  // The broken plugin was warned about, naming it (and, per the contract, the
+  // underlying error is included in the log line).
+  assert.ok(
+    warns.some((m) => m.includes("zz-bad")),
+    "the skipped plugin must be named in a warning",
+  );
+  assert.ok(
+    warns.some((m) => m.includes("zz-bad") && m.toLowerCase().includes("explod")),
+    "the underlying import error must be included in the warning line",
   );
 });
 
-test("rollback: an UNMET-requires failure also tears down the earlier good plugin", async () => {
+test("skip-and-continue: an unmet-requires plugin is skipped; the earlier good plugin's setup is NOT torn down; load() resolves", async () => {
   writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.r2"));
-  // zz-needy requires a plugin/capability nobody provides -> DependencyError.
+  // zz-needy requires a plugin/capability nobody provides -> it is unsatisfiable.
   writePlugin(publicPluginDir, "zz-needy", providerPlugin({ id: "zz-needy", requires: ["nobody"] }));
 
-  const { loader } = makeLoader(def({ plugins: ["aa-good", "zz-needy"] }));
-  await assert.rejects(loader.load(), DependencyError);
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(def({ plugins: ["aa-good", "zz-needy"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "an unmet-requires plugin must NOT reject the load");
 
   const good = await importPlugin(publicPluginDir, "aa-good");
-  assert.equal(good.state.teardownCalled, true, "rollback ran the good plugin's teardown");
+  assert.equal(good.state.setupCalled, true, "the good plugin set up");
+  assert.equal(
+    good.state.teardownCalled,
+    false,
+    "NO rollback: the good plugin's teardown must NOT run just because a sibling was skipped",
+  );
+  assert.equal(
+    sys.actions.has("aa-good.r2"),
+    true,
+    "the good plugin's registration must stay up (it was never torn down)",
+  );
+  assert.ok(
+    warns.some((m) => m.includes("zz-needy") && m.includes("nobody")),
+    "the skipped dependent must be warned about, naming the missing requirement",
+  );
 });
 
-test("rollback: proven by a SECOND loader on the SAME event-system loading aa-good without an 'already registered' collision", async () => {
-  writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.unique"));
-  writePlugin(publicPluginDir, "zz-bad", explodingModule("zz-bad"));
-
-  // Share ONE event-system across both loaders so a leaked action registration
-  // would collide on the bus.
-  const sys = createEventSystem();
-  const make = (d: AgentDefinition) =>
-    createLoader({
-      agentId: d.id,
-      def: d,
-      events: sys,
-      orchestrator: stubOrchestrator(),
-      library,
-      publicPluginDir,
-      agentDir,
-      log: { info: () => {}, warn: () => {}, error: () => {} },
-    });
-
-  // First loader fails at zz-bad; rollback must un-register aa-good's action.
-  const l1 = make(def({ plugins: ["aa-good", "zz-bad"] }));
-  await assert.rejects(l1.load());
-  assert.equal(sys.actions.has("aa-good.unique"), false, "rollback must leave the bus clean");
-
-  // Second loader (same bus) loads aa-good alone: must NOT throw a duplicate-
-  // registration error — proving the first run's teardown actually ran.
-  const l2 = make(def({ id: "ag1", plugins: ["aa-good"] }));
-  await assert.doesNotReject(
-    l2.load(),
-    "re-registering on the same bus must succeed because rollback unregistered it",
+test("skip-and-continue: the skipped plugin's actions are never registered while the good plugin's remain (proven on ONE shared bus)", async () => {
+  // Reframed from the old rollback proof: there is no rollback anymore. Instead
+  // we prove selectivity — only the FAILING plugin's effects are absent; the
+  // healthy plugin's effects are present — using a plugin whose setup registers
+  // an action and then throws (so its setup runs partway, then fails).
+  writePlugin(publicPluginDir, "aa-good", goodRegistrarPlugin("aa-good", "aa-good.keep"));
+  writePlugin(
+    publicPluginDir,
+    "zz-selfdestruct",
+    `
+export const calls = [];
+export default () => ({
+  manifest: { id: "zz-selfdestruct", version: "1" },
+  async setup(ctx) {
+    calls.push(ctx);
+    ctx.actions.register("zz-selfdestruct.leak", async () => "leak");
+    throw new Error("setup of zz-selfdestruct blew up after registering");
+  },
+});
+`,
   );
-  assert.equal(sys.actions.has("aa-good.unique"), true, "the second load registered the action");
+
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(
+    def({ plugins: ["aa-good", "zz-selfdestruct"] }),
+    stubOrchestrator(),
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+  await assert.doesNotReject(loader.load(), "a plugin whose setup throws must be skipped, not fatal");
+
+  // The healthy plugin's action is registered and stays...
+  assert.equal(sys.actions.has("aa-good.keep"), true, "the good plugin's action remains registered");
+  // ...and the good plugin was NOT torn down (no rollback on a sibling's failure).
+  const good = await importPlugin(publicPluginDir, "aa-good");
+  assert.equal(good.state.teardownCalled, false, "the good plugin must not be torn down");
+  assert.ok(
+    warns.some((m) => m.includes("zz-selfdestruct")),
+    "the plugin whose setup threw must be named in a warning",
+  );
 });
 
 // ===========================================================================
@@ -1030,13 +1100,25 @@ test("requires (load-set): 'alpha' requires capability 'storage' provided by sib
   assert.equal(alpha.calls.length, 1, "alpha was set up once its capability requirement was met");
 });
 
-test("requires (load-set): a non-dotted requirement matched by NOBODY's id/provides => DependencyError", async () => {
+test("requires (load-set): a non-dotted requirement matched by NOBODY's id/provides => alpha is SKIPPED, zeta still loads, load() resolves", async () => {
   writePlugin(publicPluginDir, "alpha", providerPlugin({ id: "alpha", requires: ["storage"] }));
   // A sibling that provides something ELSE — does NOT satisfy "storage".
   writePlugin(publicPluginDir, "zeta", providerPlugin({ id: "zeta", provides: ["cache"] }));
 
-  const { loader } = makeLoader(def({ plugins: ["alpha", "zeta"] }));
-  await assert.rejects(loader.load(), DependencyError);
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["alpha", "zeta"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(loader.load(), "an unsatisfiable capability requirement must skip that plugin, not reject");
+
+  const alpha = await importPlugin(publicPluginDir, "alpha");
+  const zeta = await importPlugin(publicPluginDir, "zeta");
+  assert.equal(alpha.calls.length, 0, "alpha's capability requirement is unmet => alpha is skipped");
+  assert.equal(zeta.calls.length, 1, "the unrelated sibling zeta still loads (skip did not abort the rest)");
+  assert.ok(
+    warns.some((m) => m.includes("alpha") && m.includes("storage")),
+    "the skip must warn, naming alpha and the missing capability",
+  );
 });
 
 // ===========================================================================
@@ -1112,9 +1194,11 @@ export default () => ({
   assert.equal(consumer.calls.length, 1, "the deferred consumer was set up once, after its provider");
 });
 
-test("requires (action cycle): two plugins each needing the other's action => DependencyError", async () => {
-  // x needs y.act, y needs x.act — neither can ever become ready, so the set is
-  // unsatisfiable and must fail loudly rather than spin or partially load.
+test("requires (action cycle): two plugins each needing the other's action => BOTH are SKIPPED (each warned); a third unrelated plugin still loads; load() resolves", async () => {
+  // x needs y.act, y needs x.act — neither can ever become ready. Under
+  // skip-and-continue the cycle does NOT fail the load: each stuck plugin is
+  // skipped one at a time with a warning naming the missing requirement, and an
+  // unrelated third plugin still loads. load() resolves (bare-agent invariant).
   writePlugin(
     publicPluginDir,
     "x",
@@ -1125,8 +1209,32 @@ test("requires (action cycle): two plugins each needing the other's action => De
     "y",
     observablePlugin({ id: "y", requires: ["x.act"], setupBody: `ctx.actions.register("y.act", async () => 1);` }),
   );
-  const { loader } = makeLoader(def({ plugins: ["x", "y"] }));
-  await assert.rejects(loader.load(), DependencyError, "an unbreakable action-dependency cycle must fail loudly");
+  writePlugin(publicPluginDir, "z-free", observablePlugin({ id: "z-free" }));
+
+  const warns: string[] = [];
+  const { loader } = makeLoader(def({ plugins: ["x", "y", "z-free"] }), stubOrchestrator(), {
+    log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+  });
+  await assert.doesNotReject(
+    loader.load(),
+    "an unbreakable action-dependency cycle must skip the cycle members, not reject the whole load",
+  );
+
+  const x = await importPlugin(publicPluginDir, "x");
+  const y = await importPlugin(publicPluginDir, "y");
+  const z = await importPlugin(publicPluginDir, "z-free");
+  assert.equal(x.calls.length, 0, "cycle member x is skipped (its requirement can never be met)");
+  assert.equal(y.calls.length, 0, "cycle member y is skipped (its requirement can never be met)");
+  assert.equal(z.calls.length, 1, "an unrelated third plugin still loads — the cascade did not abort the rest");
+  // Each cycle member is individually warned, naming its missing requirement.
+  assert.ok(
+    warns.some((m) => m.includes("x") && m.includes("y.act")),
+    "x's skip must warn, naming its missing requirement y.act",
+  );
+  assert.ok(
+    warns.some((m) => m.includes("y") && m.includes("x.act")),
+    "y's skip must warn, naming its missing requirement x.act",
+  );
 });
 
 test("setup order: independent plugins (no requirements) keep their declared array order", async () => {
@@ -1504,4 +1612,238 @@ test("loader self-diagnostic: a throwing plugin teardown is mirrored on the bus 
   assert.equal(typeof hit.at, "number", "Notify envelope: at is a timestamp");
   assert.equal(typeof hit.data.text, "string", "the entry carries text");
   assert.ok(hit.data.text.length > 0, "the diagnostic text must be non-empty");
+});
+
+// ===========================================================================
+// EXT-7 — Skip-and-continue semantics in depth (Finding C). A single broken
+//   plugin never aborts the Agent: it is SKIPPED with a warning, siblings are
+//   unaffected, load() RESOLVES, and a plugin whose `requires` can never be met
+//   is itself skipped (cascading one-at-a-time, each logged, never aborting the
+//   rest). id-validation failures remain FATAL (covered by EXT-2 above). Warnings
+//   are pinned via BOTH the loader `log.warn` sink and the bus `log.entry` mirror
+//   (loader self-diagnostics carry pluginId "core:loader", source 'core:loader').
+// ===========================================================================
+
+// (a) import-throw => skipped with a warning naming the plugin id + underlying
+//     error; siblings load. Pinned on the bus mirror (source core:loader) too.
+test("skip (import throw): the failing plugin is skipped with a warning naming its id + underlying error; siblings load; load() resolves", async () => {
+  writePlugin(publicPluginDir, "good-a", observablePlugin({ id: "good-a" }));
+  writePlugin(publicPluginDir, "boom-b", explodingModule("boom-b"));
+  writePlugin(publicPluginDir, "good-c", observablePlugin({ id: "good-c" }));
+
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(
+    def({ plugins: ["good-a", "boom-b", "good-c"] }),
+    stubOrchestrator(),
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+  const seen: any[] = [];
+  sys.events.on("log.entry", (p) => seen.push(p));
+
+  await assert.doesNotReject(loader.load(), "an import throw must never reject load()");
+
+  // Both healthy siblings set up exactly once; the broken one did not.
+  const a = await importPlugin(publicPluginDir, "good-a");
+  const c = await importPlugin(publicPluginDir, "good-c");
+  assert.equal(a.calls.length, 1, "the sibling before the failure set up");
+  assert.equal(c.calls.length, 1, "the sibling after the failure set up (skip continued)");
+
+  // Warning via the log sink: names the plugin id and includes the import error.
+  const warnLine = warns.find((m) => m.includes("boom-b"));
+  assert.ok(warnLine, "a warning must name the skipped plugin id");
+  assert.ok(
+    warnLine!.toLowerCase().includes("explod"),
+    "the warning must include the underlying import error text",
+  );
+
+  // Warning via the bus mirror: a core:loader warn log.entry naming the plugin.
+  const busWarn = seen.find(
+    (p) =>
+      p?.data?.level === "warn" &&
+      p?.data?.pluginId === "core:loader" &&
+      typeof p?.data?.text === "string" &&
+      p.data.text.includes("boom-b"),
+  );
+  assert.ok(busWarn, "the skip warning must be mirrored on the bus as a core:loader warn log.entry");
+});
+
+// (b) setup-throw => skipped; EARLIER siblings not torn down; LATER independent
+//     siblings still set up.
+test("skip (setup throw): the plugin is skipped, EARLIER siblings are NOT torn down, and LATER independent siblings still set up", async () => {
+  writePlugin(publicPluginDir, "before-x", goodRegistrarPlugin("before-x", "before-x.act"));
+  writePlugin(
+    publicPluginDir,
+    "boom-setup",
+    `
+export const calls = [];
+export default () => ({
+  manifest: { id: "boom-setup", version: "1" },
+  async setup(ctx) { calls.push(ctx); throw new Error("setup of boom-setup rejected"); },
+});
+`,
+  );
+  writePlugin(publicPluginDir, "after-z", goodRegistrarPlugin("after-z", "after-z.act"));
+
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(
+    def({ plugins: ["before-x", "boom-setup", "after-z"] }),
+    stubOrchestrator(),
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+  await assert.doesNotReject(loader.load(), "a setup throw must never reject load()");
+
+  const before = await importPlugin(publicPluginDir, "before-x");
+  const after = await importPlugin(publicPluginDir, "after-z");
+
+  // Earlier sibling: set up and LEFT UP (no rollback).
+  assert.equal(before.state.setupCalled, true, "the earlier sibling set up");
+  assert.equal(before.state.teardownCalled, false, "the earlier sibling must NOT be torn down");
+  assert.equal(sys.actions.has("before-x.act"), true, "the earlier sibling's action stays registered");
+
+  // Later independent sibling: still set up despite the mid failure.
+  assert.equal(after.state.setupCalled, true, "the later independent sibling still set up");
+  assert.equal(sys.actions.has("after-z.act"), true, "the later sibling's action registered");
+
+  // The failing plugin's setup ran (partway) but it is otherwise skipped and warned.
+  const boom = await importPlugin(publicPluginDir, "boom-setup");
+  assert.equal(boom.calls.length, 1, "the failing plugin's setup was attempted once");
+  assert.ok(warns.some((m) => m.includes("boom-setup")), "the setup-throwing plugin must be warned about");
+});
+
+// (c) a dependent of a skipped provider is itself skipped with a warning naming
+//     the missing dependency, and does NOT cascade-abort the rest (a third
+//     unrelated plugin still loads).
+test("skip (cascade): a dependent of a skipped provider is skipped naming the missing dep; an unrelated third plugin still loads", async () => {
+  // provider-p throws on import => skipped. dependent-q requires provider-p =>
+  // its requirement can never be met => skipped, naming provider-p. unrelated-r
+  // has no requirements => must still load. The cascade never aborts the rest.
+  writePlugin(publicPluginDir, "provider-p", explodingModule("provider-p"));
+  writePlugin(
+    publicPluginDir,
+    "dependent-q",
+    providerPlugin({ id: "dependent-q", requires: ["provider-p"] }),
+  );
+  writePlugin(publicPluginDir, "unrelated-r", observablePlugin({ id: "unrelated-r" }));
+
+  const warns: string[] = [];
+  const { loader } = makeLoader(
+    def({ plugins: ["provider-p", "dependent-q", "unrelated-r"] }),
+    stubOrchestrator(),
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+  await assert.doesNotReject(loader.load(), "a cascade of skips must never reject load()");
+
+  const q = await importPlugin(publicPluginDir, "dependent-q");
+  const r = await importPlugin(publicPluginDir, "unrelated-r");
+
+  assert.equal(q.calls.length, 0, "the dependent of a skipped provider must itself be skipped (never set up)");
+  assert.equal(r.calls.length, 1, "an unrelated third plugin must still load — the cascade did not abort the rest");
+
+  // The dependent's skip warning must name the missing requirement (provider-p).
+  assert.ok(
+    warns.some((m) => m.includes("dependent-q") && m.includes("provider-p")),
+    "the cascaded skip must warn, naming both the skipped dependent and its missing requirement",
+  );
+  // The provider was independently warned about (each skip logged one at a time).
+  assert.ok(
+    warns.some((m) => m.includes("provider-p")),
+    "the originally-broken provider must be logged on its own",
+  );
+});
+
+// (d) ALL plugins skip-fail => load() resolves, zero loaded, agent still usable
+//     (teardown() resolves too).
+test("skip (all fail): every plugin skips => load() resolves with zero loaded, no blocks, and teardown() also resolves", async () => {
+  writePlugin(publicPluginDir, "boom-1", explodingModule("boom-1"));
+  writePlugin(publicPluginDir, "boom-2", explodingModule("boom-2"));
+  writePlugin(
+    publicPluginDir,
+    "boom-3",
+    `
+export const calls = [];
+export default () => ({
+  manifest: { id: "boom-3", version: "1" },
+  async setup(ctx) { calls.push(ctx); throw new Error("boom-3 setup failed"); },
+});
+`,
+  );
+
+  const orchestrator = stubOrchestrator();
+  const warns: string[] = [];
+  const { loader } = makeLoader(
+    def({ plugins: ["boom-1", "boom-2", "boom-3"] }),
+    orchestrator,
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+
+  // The bare-agent invariant (R3): all plugins skipping still resolves load().
+  await assert.doesNotReject(loader.load(), "all plugins skipping must still resolve load()");
+  assert.deepEqual(orchestrator.listBlocks(), [], "zero plugins loaded => no context blocks registered");
+
+  // Every failing plugin was warned about (each individually logged).
+  for (const id of ["boom-1", "boom-2", "boom-3"]) {
+    assert.ok(warns.some((m) => m.includes(id)), `${id} must be individually warned about`);
+  }
+
+  // The agent is still usable: teardown() over an all-skipped load must resolve.
+  await assert.doesNotReject(
+    loader.teardown(),
+    "teardown() after an all-skip load must resolve (agent stays usable)",
+  );
+});
+
+// (e) dotted-action requires on a skipped provider => dependent skipped via the
+//     SAME skip machinery (assert the warning), not a distinct error path.
+test("skip (dotted-action on skipped provider): the dependent is skipped via the same warn machinery, not a distinct error path", async () => {
+  // provider-svc would register the dotted action "svc.ready" in setup, but its
+  // setup throws => it is skipped and "svc.ready" is never registered. consumer
+  // requires that dotted action => at setup time the action is absent => the
+  // consumer is skipped through the SAME skip-and-warn path. unrelated-ok proves
+  // the rest still loads.
+  writePlugin(
+    publicPluginDir,
+    "provider-svc",
+    `
+export const calls = [];
+export default () => ({
+  manifest: { id: "provider-svc", version: "1" },
+  async setup(ctx) {
+    calls.push(ctx);
+    ctx.actions.register("svc.ready", async () => "ok");
+    throw new Error("provider-svc setup blew up AFTER registering");
+  },
+});
+`,
+  );
+  writePlugin(
+    publicPluginDir,
+    "consumer-svc",
+    providerPlugin({ id: "consumer-svc", requires: ["svc.ready"] }),
+  );
+  writePlugin(publicPluginDir, "unrelated-ok", observablePlugin({ id: "unrelated-ok" }));
+
+  const warns: string[] = [];
+  const { loader, sys } = makeLoader(
+    def({ plugins: ["provider-svc", "consumer-svc", "unrelated-ok"] }),
+    stubOrchestrator(),
+    { log: { info: () => {}, warn: (m) => warns.push(m), error: () => {} } },
+  );
+  await assert.doesNotReject(loader.load(), "a dotted-action requirement on a skipped provider must not reject load()");
+
+  const consumer = await importPlugin(publicPluginDir, "consumer-svc");
+  const ok = await importPlugin(publicPluginDir, "unrelated-ok");
+
+  assert.equal(
+    consumer.calls.length,
+    0,
+    "the dotted-action dependent of a skipped provider must itself be skipped",
+  );
+  assert.equal(ok.calls.length, 1, "an unrelated plugin still loads");
+
+  // Same skip machinery: a warning names the skipped consumer + its missing
+  // dotted requirement (NOT a thrown DependencyError / distinct rejection path).
+  assert.ok(
+    warns.some((m) => m.includes("consumer-svc") && m.includes("svc.ready")),
+    "the skip must be warned (same machinery), naming the missing dotted action requirement",
+  );
 });
