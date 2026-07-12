@@ -1,0 +1,39 @@
+# --- installed deps & VCS (reinstalled/irrelevant in the image) ---
+node_modules/
+.git/
+.github/
+
+# --- SECRETS & LIVE RUNTIME STATE (never bake into an image) ---
+config/llm.json
+config/agent.default.json
+agents/
+.krakey/
+public_plugin/*/data/
+
+# --- internal / launch docs (not for a distributed image) ---
+RELEASE_PLAN.md
+
+# --- non-runtime material (tests, docs, design, generated output) ---
+tests/
+docs/
+design/
+graphify-out/
+assets/
+overviews/
+
+# --- modular-dev transient work trees ---
+.mdwt/
+.mdsmoke/
+.claude/modular-dev-state/
+.claude/modular-dev-queue-*.json
+.claude/modular-dev-smoke-*.json
+
+# --- misc ---
+*.log
+logs/
+.dist/
+*.tsbuildinfo
+docs/arch-graph.html
+Dockerfile
+.dockerignore
+docker-compose.yml

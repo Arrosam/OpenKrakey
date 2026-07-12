@@ -118,6 +118,37 @@ The Console frames the other three — run config-web and at least one agent for
 `krakey dashboard` prints all four tokened links (`CONSOLE_TOKEN` pins the Console's token across
 invocations; `npm run console` standalone mints one and prints its own tokened URL).
 
+## Run with Docker
+
+Prebuilt images are published to **GitHub Packages (GHCR)** — no Node install, no build step:
+
+```bash
+docker pull ghcr.io/arrosam/openkrakey:latest
+```
+
+**First run — set up in the browser.** The image starts the Config UI (the onboarding
+wizard), because a fresh install has no agents yet. Watch the terminal for the tokened URL
+it prints, and open it:
+
+```bash
+docker run --rm -p 127.0.0.1:7717:7717 \
+  -v "$PWD/config:/app/config" -v "$PWD/agents:/app/agents" \
+  ghcr.io/arrosam/openkrakey:latest
+# → ✦ Config console: http://127.0.0.1:7717/?token=…   ← open this to add a provider + agent
+```
+
+Then **run the agent** (override the command to launch the runtime):
+
+```bash
+docker run --rm -p 127.0.0.1:7718:7718 -p 127.0.0.1:7719:7719 \
+  -v "$PWD/config:/app/config" -v "$PWD/agents:/app/agents" \
+  ghcr.io/arrosam/openkrakey:latest node --import tsx packages/boot/src/index.ts
+```
+
+Or with Compose: `docker compose up` for the setup UI, then `docker compose --profile run up`
+for the runtime. To reach the Chat (7718) / Inspector (7719) surfaces from the host, set
+`"host": "0.0.0.0"` for `web-chat` and `inspector` in `agents/<id>/config.json`.
+
 ## What your agent can do
 
 Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set

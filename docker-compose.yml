@@ -1,0 +1,36 @@
+# OpenKrakey — local run via Docker Compose.
+#
+#   docker compose up --build          # FIRST-RUN SETUP UI (watch the terminal for the
+#                                       # tokened http://127.0.0.1:7717/?token=… URL)
+#   docker compose --profile run up     # the agent runtime, once a provider + agent exist
+#
+# Config + agent state live under ./config and ./agents on the host (bind-mounted), so
+# they survive container restarts. The setup UI creates them for you on first save.
+services:
+  # Default service: the browser setup / config UI (the onboarding wizard). This is
+  # what `docker compose up` starts, because a fresh install has no agents yet.
+  krakey:
+    # Pulls the published image by default; `docker compose up --build` builds locally.
+    image: ghcr.io/arrosam/openkrakey:latest
+    build: .
+    volumes:
+      - ./config:/app/config
+      - ./agents:/app/agents
+    ports:
+      - "127.0.0.1:7717:7717" # config-web (setup UI) — host loopback only
+    # (uses the image's default CMD: the config-web setup UI)
+
+  # The agent runtime — start it AFTER you've configured a provider + agent in the
+  # setup UI above:  docker compose --profile run up
+  runtime:
+    image: ghcr.io/arrosam/openkrakey:latest
+    build: .
+    profiles: ["run"]
+    command: ["node", "--import", "tsx", "packages/boot/src/index.ts"]
+    volumes:
+      - ./config:/app/config
+      - ./agents:/app/agents
+    ports:
+      - "127.0.0.1:7718:7718" # web-chat  (set "host":"0.0.0.0" in the agent config)
+      - "127.0.0.1:7719:7719" # inspector (set "host":"0.0.0.0" in the agent config)
+    restart: unless-stopped
