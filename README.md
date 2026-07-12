@@ -126,15 +126,15 @@ Prebuilt images are published to **GitHub Packages (GHCR)** — no Node install,
 docker pull ghcr.io/arrosam/openkrakey:latest
 ```
 
-**First run — set up in the browser.** The image starts the Config UI (the onboarding
-wizard), because a fresh install has no agents yet. Watch the terminal for the tokened URL
-it prints, and open it:
+**First run — the Console dashboard.** The image launches the unified **Console** (the landing
+page that frames Config · Chat · Inspector), because a fresh install has no agents yet. Watch the
+terminal for the tokened Console URL, open it, and set up your provider + agent in its Config panel:
 
 ```bash
-docker run --rm -p 127.0.0.1:7717:7717 \
+docker run --rm -p 127.0.0.1:7716:7716 -p 127.0.0.1:7717:7717 \
   -v "$PWD/config:/app/config" -v "$PWD/agents:/app/agents" \
   ghcr.io/arrosam/openkrakey:latest
-# → ✦ Config console: http://127.0.0.1:7717/?token=…   ← open this to add a provider + agent
+# → ✦ Krakey Console: http://127.0.0.1:7716/?token=…   ← open this
 ```
 
 Then **run the agent** (override the command to launch the runtime):
@@ -145,8 +145,8 @@ docker run --rm -p 127.0.0.1:7718:7718 -p 127.0.0.1:7719:7719 \
   ghcr.io/arrosam/openkrakey:latest node --import tsx packages/boot/src/index.ts
 ```
 
-Or with Compose: `docker compose up` for the setup UI, then `docker compose --profile run up`
-for the runtime. To reach the Chat (7718) / Inspector (7719) surfaces from the host, set
+Or with Compose: `docker compose up` for the Console dashboard, then `docker compose --profile
+run up` for the runtime. To reach the Chat (7718) / Inspector (7719) panels from the host, set
 `"host": "0.0.0.0"` for `web-chat` and `inspector` in `agents/<id>/config.json`.
 
 ## What your agent can do

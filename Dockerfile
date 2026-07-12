@@ -37,14 +37,18 @@ EXPOSE 7716 7717 7718 7719
 RUN chown -R node:node /app
 USER node
 
-ENTRYPOINT ["tini", "--"]
+# tini -g forwards signals to the whole process group, so BOTH dashboard processes
+# (Console + config-web, started by the entrypoint) get SIGTERM on `docker stop`.
+ENTRYPOINT ["tini", "-g", "--"]
 
-# DEFAULT = the browser SETUP UI (config-web), NOT the agent runtime. A fresh install
-# has no agents configured, so first contact must be the onboarding wizard — the
-# runtime (`npm start`) would just print "No agents yet" and exit. config-web prints a
-# tokened `http://127.0.0.1:7717/?token=…` URL on startup; open it to add a provider
-# and create your first agent.
+# DEFAULT = the unified Console DASHBOARD (the landing page), NOT the agent runtime.
+# A fresh install has no agents, so first contact is the dashboard: one shell framing
+# Config (the setup wizard), Chat and Inspector. The entrypoint runs the Console (7716)
+# + config-web (7717) together and prints a tokened
+# `http://127.0.0.1:7716/?token=…` Console URL — open it to add a provider + agent.
+# (The runtime `npm start` would just print "No agents yet" and exit, which is why it
+# is not the default.)
 #
 # Once configured, run the agent runtime instead (override the command):
 #   docker run … ghcr.io/arrosam/openkrakey node --import tsx packages/boot/src/index.ts
-CMD ["node", "--import", "tsx", "packages/config-web/src/bin.ts"]
+CMD ["sh", "docker/dashboard-entrypoint.sh"]
