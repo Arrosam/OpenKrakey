@@ -118,6 +118,30 @@ The Console frames the other three — run config-web and at least one agent for
 `krakey dashboard` prints all four tokened links (`CONSOLE_TOKEN` pins the Console's token across
 invocations; `npm run console` standalone mints one and prints its own tokened URL).
 
+## Run with Docker
+
+Prebuilt images are published to **GitHub Packages (GHCR)** — no Node install, no build step:
+
+```bash
+docker pull ghcr.io/arrosam/openkrakey:latest
+```
+
+Bring your own config: the image ships **without** your keys or agents — you mount them in (see
+[Install → step 3](#install-and-setup) for the file shapes):
+
+```bash
+docker run --rm -it \
+  -v "$PWD/config:/app/config" \   # providers + keys (config/llm.json)
+  -v "$PWD/agents:/app/agents" \   # your agent(s)
+  -p 7718:7718 -p 7719:7719 \
+  ghcr.io/arrosam/openkrakey:latest
+```
+
+The web surfaces bind loopback *inside* the container, so set `"host": "0.0.0.0"` for `web-chat` and
+`inspector` in `agents/<id>/config.json` to reach the published Chat (7718) and Inspector (7719)
+ports. Or use Compose, which pre-wires the volumes and ports — `docker compose up` for the runtime,
+and `docker compose --profile setup run --rm --service-ports config` for the Config UI (7717).
+
 ## What your agent can do
 
 Capabilities are plugins. The default agent (`config/agent.default.example.json`) loads the set
