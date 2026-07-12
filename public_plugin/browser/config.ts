@@ -26,6 +26,7 @@ export interface BrowserConfig {
   maxResults: number;
   maxResultChars: number;
   maxResultsTotalChars: number;
+  maxFailureNotices: number;
 }
 
 const DEFAULTS: BrowserConfig = {
@@ -44,6 +45,7 @@ const DEFAULTS: BrowserConfig = {
   maxResults: 10,
   maxResultChars: 4000,
   maxResultsTotalChars: 16000,
+  maxFailureNotices: 8,
 };
 
 /** A nullable string field: use the value only if it is a string, else default null. */
@@ -104,6 +106,7 @@ export function readConfig(raw: unknown): BrowserConfig {
     maxResults: finiteNumber(r.maxResults, DEFAULTS.maxResults),
     maxResultChars: finiteNumber(r.maxResultChars, DEFAULTS.maxResultChars),
     maxResultsTotalChars: finiteNumber(r.maxResultsTotalChars, DEFAULTS.maxResultsTotalChars),
+    maxFailureNotices: finiteNumber(r.maxFailureNotices, DEFAULTS.maxFailureNotices),
   };
 }
 
@@ -161,8 +164,106 @@ export function pushResult(ring: ResultEntry[], entry: ResultEntry, max: number)
   return [...ring, entry].slice(-max);
 }
 
-export function renderResults(results: ResultEntry[], cfg: BrowserConfig): Message[] {
-  if (results.length === 0) return [];
+/**
+ * A persistent-failure ledger entry: one distinct (toolName + normalized error)
+ * that has failed one or more frames in a row, surviving across frames until that
+ * tool next succeeds. `count` is the consecutive-failure count for this exact pair.
+ */
+export interface FailureEntry {
+  toolName: string;
+  error: string;
+  count: number;
+  firstAt: number;
+  lastAt: number;
+}
+
+/**
+ * Normalize a raw tool error into a stable, bounded string for keying/display:
+ * coerce to String, trim, fall back to "unknown" when empty/missing, cap ~300 chars.
+ */
+export function normalizeFailureError(error: unknown): string {
+  let s = "";
+  try {
+    s = String(error ?? "").trim();
+  } catch {
+    s = "";
+  }
+  if (s.length === 0) s = "unknown";
+  if (s.length > 300) s = s.slice(0, 300);
+  return s;
+}
+
+/**
+ * Upsert a failure into the ledger keyed by (toolName + normalized error), then
+ * bound the ledger to `max` entries dropping OLDEST-first (insertion order).
+ *
+ * Existing pair → count++, lastAt = at. New pair → push {count:1, firstAt:at, lastAt:at}.
+ * `max <= 0` DISABLES the ledger entirely (returns an empty ledger, records nothing).
+ */
+export function pushFailure(
+  ledger: FailureEntry[],
+  toolName: string,
+  error: unknown,
+  at: number,
+  max: number,
+): FailureEntry[] {
+  if (!(typeof max === "number" && max > 0)) return [];
+  const err = normalizeFailureError(error);
+  const next = ledger.map((e) => ({ ...e }));
+  const hit = next.find((e) => e.toolName === toolName && e.error === err);
+  if (hit) {
+    hit.count += 1;
+    hit.lastAt = at;
+  } else {
+    next.push({ toolName, error: err, count: 1, firstAt: at, lastAt: at });
+  }
+  return next.slice(-max);
+}
+
+/**
+ * Remove EVERY ledger entry for a tool (clear by tool, not tool+error) — called
+ * when that tool next succeeds so a resolved failure stops being reported.
+ */
+export function clearFailuresForTool(ledger: FailureEntry[], toolName: string): FailureEntry[] {
+  return ledger.filter((e) => e.toolName !== toolName);
+}
+
+/**
+ * The persistent-failure notice line for one ledger entry. Rendered only for
+ * entries with count >= 2 (the first failure already renders as a normal result).
+ * The 'failed <N>x in a row' phrasing and the reflect sentence are matched by tests.
+ */
+export function formatFailureLine(entry: FailureEntry): string {
+  return (
+    "[browser persistent failure] " +
+    entry.toolName +
+    " has failed " +
+    entry.count +
+    "x in a row with the same error: " +
+    entry.error +
+    ". This failure is persistent - retrying the same call unchanged will NOT succeed. " +
+    "Reflect on why it is failing and change your approach, or stop and report it; " +
+    "do not keep re-calling it."
+  );
+}
+
+export function renderResults(
+  results: ResultEntry[],
+  cfg: BrowserConfig,
+  failures: FailureEntry[] = [],
+): Message[] {
+  // Persistent-failure notices render FIRST, one per ledger entry with count >= 2
+  // (a count of 1 already surfaced as a normal result that frame). Each line is
+  // capped independently by maxResultChars.
+  const failureMessages: Message[] = failures
+    .filter((f) => f.count >= 2)
+    .map((f): Message => ({
+      role: "user",
+      name: "browser",
+      content: capText(formatFailureLine(f), cfg.maxResultChars).content,
+    }));
+
+  if (results.length === 0) return failureMessages;
 
   const header = (entry: ResultEntry): string =>
     "[browser tool result | " +
@@ -203,8 +304,10 @@ export function renderResults(results: ResultEntry[], cfg: BrowserConfig): Messa
     }
   }
 
-  return results.map((entry, i): Message => {
+  const resultMessages = results.map((entry, i): Message => {
     const content = fullByIndex[i] ? header(entry) + "\n" + body(entry) : header(entry);
     return { role: "user", name: "browser", content };
   });
+
+  return [...failureMessages, ...resultMessages];
 }

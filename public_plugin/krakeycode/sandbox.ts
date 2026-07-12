@@ -23,9 +23,87 @@ export interface KrakeycodeConfig {
   maxResultChars: number;
   maxEntries: number;
   maxResultsTotalChars: number;
+  maxFailureNotices: number;
   guidance?: string;
   guidancePriority?: number;
   resultsPriority?: number;
+}
+
+/**
+ * One persistent-failure ledger entry: a tool that failed with the same
+ * normalized error on consecutive frames. `count` is the run length; it is
+ * reset (the entry removed) as soon as that tool next succeeds.
+ */
+export interface FailureEntry {
+  toolName: string;
+  error: string;
+  count: number;
+  firstAt: number;
+  lastAt: number;
+}
+
+/** Longest normalized error string retained per failure entry. */
+const FAILURE_ERROR_CAP = 300;
+
+/**
+ * Normalize a raw tool error into the ledger key form: stringify, trim, fall
+ * back to "unknown" when empty, and cap the length so a giant stderr blob does
+ * not bloat the entry (or split otherwise-identical failures).
+ */
+export function normalizeFailureError(error: unknown): string {
+  const s = String(error ?? "").trim();
+  const nonEmpty = s.length > 0 ? s : "unknown";
+  return nonEmpty.length > FAILURE_ERROR_CAP ? nonEmpty.slice(0, FAILURE_ERROR_CAP) : nonEmpty;
+}
+
+/**
+ * Record a failed tool call. If the newest matching entry (same toolName + same
+ * normalized error) exists it is bumped (count++, lastAt); otherwise a fresh
+ * {count:1} entry is appended. The ledger is bounded to `max` by dropping the
+ * OLDEST entries (insertion order). `max <= 0` disables the ledger (returns []).
+ * Pure: returns a new array, never mutates the input.
+ */
+export function upsertFailure(
+  ledger: FailureEntry[],
+  toolName: string,
+  rawError: unknown,
+  at: number,
+  max: number,
+): FailureEntry[] {
+  if (max <= 0) return [];
+  const error = normalizeFailureError(rawError);
+  const idx = ledger.findIndex((e) => e.toolName === toolName && e.error === error);
+  let next: FailureEntry[];
+  if (idx >= 0) {
+    next = ledger.map((e, i) =>
+      i === idx ? { ...e, count: e.count + 1, lastAt: at } : e,
+    );
+  } else {
+    next = [...ledger, { toolName, error, count: 1, firstAt: at, lastAt: at }];
+  }
+  return next.length > max ? next.slice(next.length - max) : next;
+}
+
+/**
+ * Drop every ledger entry for `toolName` (called when that tool succeeds, which
+ * ends any persistent-failure run). Pure: returns a new array.
+ */
+export function clearFailures(ledger: FailureEntry[], toolName: string): FailureEntry[] {
+  return ledger.filter((e) => e.toolName !== toolName);
+}
+
+/**
+ * Render the persistent-failure notice text for one entry, or "" when the run
+ * length is below the alert threshold (count < 2 → nothing to say yet).
+ */
+export function formatFailureNotice(entry: FailureEntry): string {
+  if (entry.count < 2) return "";
+  return (
+    `[krakeycode persistent failure] ${entry.toolName} has failed ${entry.count}x in a row ` +
+    `with the same error: ${entry.error}. This failure is persistent - retrying the same ` +
+    `call unchanged will NOT succeed. Reflect on why it is failing and change your approach, ` +
+    `or stop and report it; do not keep re-calling it.`
+  );
 }
 
 /**
@@ -83,6 +161,11 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
       ? c.maxResultsTotalChars
       : 16000;
 
+  const maxFailureNotices =
+    typeof c.maxFailureNotices === "number" && c.maxFailureNotices >= 0
+      ? c.maxFailureNotices
+      : 8;
+
   const cfg: KrakeycodeConfig = {
     mode,
     root,
@@ -96,6 +179,7 @@ export function readConfig(raw: unknown, dataDir: string): KrakeycodeConfig {
     maxResultChars,
     maxEntries,
     maxResultsTotalChars,
+    maxFailureNotices,
   };
 
   if (typeof c.guidance === "string") cfg.guidance = c.guidance;
