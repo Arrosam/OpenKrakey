@@ -455,26 +455,6 @@ Key choices, and why:
   loop (a weak model pinged one tool 16× in a row). `llm.return` fires *before* this frame's `tool.result`
   events, so clear-on-return can never wipe a result the model hasn't seen. If the Agent needs a durable
   trail of what it has done, that's the `history` plugin's job — not your results ring.
-- **Record FAILURES as results too — and let them accumulate.** An `ok:false` outcome must fold back
-  exactly like a success (the model needs the error text, not silence). But one-shot delivery alone is
-  wrong for failures: if the error vanishes after one frame, the model forgets it already tried and
-  re-calls the failing tool forever (observed: 18× against a permanently broken tool). Keep a small
-  *failure ledger* beside the ring — deduped by `(toolName + error)` with a count — that SURVIVES
-  `llm.return` and is cleared only when that tool next succeeds:
-
-  ```ts
-  interface FailureEntry { toolName: string; error: string; count: number; firstAt: number; lastAt: number }
-  let failures: FailureEntry[] = [];   // bounded; survives llm.return, cleared per-tool on its next ok:true
-  // in the tool.result listener: ok:false → upsert (count++); ok:true → drop that tool's entries.
-  // in render(), for entries with count >= 2, PREPEND a message like:
-  //   "[myplugin persistent failure] dice.roll has failed 3x in a row with the same error: <error>.
-  //    Retrying the same call unchanged will NOT succeed — reflect and change approach, or stop."
-  ```
-
-  The line *changes* each failure (the count climbs), so the model sees accumulating state it can reflect
-  on instead of a fresh-looking error every frame. Bound the ledger and shed it under `context.full` like
-  the ring. (This is exactly what `krakeycode`/`web-search`/`browser` ship — see their `maxFailureNotices`
-  config.)
 - **Bound the ring** so old results don't grow the prompt without limit (belt-and-braces on top of the
   clear — a burst of results within one frame still shouldn't balloon).
 

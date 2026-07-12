@@ -4,29 +4,13 @@
  * that embeds the three web surfaces — config-web, the web chat channel, the
  * inspector — each in an <iframe> by URL).
  *
- * TOKEN-GATED. The served shell embeds the three framed surfaces' own tokened
- * URLs (via injectSurfaces → `window.__SURFACES__`), so the page itself is a
- * secret: anyone who can load it inherits authenticated access to Config, Chat
- * and Inspector. That is precisely why the shell must be gated — an open Console
- * page would leak those surface tokens to anyone who reached the port. So both
- * the shell (`GET /` and `/index.html`) and the read-only `GET /api/status`
- * require the per-process console token, checked with the shared constant-time
- * `tokenOk`. The token is accepted from the `?token=` query, an
- * `Authorization: Bearer` header, or a `console_token` cookie (in that
- * precedence). On a successful shell load we set that cookie (HttpOnly,
- * SameSite=Strict) so a reloaded tab re-authenticates without the query param.
- * Unknown paths stay 404 (the server is not blanket-401'd). static/ holds only
- * the injected index.html — there are no secret-free assets to leave open.
+ * This is intentionally SIMPLER than config-web's server: NO token gating, NO
+ * cookie, no secrets. The only dynamic route is a read-only `GET /api/status` that
+ * reports each surface's reachability (checked server-side, so the online dots are
+ * accurate); everything else just serves a static asset preloaded into memory.
  *
- * The iframe children authenticate INDEPENDENTLY via their own baked `?token=`
- * URLs (carried in `window.__SURFACES__`), so gating the shell is not a
- * cross-origin cookie concern.
- *
- * `GET /api/status` is a read-only route that reports each surface's
- * reachability (checked server-side, so the online dots are accurate).
- *
- * The one dynamic render step: the served index.html gets the surface URLs
- * injected as `window.__SURFACES__ = {config,chat,inspector}` (in place of the
+ * The one dynamic step: the served index.html gets the surface URLs injected as
+ * `window.__SURFACES__ = {config,chat,inspector}` (in place of the
  * `<!--__SURFACES__-->` placeholder) so the page's iframes target whatever live
  * apps/ports the operator configured, never hardcoded values.
  */
@@ -34,7 +18,6 @@ import * as http from "node:http";
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, extname } from "node:path";
-import { bearerToken, queryToken, cookieToken, tokenOk } from "../../../shared/http-auth";
 
 export interface ConsoleDeps {
   port: number;
@@ -45,12 +28,6 @@ export interface ConsoleDeps {
   chatUrl: string;
   /** Absolute URL of the inspector app (the Inspector surface). */
   inspectorUrl: string;
-  /**
-   * The per-process console session token. Every request to the shell and to
-   * `/api/status` must present it (query / bearer / cookie). Always set — the
-   * bin mints one when none is configured, so the Console is never open.
-   */
-  token: string;
 }
 
 /** static/ lives beside src/ in the package; resolve it relative to this file. */
@@ -58,23 +35,6 @@ const STATIC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "static")
 
 /** The token in index.html that the injected <script> replaces. */
 const SURFACES_PLACEHOLDER = "<!--__SURFACES__-->";
-
-/** Name of the session cookie set on a successful shell load. */
-const COOKIE_NAME = "console_token";
-
-/**
- * The token this request presents, by source precedence: `?token=` query first,
- * then an `Authorization: Bearer` header, then the `console_token` cookie. The
- * cookie is decoded (default) so a value stored URL-encoded round-trips; the
- * cookie decode fails CLOSED (returns undefined) on a malformed escape. Returns
- * undefined when no source carries a token.
- */
-function presentedToken(
-  req: http.IncomingMessage,
-  searchParams: URLSearchParams,
-): string | undefined {
-  return queryToken(searchParams) ?? bearerToken(req) ?? cookieToken(req, COOKIE_NAME, { decode: true });
-}
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -164,35 +124,10 @@ export async function startServer(
     const url = req.url || "/";
     const qIdx = url.indexOf("?");
     const pathname = qIdx === -1 ? url : url.slice(0, qIdx);
-    const search = qIdx === -1 ? "" : url.slice(qIdx + 1);
     const method = req.method || "GET";
 
-    // The token this request presents (query → bearer → cookie). Computed for the
-    // gated routes below; unknown paths are 404'd before we ever consult it.
-    const authed = (): boolean =>
-      tokenOk(presentedToken(req, new URLSearchParams(search)), deps.token);
-
-    // A minimal, secret-free 401 for the gated routes. It names how to obtain the
-    // tokened URL but leaks NO surface URL or token (that is exactly what gating
-    // the shell protects).
-    const lock = (res: http.ServerResponse): void => {
-      const body =
-        "unauthorized — open the tokened URL printed by `krakey dashboard` / `npm run console`";
-      res.writeHead(401, {
-        "content-type": "text/plain; charset=utf-8",
-        "content-length": Buffer.byteLength(body),
-        "cache-control": "no-store",
-      });
-      res.end(body);
-    };
-
     // GET /api/status — server-side reachability of the three surfaces (JSON).
-    // Gated: an untokened caller must not learn the surfaces' reachability.
     if (method === "GET" && pathname === "/api/status") {
-      if (!authed()) {
-        lock(res);
-        return;
-      }
       writeStatus(res).catch(() => {
         if (!res.headersSent) {
           res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
@@ -203,28 +138,15 @@ export async function startServer(
     }
 
     // GET / (and /index.html) — the shell, with surface URLs injected.
-    // Gated: the injected shell embeds the framed surfaces' tokens, so an
-    // untokened caller gets the lock body and NEVER the shell HTML.
     if (method === "GET" && (pathname === "/" || pathname === "/index.html")) {
-      if (!authed()) {
-        lock(res);
-        return;
-      }
       if (!indexBody) {
         res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
         res.end("index.html missing");
         return;
       }
-      // Set the session cookie so a reloaded tab re-authenticates without the
-      // `?token=` query. The VALUE is the token itself, so it round-trips through
-      // tokenOk on the follow-up request. HttpOnly (no script access), Strict (not
-      // sent cross-site), Path=/ (covers the whole origin).
-      const cookie =
-        COOKIE_NAME + "=" + deps.token + "; HttpOnly; SameSite=Strict; Path=/";
       res.writeHead(200, {
         "content-type": "text/html; charset=utf-8",
         "content-length": indexBody.length,
-        "set-cookie": cookie,
       });
       res.end(indexBody);
       return;
@@ -278,9 +200,7 @@ export async function startServer(
   // library function stays silent so callers (incl. tests that start many
   // servers) never spam stdout.
   const display = deps.host === "0.0.0.0" || deps.host === "::" ? "127.0.0.1" : deps.host;
-  // The URL carries the token so the printed/opened link authenticates on first
-  // load (which also sets the console_token cookie for subsequent reloads).
-  const url = "http://" + display + ":" + port + "/?token=" + encodeURIComponent(deps.token);
+  const url = "http://" + display + ":" + port + "/";
 
   const close = (): Promise<void> =>
     new Promise<void>((resolve) => {

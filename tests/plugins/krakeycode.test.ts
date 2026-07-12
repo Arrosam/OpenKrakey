@@ -1068,9 +1068,6 @@ test("pressure (state): a single round:2 drops exactly the two oldest at once", 
 // (same treatment as the browser suite's 'does NOT restore already-dropped'
 // rewrite): the survivors are no longer restored across a return — they are
 // dropped entirely, and only results emitted AFTER the return remain.
-// F2 note: this ring is ALL-OK (fillResults emits ok:true only), so llm.return
-// empties it fully — there is no persistent-failure ledger to survive. The
-// failure-persistence path is covered by the F2 battery below.
 test("pressure (state): LLM_RETURN empties the ring — prior survivors are dropped, only post-return results render", async () => {
   const N = 4;
   const { store, sys } = await setup({ maxResults: 10 });
@@ -1136,10 +1133,7 @@ test("pressure (state): after LLM_RETURN clears the ring, a fresh round:1 sheds 
 // BEFORE this frame's tool.result events, so results emitted after a return
 // survive to the next render.
 
-// F2 success/failure split: llm.return empties the RESULTS ring only — the
-// separate persistent-FAILURE ledger is NOT cleared by llm.return (see the F2
-// battery below). This ring is ALL-OK, so the rendered block goes fully empty.
-test("llm.return (one-shot): >=2 own ok:true tool.results render, then llm.return empties the ring", async () => {
+test("llm.return (one-shot): >=2 own tool.results render, then llm.return empties the ring", async () => {
   const { store, sys } = await setup({});
   emitToolResult(sys, { name: READ, ok: true, data: { content: "ring-0" } });
   emitToolResult(sys, { name: LIST, ok: true, data: { entries: [] } });
@@ -1149,7 +1143,7 @@ test("llm.return (one-shot): >=2 own ok:true tool.results render, then llm.retur
   sys.events.emit(Events.LLM_RETURN, { id: "r-oneshot", at: Date.now(), ok: true, data: { content: "ok" } });
 
   const after = await renderMsgs(resultsBlock(store));
-  assert.deepEqual(after, [], "llm.return clears an all-ok results ring");
+  assert.deepEqual(after, [], "llm.return clears the results ring");
 });
 
 test("llm.return (frame-order): results emitted AFTER the return survive to the NEXT render", async () => {
@@ -1276,222 +1270,6 @@ test("pressure (negative): context.full missing the round field drops nothing (t
     } as any),
   );
   assert.equal((await renderMsgs(b)).length, N, "absent round behaves like round:0 — no drop");
-});
-
-// ===========================================================================
-// 10e. F2 — persistent FAILURE LEDGER, folded into the krakeycode.results block.
-//
-// NEW behavior (black-box, derived ONLY from the F2 spec — impl does not exist,
-// so the discriminating tests are RED against main by design):
-//
-//   * On an OWN tool.result with ok===false, upsert a ledger entry keyed by
-//     (toolName + NORMALIZED error): trimmed, 'unknown' when empty, capped ~300
-//     chars — {count, firstAt, lastAt}. Same (tool,error) bumps count; a DISTINCT
-//     error is a separate entry.
-//   * On an OWN ok===true result for a tool, ALL its ledger entries are removed.
-//   * Bounded by config `maxFailureNotices` (default 8; 0 disables the feature).
-//   * Events.LLM_RETURN clears the RESULTS ring + resets pressure but does NOT
-//     clear the failure ledger (the success/failure split).
-//   * Events.CONTEXT_FULL sheds failure entries oldest-first (slice(round)).
-//   * teardown resets the ledger.
-//
-//   RENDERING (folded into the SAME krakeycode.results MESSAGES block): an entry
-//   with count>=2 renders ONE {role:'user', name:'krakeycode'} message naming the
-//   tool, the count ('has failed <N>x in a row'), the error, and the reflect-and-
-//   stop nudge ('retrying the same call unchanged will NOT succeed'). A count-1
-//   failure renders NO persistent line.
-// ===========================================================================
-
-// A "persistent failure line" carries the F2 count phrasing 'failed <N>x in a
-// row' (normal fresh-result entries never do).
-const FAIL_IN_A_ROW = /failed\s+(\d+)x\s+in a row/i;
-function failureLines(msgs: Message[]): string[] {
-  return msgs.map((m) => String(m.content)).filter((c) => FAIL_IN_A_ROW.test(c));
-}
-function failureCount(content: string): number | null {
-  const m = FAIL_IN_A_ROW.exec(content);
-  return m ? Number(m[1]) : null;
-}
-function emitLlmReturn(sys: ReturnType<typeof createEventSystem>) {
-  sys.events.emit(Events.LLM_RETURN, { id: "f2-" + Date.now(), at: Date.now(), ok: true, data: { content: "ok" } });
-}
-
-// ---- (a) two identical ok:false -> one count-2 persistent line survives return ----
-
-test("F2 (a): two identical ok:false for one tool -> after llm.return, a count-2 persistent line naming the tool+error renders; the fresh ring entries are gone", async () => {
-  const { store, sys } = await setup({});
-  emitToolResult(sys, { name: WRITE, ok: false, error: "ENOENT boom" });
-  emitToolResult(sys, { name: WRITE, ok: false, error: "ENOENT boom" });
-
-  emitLlmReturn(sys); // clears the RESULTS ring but NOT the failure ledger
-
-  const msgs = await renderMsgs(resultsBlock(store));
-  const fails = failureLines(msgs);
-  assert.equal(fails.length, 1, "exactly one persistent failure line survives the return");
-  const line = fails[0];
-  assert.match(line, /krakeycode\.write_file/, "persistent line names the tool");
-  assert.equal(failureCount(line), 2, "count is 2 (two identical failures in a row)");
-  assert.match(line, /ENOENT boom/, "persistent line carries the error text");
-  assert.match(
-    line,
-    /retrying the same call unchanged will NOT succeed/i,
-    "persistent line carries the reflect-and-stop nudge",
-  );
-  assert.equal(msgs.length, 1, "no normal fresh-result entries remain after the return");
-});
-
-// ---- (b) two DISTINCT errors from one tool -> two persistent lines survive ----
-
-test("F2 (b): two DISTINCT errors from the same tool -> two persistent lines survive llm.return", async () => {
-  const { store, sys } = await setup({});
-  emitToolResult(sys, { name: BASH, ok: false, error: "exit 1" });
-  emitToolResult(sys, { name: BASH, ok: false, error: "exit 1" });
-  emitToolResult(sys, { name: BASH, ok: false, error: "command not found" });
-  emitToolResult(sys, { name: BASH, ok: false, error: "command not found" });
-
-  emitLlmReturn(sys);
-
-  const fails = failureLines(await renderMsgs(resultsBlock(store)));
-  assert.equal(fails.length, 2, "two distinct (tool,error) ledger entries render two persistent lines");
-  const joined = fails.join("\n");
-  assert.match(joined, /exit 1/, "first distinct error present");
-  assert.match(joined, /command not found/, "second distinct error present");
-  for (const line of fails) assert.equal(failureCount(line), 2, "each distinct error reached count 2");
-});
-
-// ---- (c) a later ok:true for that tool -> all its persistent lines gone ----
-
-test("F2 (c): a subsequent ok:true for the failing tool clears ALL its persistent lines next render", async () => {
-  const { store, sys } = await setup({});
-  emitToolResult(sys, { name: READ, ok: false, error: "boom" });
-  emitToolResult(sys, { name: READ, ok: false, error: "boom" });
-  emitLlmReturn(sys);
-  assert.equal(
-    failureLines(await renderMsgs(resultsBlock(store))).length,
-    1,
-    "precondition: a count-2 persistent line exists",
-  );
-
-  emitToolResult(sys, { name: READ, ok: true, data: { content: "hi" } });
-  emitLlmReturn(sys);
-
-  assert.deepEqual(
-    failureLines(await renderMsgs(resultsBlock(store))),
-    [],
-    "the ok:true wiped the tool's failure ledger — no persistent line renders",
-  );
-});
-
-test("F2 (c'): an ok:true for a DIFFERENT tool leaves the first tool's persistent line intact", async () => {
-  const { store, sys } = await setup({});
-  emitToolResult(sys, { name: READ, ok: false, error: "boom" });
-  emitToolResult(sys, { name: READ, ok: false, error: "boom" });
-  emitToolResult(sys, { name: LIST, ok: true, data: { entries: [] } });
-  emitLlmReturn(sys);
-
-  const fails = failureLines(await renderMsgs(resultsBlock(store)));
-  assert.equal(fails.length, 1, "a different tool's success leaves the ledger entry standing");
-  assert.match(fails[0], /krakeycode\.read_file/, "the surviving line is read_file's");
-});
-
-// ---- (d) maxFailureNotices:0 -> feature OFF, no persistent line ever ----
-
-test("F2 (d): maxFailureNotices:0 disables the ledger — no persistent line EVER renders", async () => {
-  const { store, sys } = await setup({ maxFailureNotices: 0 });
-  for (let i = 0; i < 4; i++) emitToolResult(sys, { name: WRITE, ok: false, error: "ENOENT boom" });
-  emitLlmReturn(sys);
-  assert.deepEqual(
-    failureLines(await renderMsgs(resultsBlock(store))),
-    [],
-    "maxFailureNotices:0 turns the whole failure-ledger feature off",
-  );
-});
-
-// ---- (e) context.full sheds failure entries oldest-first, clamped, no throw ----
-
-test("F2 (e): context.full{round:N} sheds failure entries oldest-first, clamped, never throws", async () => {
-  const { store, sys } = await setup({ maxFailureNotices: 8 });
-  for (const err of ["errA", "errB", "errC"]) {
-    emitToolResult(sys, { name: WRITE, ok: false, error: err });
-    emitToolResult(sys, { name: WRITE, ok: false, error: err });
-  }
-  emitLlmReturn(sys);
-  assert.equal(failureLines(await renderMsgs(resultsBlock(store))).length, 3, "three persistent lines");
-
-  assert.doesNotThrow(() => emitContextFull(sys, 1), "shedding a failure entry must not throw");
-  const fails = failureLines(await renderMsgs(resultsBlock(store)));
-  assert.equal(fails.length, 2, "one failure entry shed");
-  const joined = fails.join("\n");
-  assert.ok(!/errA/.test(joined), "the OLDEST failure (errA) was shed first");
-  assert.ok(/errB/.test(joined) && /errC/.test(joined), "the two newer failures survive");
-
-  assert.doesNotThrow(() => emitContextFull(sys, 99), "an over-large round must not throw");
-  assert.deepEqual(
-    failureLines(await renderMsgs(resultsBlock(store))),
-    [],
-    "shedding more than present empties the ledger, never negative",
-  );
-});
-
-// ---- (f) ledger bounded by maxFailureNotices: max+1 distinct -> only max kept ----
-
-test("F2 (f): ledger bounded — max+1 distinct (tool,error) failures keep only maxFailureNotices (oldest dropped)", async () => {
-  const max = 3;
-  const { store, sys } = await setup({ maxFailureNotices: max });
-  for (let i = 0; i < max + 1; i++) {
-    emitToolResult(sys, { name: WRITE, ok: false, error: `err-${i}` });
-    emitToolResult(sys, { name: WRITE, ok: false, error: `err-${i}` });
-  }
-  emitLlmReturn(sys);
-  const fails = failureLines(await renderMsgs(resultsBlock(store)));
-  assert.equal(fails.length, max, "ledger keeps exactly maxFailureNotices entries");
-  const joined = fails.join("\n");
-  assert.ok(!/err-0\b/.test(joined), "the oldest distinct failure (err-0) was evicted");
-  assert.ok(/err-3\b/.test(joined), "the newest distinct failure (err-3) is retained");
-});
-
-// ---- (g) malformed / foreign tool.result never throws through the failure path ----
-
-for (const bad of [
-  { label: "null payload", value: null },
-  { label: "non-object (string)", value: "oops" },
-  { label: "missing name", value: { id: "x", at: 1, ok: false, error: "e" } },
-  { label: "name is not a string", value: { id: "x", at: 1, ok: false, name: 42, error: "e" } },
-  { label: "ok:false with no error field", value: { id: "x", at: 1, ok: false, name: WRITE } },
-]) {
-  test(`F2 (g): malformed tool.result (${bad.label}) never throws through the failure path`, async () => {
-    const { store, sys } = await setup({});
-    assert.doesNotThrow(() => {
-      sys.events.emit(Events.TOOL_RESULT, bad.value);
-    }, `malformed failure payload (${bad.label}) must not throw in the listener`);
-    emitToolResult(sys, { name: "web-chat.send_message", ok: false, error: "not mine" });
-    emitToolResult(sys, { name: "web-chat.send_message", ok: false, error: "not mine" });
-    emitLlmReturn(sys);
-    assert.deepEqual(
-      failureLines(await renderMsgs(resultsBlock(store))),
-      [],
-      "neither a malformed nor a foreign failure produces a persistent line",
-    );
-  });
-}
-
-// ---- (h) a single (count-1) failure renders NO persistent line ----
-
-test("F2 (h): a single (count-1) failure renders NO persistent line (only its normal fresh result that frame)", async () => {
-  const { store, sys } = await setup({});
-  emitToolResult(sys, { name: WRITE, ok: false, error: "one-off" });
-
-  const before = await renderMsgs(resultsBlock(store));
-  assert.equal(before.length, 1, "the normal fresh error result renders this frame");
-  assert.match(String(before[0].content), /one-off/, "it is the normal fresh error entry");
-  assert.deepEqual(failureLines(before), [], "no persistent line at count 1");
-
-  emitLlmReturn(sys);
-  assert.deepEqual(
-    await renderMsgs(resultsBlock(store)),
-    [],
-    "a lone (count-1) failure leaves no persistent line after the return",
-  );
 });
 
 // ===========================================================================

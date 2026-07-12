@@ -23,26 +23,12 @@ export interface WebSearchConfig {
   guidance: string | null; // default null
   guidancePriority: number; // default 6000
   resultsPriority: number; // default 3500
-  maxFailureNotices: number; // default 8 (0 disables the ledger path)
 }
 
 export interface NormalizedResult {
   title: string;
   url: string;
   snippet: string;
-}
-
-/**
- * One persistent-failure ledger entry: a distinct (tool + normalized error) pair
- * that has failed one or more consecutive times, surviving across frames until the
- * tool next succeeds. Pure-data (no bus); the bus wiring lives in ./index.ts.
- */
-export interface FailureEntry {
-  toolName: string;
-  error: string;
-  count: number;
-  firstAt: number;
-  lastAt: number;
 }
 
 /** Immutable default public-instance pool. */
@@ -92,11 +78,6 @@ export function readConfig(raw: unknown): WebSearchConfig {
   const guidancePriority = typeof o.guidancePriority === "number" ? o.guidancePriority : 6000;
   const resultsPriority = typeof o.resultsPriority === "number" ? o.resultsPriority : 3500;
 
-  const maxFailureNotices =
-    typeof o.maxFailureNotices === "number" && o.maxFailureNotices >= 0
-      ? o.maxFailureNotices
-      : 8;
-
   return {
     instanceUrl,
     localUrl,
@@ -114,7 +95,6 @@ export function readConfig(raw: unknown): WebSearchConfig {
     guidance,
     guidancePriority,
     resultsPriority,
-    maxFailureNotices,
   };
 }
 
@@ -283,78 +263,4 @@ export function buildDefaultGuidance(cfg: WebSearchConfig): string {
 export function pushResult<T>(ring: T[], entry: T, max: number): T[] {
   const next = [...ring, entry];
   return next.length > max ? next.slice(next.length - max) : next;
-}
-
-/** Max characters kept for a normalized failure error (keeps ledger keys bounded). */
-const FAILURE_ERROR_MAX_CHARS = 300;
-
-/**
- * Normalize a raw tool error into the string used both as the ledger key and the
- * rendered text: coerce to String, trim, fall back to "unknown" when empty, and
- * cap at ~300 chars so a giant error can't bloat the ledger.
- */
-export function normalizeFailureError(raw: unknown): string {
-  const s = String(raw ?? "").trim();
-  const nonEmpty = s.length === 0 ? "unknown" : s;
-  return nonEmpty.length > FAILURE_ERROR_MAX_CHARS
-    ? nonEmpty.slice(0, FAILURE_ERROR_MAX_CHARS)
-    : nonEmpty;
-}
-
-/**
- * Upsert a failure into the ledger, keyed by (toolName + normalized error). If a
- * matching entry exists, bump its `count` and `lastAt`; otherwise append a fresh
- * entry with `count: 1`. The result is then bounded to `max` entries by dropping
- * the OLDEST (front, insertion order). `max <= 0` clears the ledger entirely
- * (the feature is disabled). Pure — returns a new array; never mutates `ledger`.
- */
-export function upsertFailure(
-  ledger: FailureEntry[],
-  toolName: string,
-  rawError: unknown,
-  at: number,
-  max: number,
-): FailureEntry[] {
-  if (max <= 0) return [];
-  const error = normalizeFailureError(rawError);
-  const idx = ledger.findIndex((e) => e.toolName === toolName && e.error === error);
-  let next: FailureEntry[];
-  if (idx >= 0) {
-    const prev = ledger[idx];
-    const updated: FailureEntry = {
-      toolName,
-      error,
-      count: prev.count + 1,
-      firstAt: prev.firstAt,
-      lastAt: at,
-    };
-    next = ledger.slice();
-    next[idx] = updated;
-  } else {
-    next = [...ledger, { toolName, error, count: 1, firstAt: at, lastAt: at }];
-  }
-  return next.length > max ? next.slice(next.length - max) : next;
-}
-
-/**
- * Remove ALL ledger entries for a tool (called when that tool next succeeds). Pure.
- */
-export function clearFailures(ledger: FailureEntry[], toolName: string): FailureEntry[] {
-  return ledger.filter((e) => e.toolName !== toolName);
-}
-
-/**
- * Render one persistent-failure notice for `entry`, or `null` when it should render
- * nothing extra (count < 2 — a single failure is already covered by the per-result
- * FAILED rendering). "failed <N>x in a row" and "retrying the same call unchanged
- * will NOT succeed" are matched verbatim by the edge tests.
- */
-export function formatFailureNotice(entry: FailureEntry): string | null {
-  if (entry.count < 2) return null;
-  return (
-    `[web-search persistent failure] ${entry.toolName} has failed ${entry.count}x in a row ` +
-    `with the same error: ${entry.error}. This failure is persistent - retrying the same call ` +
-    `unchanged will NOT succeed. Reflect on why it is failing and change your approach, or stop ` +
-    `and report it; do not keep re-calling it.`
-  );
 }

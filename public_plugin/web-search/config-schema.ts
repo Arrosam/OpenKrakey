@@ -15,7 +15,6 @@ export const WEB_SEARCH_SCHEMA: ConfigSchema = [
   { key: "maxSnippetChars", label: "Snippet length", type: "number", default: 400, min: 1, step: 50, help: "Character cap per result snippet." },
   { key: "maxResultChars", label: "Chars per result", type: "number", default: 1200, min: 1, step: 100, help: "Character cap per result entry injected into the prompt." },
   { key: "maxResultsTotalChars", label: "Total result chars", type: "number", default: 12000, min: 1, step: 100, help: "Total character budget across all web-search results in the prompt." },
-  { key: "maxFailureNotices", label: "Persistent-failure notices", type: "number", default: 8, min: 0, step: 1, help: "How many distinct (tool + error) persistent-failure notices to keep across frames. These persist until that tool next succeeds, so the agent can see a tool that keeps failing. 0 disables the feature." },
   { key: "guidance", label: "Guidance override", type: "text", placeholder: "(uses built-in guidance)", help: "Overrides the web-search.guidance system block text shown to the LLM." },
   { key: "guidancePriority", label: "Guidance block priority", type: "number", default: 6000, min: 0, step: 100 },
   { key: "resultsPriority", label: "Results block priority", type: "number", default: 3500, min: 0, step: 100 },

@@ -18,7 +18,6 @@ export const KRAKEYCODE_SCHEMA: ConfigSchema = [
   { key: "maxResultChars", label: "Chars per result", type: "number", default: 4000, min: 1, step: 100, help: "Character cap per individual tool result injected into the prompt." },
   { key: "maxEntries", label: "Max directory entries", type: "number", default: 10000, min: 1, step: 100, help: "Maximum entries list_dir may return." },
   { key: "maxResultsTotalChars", label: "Total result chars", type: "number", default: 16000, min: 1, step: 100, help: "Total character budget across all results injected into the prompt." },
-  { key: "maxFailureNotices", label: "Persistent-failure notices kept", type: "number", default: 8, min: 0, step: 1, help: "How many distinct (tool + error) persistent-failure notices to keep across frames. These persist until that tool next succeeds, so the agent can see a tool that keeps failing. 0 disables the feature." },
   { key: "guidance", label: "Guidance override", type: "text", placeholder: "(uses built-in guidance)", help: "Overrides the krakeycode.guidance system block text shown to the LLM." },
   { key: "guidancePriority", label: "Guidance block priority", type: "number", default: 7000, min: 0, step: 100 },
   { key: "resultsPriority", label: "Results block priority", type: "number", default: 4000, min: 0, step: 100 },

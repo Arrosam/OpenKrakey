@@ -145,7 +145,6 @@ agents/
 .mdwt/
 .claude/modular-dev-state/
 .claude/modular-dev-queue-*.json
-.claude/modular-dev-smoke-*.json
 .claude/agents/_*.md
 .claude/launch.json
 overviews/

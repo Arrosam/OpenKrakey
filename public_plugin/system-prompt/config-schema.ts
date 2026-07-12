@@ -21,11 +21,7 @@ export const SYSTEM_PROMPT_SCHEMA: ConfigSchema = [
       "fresh tool result to use? If so, act on it. If nothing has changed since your last " +
       "frame, just think; do not re-send a message you've already sent, re-run a tool whose " +
       "effect already holds, or act merely because a frame occurred. Doing nothing is the " +
-      "right move when nothing is new.\n" +
-      "If a tool call fails, read its result. A tool that failed with the same error twice " +
-      "will not succeed if you call it again unchanged - reflect in your monologue on why, " +
-      "then change your approach or stop; do not keep re-calling a tool that keeps failing " +
-      "the same way.",
+      "right move when nothing is new.",
     help: "Channel-agnostic. Teaches the monologue rule + basic tool use. Never names a specific channel.",
   },
   {

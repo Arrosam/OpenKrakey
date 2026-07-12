@@ -183,30 +183,6 @@ test("default text carries the NEW frame-loop / situational-judgment paragraph (
   );
 });
 
-test("default text carries the NEW tool-failure reflection rule (F2), CHANNEL-AGNOSTIC", async () => {
-  const { block } = await setupAndGetBlock({});
-  const text = await renderOf(block);
-  // NEW: DEFAULT_TEXT gains ONE appended sentence teaching that a tool which
-  // failed with the SAME error twice will not succeed if called again unchanged
-  // — reflect in the monologue, change approach or stop.
-  assert.match(
-    text,
-    /same error twice/i,
-    "default text must warn that the same error twice means a repeat call won't succeed",
-  );
-  assert.match(
-    text,
-    /reflect/i,
-    "default text must tell the model to reflect (in the monologue) rather than blindly retry",
-  );
-  // The reflection sentence must stay CHANNEL-AGNOSTIC: it must not mandate any
-  // channel/send tool. Guard the new wording specifically against 'send_message'.
-  assert.ok(
-    !text.includes("send_message"),
-    "the F2 reflection rule must NOT name a specific channel send tool (channel-agnostic)",
-  );
-});
-
 test("config-schema.ts `text` default stays in sync with the rendered DEFAULT_TEXT", async () => {
   assert.ok(
     schemaMod,

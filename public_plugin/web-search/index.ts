@@ -13,15 +13,11 @@ import { WEB_SEARCH_SCHEMA } from "./config-schema";
 import {
   buildDefaultGuidance,
   buildSearchUrl,
-  clearFailures,
-  formatFailureNotice,
   normalizeResults,
   parseDuckDuckGoLite,
   pushResult,
   readConfig,
   resolveEndpoints,
-  upsertFailure,
-  type FailureEntry,
   type NormalizedResult,
 } from "./search";
 
@@ -52,7 +48,6 @@ interface ResultEntry {
 
 const createWebSearch: PluginFactory = (): Plugin => {
   let results: ResultEntry[] = [];
-  let failures: FailureEntry[] = [];
   let unsubs: Array<() => void> = [];
   let pressureRound = 0;
 
@@ -181,22 +176,7 @@ const createWebSearch: PluginFactory = (): Plugin => {
         target: "messages",
         priority: cfg.resultsPriority,
         render: (): Message[] => {
-          // Persistent-failure notices (count >= 2) prepend the results block so a
-          // tool that keeps failing is surfaced ahead of this frame's raw outcomes.
-          // Each notice respects the per-entry char budget (maxResultChars).
-          const failureMessages: Message[] = [];
-          for (const f of failures) {
-            const text = formatFailureNotice(f);
-            if (text === null) continue;
-            const content =
-              text.length > cfg.maxResultChars
-                ? text.slice(0, cfg.maxResultChars) +
-                  `\n…(${text.length - cfg.maxResultChars} chars truncated)`
-                : text;
-            failureMessages.push({ role: "user", name: "web-search", content } as Message);
-          }
-
-          if (results.length === 0) return failureMessages;
+          if (results.length === 0) return [];
 
           const queryOf = (r: ResultEntry): string => {
             const d = r.data as { query?: unknown } | null | undefined;
@@ -247,15 +227,13 @@ const createWebSearch: PluginFactory = (): Plugin => {
             }
           }
 
-          return failureMessages.concat(
-            results.map(
-              (r, i) =>
-                ({
-                  role: "user",
-                  name: "web-search",
-                  content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
-                }) as Message,
-            ),
+          return results.map(
+            (r, i) =>
+              ({
+                role: "user",
+                name: "web-search",
+                content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
+              }) as Message,
           );
         },
       });
@@ -271,25 +249,16 @@ const createWebSearch: PluginFactory = (): Plugin => {
           error?: unknown;
         };
         if (typeof q.name !== "string" || !OWN_TOOLS.has(q.name)) return;
-        const at = typeof q.at === "number" ? q.at : Date.now();
-        const ok = !!q.ok;
         results = pushResult(
           results,
           {
-            at,
-            ok,
+            at: typeof q.at === "number" ? q.at : Date.now(),
+            ok: !!q.ok,
             data: q.data,
             error: typeof q.error === "string" ? q.error : undefined,
           },
           cfg.maxResults,
         );
-        // Persistent-failure ledger (F2). Skipped entirely when disabled (maxFailureNotices <= 0).
-        // On failure: upsert by (tool + normalized error). On success: clear all entries for the tool.
-        if (cfg.maxFailureNotices > 0) {
-          failures = ok
-            ? clearFailures(failures, q.name)
-            : upsertFailure(failures, q.name, q.error, at, cfg.maxFailureNotices);
-        }
         if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
           ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
         }
@@ -306,9 +275,6 @@ const createWebSearch: PluginFactory = (): Plugin => {
         if (round > 0) {
           const toDrop = Math.min(round, results.length);
           if (toDrop > 0) results = results.slice(toDrop);
-          // Shed the ledger under the SAME oldest-first pressure logic (clamped).
-          const failuresToDrop = Math.min(round, failures.length);
-          if (failuresToDrop > 0) failures = failures.slice(failuresToDrop);
         }
       });
 
@@ -337,7 +303,6 @@ const createWebSearch: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       results = [];
-      failures = [];
       pressureRound = 0;
     },
   };

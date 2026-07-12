@@ -16,10 +16,7 @@ import {
   sanitizeScreenshotName,
   pushResult,
   renderResults,
-  pushFailure,
-  clearFailuresForTool,
   type ResultEntry,
-  type FailureEntry,
   type BrowserConfig,
 } from "./config";
 import { ChromeClient } from "./cdp";
@@ -99,7 +96,6 @@ const SCREENSHOT_TOOL: ToolDef = {
 const createBrowser: PluginFactory = (): Plugin => {
   let client: ChromeClient | null = null;
   let results: ResultEntry[] = [];
-  let failures: FailureEntry[] = [];
   let pressureRound = 0;
   let unsubs: Array<() => void> = [];
 
@@ -303,7 +299,7 @@ const createBrowser: PluginFactory = (): Plugin => {
         id: "browser.results",
         target: "messages",
         priority: cfg.resultsPriority,
-        render: (): Message[] => renderResults(results, cfg, failures),
+        render: (): Message[] => renderResults(results, cfg),
       });
 
       const offResult = ctx.events.on(Events.TOOL_RESULT, (payload: unknown): void => {
@@ -336,16 +332,6 @@ const createBrowser: PluginFactory = (): Plugin => {
             },
             cfg.maxResults,
           );
-          // Persistent failure ledger: a fresh failure still renders normally
-          // above; ADDITIONALLY track consecutive (tool + error) failures so a tool
-          // that keeps failing the same way is surfaced across frames. A success
-          // clears every ledger entry for that tool. maxFailureNotices <= 0 disables.
-          const at = typeof q.at === "number" ? q.at : Date.now();
-          if (!!q.ok) {
-            failures = clearFailuresForTool(failures, q.name);
-          } else {
-            failures = pushFailure(failures, q.name, q.error, at, cfg.maxFailureNotices);
-          }
           if (ctx.actions.has(Actions.CLOCK_FIRE_NOW)) {
             ctx.actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
           }
@@ -363,8 +349,6 @@ const createBrowser: PluginFactory = (): Plugin => {
           if (round > 0) {
             const toDrop = Math.min(round, results.length);
             if (toDrop > 0) results = results.slice(toDrop);
-            const toDropFailures = Math.min(round, failures.length);
-            if (toDropFailures > 0) failures = failures.slice(toDropFailures);
           }
         } catch {
           /* never throw */
@@ -410,7 +394,6 @@ const createBrowser: PluginFactory = (): Plugin => {
         client = null;
       }
       results = [];
-      failures = [];
       pressureRound = 0;
     },
   };

@@ -15,5 +15,4 @@ export const BROWSER_SCHEMA: ConfigSchema = [
   { key: "maxResults", label: "Results kept", type: "number", default: 10, min: 0, step: 1, help: "How many recent browser tool results are kept in the ring." },
   { key: "maxResultChars", label: "Chars per result", type: "number", default: 4000, min: 1, step: 100, help: "Character cap per individual browser result injected into the prompt." },
   { key: "maxResultsTotalChars", label: "Total result chars", type: "number", default: 16000, min: 1, step: 100, help: "Total character budget across all browser results in the prompt." },
-  { key: "maxFailureNotices", label: "Persistent failure notices", type: "number", default: 8, min: 0, step: 1, help: "How many distinct (tool + error) persistent-failure notices to keep across frames. These persist until that tool next succeeds, so the agent can see a tool that keeps failing. 0 disables the feature." },
 ];

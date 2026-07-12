@@ -29,7 +29,6 @@ import { INSPECTOR_SCHEMA } from "../../public_plugin/inspector/config-schema";
 import { KRAKEYCODE_SCHEMA } from "../../public_plugin/krakeycode/config-schema";
 import { WEB_SEARCH_SCHEMA } from "../../public_plugin/web-search/config-schema";
 import { BROWSER_SCHEMA } from "../../public_plugin/browser/config-schema";
-import { RESTART_SCHEMA } from "../../public_plugin/restart/config-schema";
 
 // ---------------------------------------------------------------------------
 // The 9 allowed `type` values, straight from the contract.
@@ -240,11 +239,9 @@ test("inspector: token is a secret field (masked in UIs)", () => {
 });
 
 // ===========================================================================
-// 6. krakeycode — 16 keys + targeted type/option/showIf assertions
-//    (+1 vs. the pre-F2 census: maxFailureNotices — the persistent-failure
-//    ledger bound, a number field like the other numeric knobs)
+// 6. krakeycode — 15 keys + targeted type/option/showIf assertions
 // ===========================================================================
-test("krakeycode: schema is contract-valid and covers exactly its sixteen keys", () => {
+test("krakeycode: schema is contract-valid and covers exactly its fifteen keys", () => {
   assertValidConfigSchema(KRAKEYCODE_SCHEMA, "KRAKEYCODE_SCHEMA");
   assertKeysExactly(
     KRAKEYCODE_SCHEMA as ConfigSchema,
@@ -261,18 +258,12 @@ test("krakeycode: schema is contract-valid and covers exactly its sixteen keys",
       "maxResultChars",
       "maxEntries",
       "maxResultsTotalChars",
-      "maxFailureNotices",
       "guidance",
       "guidancePriority",
       "resultsPriority",
     ],
     "KRAKEYCODE_SCHEMA",
   );
-});
-
-test("krakeycode: maxFailureNotices is a number field", () => {
-  const f = field(KRAKEYCODE_SCHEMA as ConfigSchema, "maxFailureNotices", "KRAKEYCODE_SCHEMA");
-  assert.equal(f.type, "number", "krakeycode.maxFailureNotices must be type 'number'");
 });
 
 test("krakeycode: mode is an enum whose option values are exactly ['local','sandbox']", () => {
@@ -312,11 +303,9 @@ test("krakeycode: root has showIf { key:'mode', equals:'sandbox' }", () => {
 });
 
 // ===========================================================================
-// 7. web-search — 17 keys + targeted type/option assertions
-//    (+1 vs. the pre-F2 census: maxFailureNotices — the persistent-failure
-//    ledger bound, a number field like the other numeric knobs)
+// 7. web-search — 16 keys + targeted type/option assertions
 // ===========================================================================
-test("web-search: schema is contract-valid and covers exactly its seventeen keys", () => {
+test("web-search: schema is contract-valid and covers exactly its sixteen keys", () => {
   assertValidConfigSchema(WEB_SEARCH_SCHEMA, "WEB_SEARCH_SCHEMA");
   assertKeysExactly(
     WEB_SEARCH_SCHEMA as ConfigSchema,
@@ -334,18 +323,12 @@ test("web-search: schema is contract-valid and covers exactly its seventeen keys
       "maxSnippetChars",
       "maxResultChars",
       "maxResultsTotalChars",
-      "maxFailureNotices",
       "guidance",
       "guidancePriority",
       "resultsPriority",
     ],
     "WEB_SEARCH_SCHEMA",
   );
-});
-
-test("web-search: maxFailureNotices is a number field", () => {
-  const f = field(WEB_SEARCH_SCHEMA as ConfigSchema, "maxFailureNotices", "WEB_SEARCH_SCHEMA");
-  assert.equal(f.type, "number", "web-search.maxFailureNotices must be type 'number'");
 });
 
 test("web-search: safesearch is an enum whose option values are exactly [0,1,2] (numbers)", () => {
@@ -393,11 +376,9 @@ test("web-search: instanceUrl and localUrl are url fields", () => {
 });
 
 // ===========================================================================
-// 8. browser — 15 keys + targeted type/option assertions
-//    (+1 vs. the pre-F2 census: maxFailureNotices — the persistent-failure
-//    ledger bound, a number field like the other numeric knobs)
+// 8. browser — 14 keys + targeted type/option assertions
 // ===========================================================================
-test("browser: schema is contract-valid and covers exactly its fifteen keys", () => {
+test("browser: schema is contract-valid and covers exactly its fourteen keys", () => {
   assertValidConfigSchema(BROWSER_SCHEMA, "BROWSER_SCHEMA");
   assertKeysExactly(
     BROWSER_SCHEMA as ConfigSchema,
@@ -416,7 +397,6 @@ test("browser: schema is contract-valid and covers exactly its fifteen keys", ()
       "maxResults",
       "maxResultChars",
       "maxResultsTotalChars",
-      "maxFailureNotices",
     ],
     "BROWSER_SCHEMA",
   );
@@ -425,11 +405,6 @@ test("browser: schema is contract-valid and covers exactly its fifteen keys", ()
 test("browser: headless is a boolean field", () => {
   const f = field(BROWSER_SCHEMA as ConfigSchema, "headless", "BROWSER_SCHEMA");
   assert.equal(f.type, "boolean", "browser.headless must be type 'boolean'");
-});
-
-test("browser: maxFailureNotices is a number field", () => {
-  const f = field(BROWSER_SCHEMA as ConfigSchema, "maxFailureNotices", "BROWSER_SCHEMA");
-  assert.equal(f.type, "number", "browser.maxFailureNotices must be type 'number'");
 });
 
 test("browser: headlessMode is an enum whose option values are exactly ['new','old','off'] (default 'new')", () => {
@@ -442,43 +417,4 @@ test("browser: headlessMode is an enum whose option values are exactly ['new','o
     "browser.headlessMode option values must be exactly ['new','old','off']",
   );
   assert.equal(f.default, "new", "browser.headlessMode default must be 'new'");
-});
-
-// ===========================================================================
-// 9. restart — 5 keys + targeted type assertions
-//    (+1 vs. the pre-F1 census: completedNoticeMaxAgeMs — the age window a
-//    persisted restart marker stays "fresh", a number field like delayMs.)
-// ===========================================================================
-test("restart: schema is contract-valid and covers exactly its five keys", () => {
-  assertValidConfigSchema(RESTART_SCHEMA, "RESTART_SCHEMA");
-  assertKeysExactly(
-    RESTART_SCHEMA as ConfigSchema,
-    [
-      "delayMs",
-      "dryRun",
-      "guidance",
-      "guidancePriority",
-      "completedNoticeMaxAgeMs",
-    ],
-    "RESTART_SCHEMA",
-  );
-});
-
-test("restart: completedNoticeMaxAgeMs is a number field defaulting to 300000", () => {
-  const f = field(RESTART_SCHEMA as ConfigSchema, "completedNoticeMaxAgeMs", "RESTART_SCHEMA");
-  assert.equal(f.type, "number", "restart.completedNoticeMaxAgeMs must be type 'number'");
-  assert.equal(f.default, 300000, "restart.completedNoticeMaxAgeMs default must be 300000 (5 min)");
-});
-
-test("restart: dryRun is a boolean field and delayMs is a number field", () => {
-  assert.equal(
-    field(RESTART_SCHEMA as ConfigSchema, "dryRun", "RESTART_SCHEMA").type,
-    "boolean",
-    "restart.dryRun must be type 'boolean'",
-  );
-  assert.equal(
-    field(RESTART_SCHEMA as ConfigSchema, "delayMs", "RESTART_SCHEMA").type,
-    "number",
-    "restart.delayMs must be type 'number'",
-  );
 });
