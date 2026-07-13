@@ -126,28 +126,35 @@ Prebuilt images are published to **GitHub Packages (GHCR)** — no Node install,
 docker pull ghcr.io/arrosam/openkrakey:latest
 ```
 
+**Fully isolated.** The container never touches your machine's files. Config + agent state live
+in **Docker-managed named volumes** (`krakey-config`, `krakey-agents`) — private to the container,
+persisting across restarts, and wiped with `docker compose down -v` (or `docker volume rm`). So you
+can experiment without any risk to your own setup.
+
 **First run — the Console dashboard.** The image launches the unified **Console** (the landing
 page that frames Config · Chat · Inspector), because a fresh install has no agents yet. Watch the
 terminal for the tokened Console URL, open it, and set up your provider + agent in its Config panel:
 
 ```bash
 docker run --rm -p 127.0.0.1:7716:7716 -p 127.0.0.1:7717:7717 \
-  -v "$PWD/config:/app/config" -v "$PWD/agents:/app/agents" \
+  -v krakey-config:/app/config -v krakey-agents:/app/agents \
   ghcr.io/arrosam/openkrakey:latest
 # → ✦ Krakey Console: http://127.0.0.1:7716/?token=…   ← open this
 ```
 
-Then **run the agent** (override the command to launch the runtime):
+Then **run the agent** (override the command to launch the runtime, reusing the same volumes):
 
 ```bash
 docker run --rm -p 127.0.0.1:7718:7718 -p 127.0.0.1:7719:7719 \
-  -v "$PWD/config:/app/config" -v "$PWD/agents:/app/agents" \
+  -v krakey-config:/app/config -v krakey-agents:/app/agents \
   ghcr.io/arrosam/openkrakey:latest node --import tsx packages/boot/src/index.ts
 ```
 
 Or with Compose: `docker compose up` for the Console dashboard, then `docker compose --profile
 run up` for the runtime. To reach the Chat (7718) / Inspector (7719) panels from the host, set
-`"host": "0.0.0.0"` for `web-chat` and `inspector` in `agents/<id>/config.json`.
+`"host": "0.0.0.0"` for `web-chat` and `inspector` in `agents/<id>/config.json`. *(Prefer to share
+your real host config? Swap in a bind mount — `-v "$PWD/config:/app/config"` — but then the
+container reads and writes your actual files.)*
 
 ## What your agent can do
 

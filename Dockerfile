@@ -33,8 +33,12 @@ ENV CONFIG_WEB_HOST=0.0.0.0 \
 # console 7716 · config-web 7717 · web-chat 7718 · inspector 7719
 EXPOSE 7716 7717 7718 7719
 
+# `agents/` is gitignored, so it's never in the build context. Create it here (empty) so
+# that (a) it exists at runtime and (b) a named volume mounted at /app/agents inherits
+# `node` ownership from this dir — otherwise Docker creates the mountpoint as root and the
+# unprivileged `node` user below can't write it (agent creation would fail with EACCES).
 # Drop privileges to the image's built-in unprivileged `node` user.
-RUN chown -R node:node /app
+RUN mkdir -p /app/agents && chown -R node:node /app
 USER node
 
 # tini -g forwards signals to the whole process group, so BOTH dashboard processes
