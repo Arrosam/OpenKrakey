@@ -15,9 +15,10 @@
  * Powerful, so NOT in the default loadout — opt a specific agent into it.
  */
 import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugin";
-import type { ToolDef } from "../../contracts/llm";
+import type { ToolDef, Message } from "../../contracts/llm";
 import { Actions } from "../../shared/actions";
 import { RESTART_SCHEMA } from "./config-schema";
+import { readMarker, writeMarkerSync, deleteMarker, type RestartMarker } from "./marker";
 
 const RESTART_TOOL: ToolDef = {
   name: "restart.now",
@@ -57,9 +58,31 @@ const createRestart: PluginFactory = (): Plugin => {
         dryRun?: unknown;
         guidance?: unknown;
         guidancePriority?: unknown;
+        completedNoticeMaxAgeMs?: unknown;
       };
       const delayMs = typeof cfg.delayMs === "number" && cfg.delayMs >= 0 ? Math.floor(cfg.delayMs) : 1500;
       const dryRun = cfg.dryRun === true;
+      const maxAgeMs =
+        typeof cfg.completedNoticeMaxAgeMs === "number" && cfg.completedNoticeMaxAgeMs >= 0
+          ? Math.floor(cfg.completedNoticeMaxAgeMs)
+          : 300000;
+
+      // ---- restart-completed observability ----
+      // On this (fresh) boot, was there a restart the previous copy requested but
+      // never marked done? If so, and it's recent, tell the agent ONCE that the
+      // restart it asked for has completed — then immediately flip the marker to
+      // completed so a later reboot never re-shows the same notice.
+      let observation: RestartMarker | null = null;
+      const prev = readMarker(ctx.dataDir, ctx.agentId);
+      const age = prev ? Date.now() - prev.requestedAt : 0;
+      const fresh = prev != null && prev.completed === false && age <= maxAgeMs && age >= -60000;
+      if (fresh && prev) {
+        observation = prev;
+        writeMarkerSync(ctx.dataDir, ctx.agentId, { ...prev, completed: true });
+      } else {
+        // Absent / already completed / stale / corrupt: drop it (safe no-op when absent).
+        deleteMarker(ctx.dataDir, ctx.agentId);
+      }
 
       const off = ctx.actions.register("restart.now", async (params: unknown) => {
         const reason = (params as { reason?: unknown })?.reason;
@@ -67,7 +90,15 @@ const createRestart: PluginFactory = (): Plugin => {
         const { exe, args } = launchCommand();
         if (dryRun) {
           ctx.print("restart: DRY RUN — would restart the runtime");
-          return { restarting: false, dryRun: true, command: [exe, ...args], delayMs };
+          return {
+            restarting: false,
+            dryRun: true,
+            command: [exe, ...args],
+            delayMs,
+            note:
+              "DRY RUN - no restart happened. This is only a plan preview. Do NOT call restart.now again to " +
+              "check; to actually restart, an operator must turn off dryRun in the restart config.",
+          };
         }
         // The CORE owns process lifecycle: invoke the GRACEFUL core.restart action so
         // every plugin's teardown runs (flushing best-effort state) before boot exits
@@ -78,11 +109,29 @@ const createRestart: PluginFactory = (): Plugin => {
           ctx.log.warn(
             "restart: core.restart is unavailable — cannot restart (is the runtime started by boot?)",
           );
-          return { restarting: false, error: "core.restart unavailable" };
+          return {
+            restarting: false,
+            error: "core.restart unavailable",
+            note: "Restart is unavailable (not running under the krakey supervisor). Calling again will not help.",
+          };
         }
+        // Drop a breadcrumb the fresh copy reads on the next boot so it can tell the
+        // agent this exact request completed. Best-effort — writeMarkerSync never throws.
+        writeMarkerSync(ctx.dataDir, ctx.agentId, {
+          requestedAt: Date.now(),
+          reason: typeof reason === "string" ? reason : "",
+          completed: false,
+          command: [exe, ...args],
+        });
         ctx.print("restart: restarting the runtime…");
         await ctx.actions.invoke(Actions.CORE_RESTART, { delayMs });
-        return { restarting: true, delayMs };
+        return {
+          restarting: true,
+          delayMs,
+          note:
+            "Restart requested - the runtime is rebooting now. Do NOT call restart.now again; when you wake " +
+            "up this request is complete.",
+        };
       });
 
       const guidanceText =
@@ -93,9 +142,50 @@ const createRestart: PluginFactory = (): Plugin => {
             "apply it. The runtime exits and the krakey supervisor immediately starts a fresh copy — new " +
             "plugins and config apply on the way up. Restarting briefly drops the chat and inspector while the " +
             "runtime cycles — use it deliberately. (The delayMs config is legacy and ignored by the current " +
-            "mechanism; the supervisor applies its own short delay.) </restart.guidance>";
+            "mechanism; the supervisor applies its own short delay.) Calling restart.now reboots the whole " +
+            "runtime. When you wake up after a restart, that request is COMPLETE - the runtime you are running " +
+            "in now IS the fresh copy. NEVER call restart.now again for a request you already made. If you see " +
+            "a [restart completed] notice in your context, the restart already happened and the work is done. " +
+            "</restart.guidance>";
       const priority = typeof cfg.guidancePriority === "number" ? cfg.guidancePriority : 5800;
       ctx.setBlock({ id: "restart.guidance", target: "system", priority, render: () => guidanceText });
+
+      // A PERSISTENT message block registered ONLY on a fresh restart: it injects a
+      // single message telling the agent the request it made has completed, so it
+      // stops trying to restart for it. When the marker is NOT fresh (absent /
+      // completed / stale / corrupt) the block is never registered at all — the
+      // block store returns undefined for its id. Once registered it renders the SAME
+      // message on EVERY frame for the whole boot session; its only removal is
+      // teardown. That the notice never spans MORE than one boot is guaranteed by the
+      // completed:true flip above — NOT by clearing it after the first frame. (A live
+      // test showed a one-shot notice loses the race with web-chat's lingering
+      // "unanswered" status: the model re-derives "I never restarted" on frame 2 and
+      // reboots again.)
+      if (fresh) {
+        ctx.setBlock({
+          id: "restart.observation",
+          target: "messages",
+          priority: 250,
+          render: (): Message[] => {
+            if (!observation) return [];
+            const iso = new Date(observation.requestedAt).toISOString();
+            const reasonClause = observation.reason ? ', reason: "' + observation.reason + '"' : "";
+            return [
+              {
+                role: "user",
+                name: "restart",
+                content:
+                  "[restart completed] The restart you requested at " +
+                  iso +
+                  reasonClause +
+                  " HAS COMPLETED. The runtime you are in now is the fresh copy that restart produced - new " +
+                  "plugins and config are already applied. This request is DONE; do NOT call restart.now again " +
+                  "for it.",
+              },
+            ];
+          },
+        });
+      }
 
       try {
         await ctx.actions.invoke("llm.register_tool", RESTART_TOOL);
@@ -103,7 +193,10 @@ const createRestart: PluginFactory = (): Plugin => {
         ctx.log.warn("restart: failed to register tool: " + String(err));
       }
 
+      // Only wire the observation removeBlock when we actually registered the block —
+      // never call removeBlock for an id that was never set (fresh === false).
       unsubs = [off, () => ctx.removeBlock("restart.guidance")];
+      if (fresh) unsubs.push(() => ctx.removeBlock("restart.observation"));
       ctx.print("restart: self-restart tool ready" + (dryRun ? " (dry run)" : ""));
     },
 

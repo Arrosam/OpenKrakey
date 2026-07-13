@@ -103,7 +103,9 @@ krakey stop         # stops the background instance(s)
 `http://127.0.0.1:7718/?token=…` — open it and start talking. Each message shows a *sent* → *read*
 status as the agent reads it on its next frame.
 
-**Where things live.** Each web surface is loopback-only, access-token gated, and on its own port:
+**Where things live.** Each web surface — the Console included — is loopback-only, access-token
+gated, and on its own port. Open them via the tokened URLs the launcher prints (a bare port URL
+answers 401):
 
 | Surface | Start with | Opens at |
 |---|---|---|
@@ -113,6 +115,46 @@ status as the agent reads it on its next frame.
 | **Inspector** — live, read-only view of the agent's bus | `krakey run` · `krakey start` | `http://127.0.0.1:7719` |
 
 The Console frames the other three — run config-web and at least one agent for its panels to fill in.
+`krakey dashboard` prints all four tokened links (`CONSOLE_TOKEN` pins the Console's token across
+invocations; `npm run console` standalone mints one and prints its own tokened URL).
+
+## Run with Docker
+
+Prebuilt images are published to **GitHub Packages (GHCR)** — no Node install, no build step:
+
+```bash
+docker pull ghcr.io/arrosam/openkrakey:latest
+```
+
+**Fully isolated.** The container never touches your machine's files. Config + agent state live
+in **Docker-managed named volumes** (`krakey-config`, `krakey-agents`) — private to the container,
+persisting across restarts, and wiped with `docker compose down -v` (or `docker volume rm`). So you
+can experiment without any risk to your own setup.
+
+**First run — the Console dashboard.** The image launches the unified **Console** (the landing
+page that frames Config · Chat · Inspector), because a fresh install has no agents yet. Watch the
+terminal for the tokened Console URL, open it, and set up your provider + agent in its Config panel:
+
+```bash
+docker run --rm -p 127.0.0.1:7716:7716 -p 127.0.0.1:7717:7717 \
+  -v krakey-config:/app/config -v krakey-agents:/app/agents \
+  ghcr.io/arrosam/openkrakey:latest
+# → ✦ Krakey Console: http://127.0.0.1:7716/?token=…   ← open this
+```
+
+Then **run the agent** (override the command to launch the runtime, reusing the same volumes):
+
+```bash
+docker run --rm -p 127.0.0.1:7718:7718 -p 127.0.0.1:7719:7719 \
+  -v krakey-config:/app/config -v krakey-agents:/app/agents \
+  ghcr.io/arrosam/openkrakey:latest node --import tsx packages/boot/src/index.ts
+```
+
+Or with Compose: `docker compose up` for the Console dashboard, then `docker compose --profile
+run up` for the runtime. To reach the Chat (7718) / Inspector (7719) panels from the host, set
+`"host": "0.0.0.0"` for `web-chat` and `inspector` in `agents/<id>/config.json`. *(Prefer to share
+your real host config? Swap in a bind mount — `-v "$PWD/config:/app/config"` — but then the
+container reads and writes your actual files.)*
 
 ## What your agent can do
 
@@ -185,8 +227,9 @@ which you can also edit by hand.
 `run`, `start`, and `dashboard` launch the runtime and the web console as child processes; the same
 work is available as `npm start` and `npm run console` if you'd rather not install.
 
-**Prefer a browser?** `krakey dashboard` opens the **unified Console** at `http://127.0.0.1:7716` —
-one nav bar that frames Config, Chat, and Inspector. It also launches **Config** (port 7717) so the
+**Prefer a browser?** `krakey dashboard` opens the **unified Console** at `http://127.0.0.1:7716`
+(with its access token — the tokened URL is printed and opened for you) — one nav bar that frames
+Config, Chat, and Inspector. It also launches **Config** (port 7717) so the
 Config panel is **usable before the runtime is running** — you can set up Krakey from scratch here.
 The Config surface edits the exact same JSON files as `krakey setup` and **auto-renders every
 plugin's settings from the plugin's own schema** (a new plugin shows up with zero UI work), plus a

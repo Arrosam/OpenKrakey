@@ -28,7 +28,17 @@ import type { Plugin, PluginContext, PluginFactory } from "../../contracts/plugi
 import type { Message, ToolDef } from "../../contracts/llm";
 import { Actions, Events } from "../../shared/actions";
 
-import { readConfig, guardPath, guardCommand, truncate, type KrakeycodeConfig } from "./sandbox";
+import {
+  readConfig,
+  guardPath,
+  guardCommand,
+  truncate,
+  upsertFailure,
+  clearFailures,
+  formatFailureNotice,
+  type KrakeycodeConfig,
+  type FailureEntry,
+} from "./sandbox";
 import { KRAKEYCODE_SCHEMA } from "./config-schema";
 
 const GUIDANCE_BLOCK_ID = "krakeycode.guidance";
@@ -343,6 +353,7 @@ function buildDefaultGuidance(cfg: KrakeycodeConfig): string {
 
 const createKrakeycode: PluginFactory = (): Plugin => {
   let results: ResultEntry[] = [];
+  let failures: FailureEntry[] = [];
   let pressureRound = 0;
   let unsubs: Array<() => void> = [];
 
@@ -525,7 +536,16 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         target: "messages",
         priority: config.resultsPriority ?? DEFAULT_RESULTS_PRIORITY,
         render: (): Message[] => {
-          if (results.length === 0) return [];
+          // Persistent-failure notices (one per entry with a run length >= 2) are
+          // PREPENDED to this block so the model sees them before the raw results.
+          const failureMsgs: Message[] = [];
+          for (const f of failures) {
+            const text = formatFailureNotice(f);
+            if (text.length > 0) {
+              failureMsgs.push({ role: "user", name: "krakeycode", content: text } as Message);
+            }
+          }
+          if (results.length === 0) return failureMsgs;
           const maxChars = config.maxResultChars;
           const budget = config.maxResultsTotalChars;
           const headerOf = (r: ResultEntry): string =>
@@ -544,11 +564,12 @@ const createKrakeycode: PluginFactory = (): Plugin => {
             if (i === results.length - 1 || total + len <= budget) { full[i] = true; total += len; }
             else break; // this and all older stay header-only
           }
-          return results.map((r, i) => ({
+          const resultMsgs = results.map((r, i) => ({
             role: "user",
             name: "krakeycode",
             content: full[i] ? headerOf(r) + "\n" + bodyOf(r) : headerOf(r),
           } as Message));
+          return [...failureMsgs, ...resultMsgs];
         },
       });
 
@@ -564,17 +585,27 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         };
         if (typeof p.name !== "string") return;
         if (!OWN_TOOLS.has(p.name)) return;
+        const at = typeof p.at === "number" ? p.at : Date.now();
+        const ok = !!p.ok;
         results = pushResult(
           results,
           {
-            at: typeof p.at === "number" ? p.at : Date.now(),
+            at,
             toolName: p.name,
-            ok: !!p.ok,
+            ok,
             data: p.data,
             error: typeof p.error === "string" ? p.error : undefined,
           },
           config.maxResults,
         );
+        // Persistent-failure ledger: bump the (tool + error) run on failure, and
+        // reset it (drop all entries for the tool) on success. maxFailureNotices
+        // <= 0 disables the ledger entirely. Never throws through this path.
+        if (config.maxFailureNotices > 0) {
+          failures = ok
+            ? clearFailures(failures, p.name)
+            : upsertFailure(failures, p.name, p.error, at, config.maxFailureNotices);
+        }
         if (actions.has(Actions.CLOCK_FIRE_NOW)) {
           actions.invoke(Actions.CLOCK_FIRE_NOW).catch(() => {});
         }
@@ -592,6 +623,10 @@ const createKrakeycode: PluginFactory = (): Plugin => {
         if (round > 0) {
           const toDrop = Math.min(round, results.length);
           if (toDrop > 0) results = results.slice(toDrop);
+          // Shed the oldest persistent-failure notices with the same clamped,
+          // oldest-first slice logic (bounded to length, never throws).
+          const failToDrop = Math.min(round, failures.length);
+          if (failToDrop > 0) failures = failures.slice(failToDrop);
         }
       });
 
@@ -603,6 +638,9 @@ const createKrakeycode: PluginFactory = (): Plugin => {
       const offReturn = events.on(Events.LLM_RETURN, () => {
         results = [];
         pressureRound = 0;
+        // NOTE: `failures` is intentionally NOT cleared here — the persistent-
+        // failure ledger survives across frames (a run only ends when that tool
+        // next succeeds), which is the whole point of the ledger.
       });
 
       unsubs = [
@@ -625,6 +663,7 @@ const createKrakeycode: PluginFactory = (): Plugin => {
       for (const off of unsubs) off();
       unsubs = [];
       results = [];
+      failures = [];
       pressureRound = 0;
     },
   };

@@ -1,0 +1,48 @@
+# OpenKrakey — local run via Docker Compose.
+#
+#   docker compose up --build          # the CONSOLE DASHBOARD (landing page for setup) —
+#                                       # watch the terminal for its tokened
+#                                       # http://127.0.0.1:7716/?token=… URL
+#   docker compose --profile run up     # the agent runtime, once a provider + agent exist
+#   docker compose down -v              # stop AND wipe all data (start fresh next time)
+#
+# ISOLATED BY DEFAULT. Config + agent state live in Docker-managed NAMED VOLUMES, never on
+# your host filesystem — the container cannot see or touch the files on your machine, so you
+# can experiment freely without risking your own setup. The volumes persist across restarts;
+# `docker compose down -v` wipes them for a clean slate.
+#
+# (To DELIBERATELY share your real host config instead, swap a named volume for a bind mount,
+# e.g.  - ./config:/app/config  — but then the container reads AND writes your real files.)
+services:
+  # Default service: the unified Console dashboard — one page framing Config (the setup
+  # wizard), Chat and Inspector. `docker compose up` starts this.
+  krakey:
+    image: ghcr.io/arrosam/openkrakey:latest
+    build: .
+    volumes:
+      - krakey-config:/app/config
+      - krakey-agents:/app/agents
+    ports:
+      - "127.0.0.1:7716:7716" # Console dashboard (the landing page) — host loopback only
+      - "127.0.0.1:7717:7717" # config-web (framed by the Console for setup)
+
+  # The agent runtime — start it AFTER you've configured a provider + agent in the dashboard
+  # above:  docker compose --profile run up   (shares the same isolated volumes)
+  runtime:
+    image: ghcr.io/arrosam/openkrakey:latest
+    build: .
+    profiles: ["run"]
+    command: ["node", "--import", "tsx", "packages/boot/src/index.ts"]
+    volumes:
+      - krakey-config:/app/config
+      - krakey-agents:/app/agents
+    ports:
+      - "127.0.0.1:7718:7718" # web-chat  (set "host":"0.0.0.0" in the agent config)
+      - "127.0.0.1:7719:7719" # inspector (set "host":"0.0.0.0" in the agent config)
+    restart: unless-stopped
+
+# Docker-managed named volumes — private to the container, isolated from the host filesystem.
+# `docker compose down -v` removes them.
+volumes:
+  krakey-config:
+  krakey-agents:
